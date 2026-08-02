@@ -528,7 +528,7 @@ def parse_since(since_str: str):
 
 
 async def call_ai_api(conversation: str, settings: dict) -> str:
-    """Call an OpenAI-compatible API to summarize the conversation."""
+    """Call an OpenAI-compatible API to summarize the conversation (streaming)."""
     headers = {
         "Authorization": f"Bearer {settings['api_key']}",
         "Content-Type": "application/json",
@@ -540,14 +540,34 @@ async def call_ai_api(conversation: str, settings: dict) -> str:
             {"role": "user", "content": conversation},
         ],
         "temperature": 0.3,
+        "stream": True,
     }
+    # Use streaming to avoid long silent waits — collect chunks as they arrive
+    timeout = aiohttp.ClientTimeout(total=300, connect=15, sock_read=60)
+    result_chunks = []
     async with aiohttp.ClientSession() as session:
-        async with session.post(settings["api_url"], json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+        async with session.post(settings["api_url"], json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 raise Exception(f"AI API returned {resp.status}: {error_text[:500]}")
-            data = await resp.json()
-            return data["choices"][0]["message"]["content"]
+            # Read SSE stream
+            async for raw_line in resp.content:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json_module.loads(data_str)
+                    delta = chunk["choices"][0].get("delta", {})
+                    if "content" in delta and delta["content"]:
+                        result_chunks.append(delta["content"])
+                except Exception:
+                    continue
+    if not result_chunks:
+        raise Exception("AI API returned empty response")
+    return "".join(result_chunks)
 
 
 async def api_get_ai_settings(request):
@@ -1640,7 +1660,7 @@ class MeetingGroup(app_commands.Group):
             )
             return
 
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(ephemeral=True)
 
         # Collect messages
         formatted = []
@@ -1681,11 +1701,25 @@ class MeetingGroup(app_commands.Group):
         if len(log_text) > 30000:
             log_text = log_text[:30000] + "\n...（後續訊息已截斷）"
 
-        await interaction.followup.send(f"📝 正在整理 {count} 則訊息，請稍候...", ephemeral=True)
+        # Send progress message
+        progress_msg = await interaction.followup.send(
+            f"📝 正在整理 **{count}** 則訊息，AI 正在思考中... （最多等候 5 分鐘）",
+            ephemeral=True, wait=True
+        )
 
-        # Call AI
+        # Call AI with periodic heartbeat to keep interaction alive
         try:
-            result = await call_ai_api(log_text, ai_settings)
+            ai_task = asyncio.ensure_future(call_ai_api(log_text, ai_settings))
+            elapsed = 0
+            while not ai_task.done():
+                await asyncio.sleep(15)
+                elapsed += 15
+                if not ai_task.done():
+                    try:
+                        await progress_msg.edit(content=f"📝 正在整理 **{count}** 則訊息... ⏱️ 已等候 {elapsed} 秒")
+                    except Exception:
+                        pass
+            result = await ai_task
         except Exception as e:
             await interaction.followup.send(f"❌ AI 整理失敗：{e}", ephemeral=True)
             return
@@ -1698,7 +1732,13 @@ class MeetingGroup(app_commands.Group):
         )
         embed.set_footer(text=f"由 {interaction.user.display_name} 整理")
 
-        if len(result) <= 4096:
+        # Delete the progress message and post the result
+        try:
+            await progress_msg.delete()
+        except Exception:
+            pass
+
+        if len(result) <= 4000:
             embed.add_field(name="會議紀錄", value=result, inline=False)
             await interaction.followup.send(embed=embed)
         else:
@@ -1718,10 +1758,10 @@ class MeetingGroup(app_commands.Group):
             return
         await interaction.response.defer(thinking=True)
         try:
-            result = await call_ai_api("請回覆：AI 連線測試成功！", ai_settings)
-            await interaction.followup.send(f"✅ AI API 連線成功！\n模型：{ai_settings['model']}\n回覆：{result}")
+            result = await call_ai_api("請回覆：AI 連線測試成功！只需一句話。", ai_settings)
+            await interaction.followup.send(f"✅ AI API 連線成功！\n模型：{ai_settings['model']}\n回覆：{result}", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"❌ AI API 連線失敗：{e}")
+            await interaction.followup.send(f"❌ AI API 連線失敗：{e}", ephemeral=True)
 
 
 # ──────────────────────────────────────────────
