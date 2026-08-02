@@ -20,6 +20,8 @@
   AI_API_KEY    - AI API 金鑰（也可在 Dashboard 中設定）
   AI_MODEL      - AI 模型名稱（預設 gpt-4o-mini，也可在 Dashboard 中設定）
   AI_SYSTEM_PROMPT - AI 系統提示詞（預設為會議紀錄整理格式）
+  COOKIE_SECRET   - Session 簽名密鑰（不設則每次重啟隨機生成，建議固定設定）
+  持久化：投票資料存於 data/polls_data.json，建議在 Render 掛載 Persistent Disk 以跨部署保留
 
 指令一覽：
   /poll create <title> [mode]     建立新投票（管理員限定）
@@ -50,6 +52,9 @@ import aiohttp
 import random
 import string
 import re
+import hmac
+import hashlib
+import json as json_module
 from datetime import datetime, timedelta
 from aiohttp import web
 
@@ -127,11 +132,34 @@ async def keep_alive_server():
 # Dashboard: OAuth2 & Session
 # ──────────────────────────────────────────────
 
-dashboard_sessions: dict = {}
+# ──────────────────────────────────────────────
+# Dashboard: OAuth2 & Session (signed cookies - survives restarts/redeploys)
+# ──────────────────────────────────────────────
+
+COOKIE_SECRET = os.getenv("COOKIE_SECRET", py_secrets.token_urlsafe(32))
 
 OAUTH_CLIENT_ID = os.getenv("OAUTH_CLIENT_ID", "")
 OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", "")
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "")
+
+
+def _create_signed_cookie(data: dict) -> str:
+    """Create an HMAC-signed cookie containing user data."""
+    payload = __import__("base64").b64encode(json_module.dumps(data).encode()).decode()
+    sig = hmac.new(COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _verify_signed_cookie(cookie: str) -> dict:
+    """Verify and decode a signed cookie. Returns None if invalid."""
+    try:
+        payload, sig = cookie.rsplit(".", 1)
+        expected = hmac.new(COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        return json_module.loads(__import__("base64").b64decode(payload))
+    except Exception:
+        return None
 
 
 def _read_dashboard_html():
@@ -144,10 +172,10 @@ def _read_dashboard_html():
 
 
 async def _get_session_user(request):
-    token = request.cookies.get("session")
-    if not token or token not in dashboard_sessions:
+    cookie = request.cookies.get("session")
+    if not cookie:
         return None
-    return dashboard_sessions[token]
+    return _verify_signed_cookie(cookie)
 
 
 def _is_guild_admin(guild_entry):
@@ -209,23 +237,20 @@ async def dashboard_callback(request):
             u = await resp.json()
         async with sess.get("https://discord.com/api/users/@me/guilds", headers=h) as resp:
             g = await resp.json()
-    st = py_secrets.token_urlsafe(32)
-    dashboard_sessions[st] = {
+    user_data = {
         "user_id": u.get("id", ""),
         "username": u.get("username", "unknown"),
         "avatar": u.get("avatar"),
         "access_token": tk,
         "guilds": g if isinstance(g, list) else [],
     }
+    signed = _create_signed_cookie(user_data)
     r = web.HTTPFound("/dashboard")
-    r.set_cookie("session", st, httponly=True, samesite="Lax", max_age=86400)
+    r.set_cookie("session", signed, httponly=True, samesite="Lax", max_age=86400 * 7)
     return r
 
 
 async def dashboard_logout(request):
-    t = request.cookies.get("session")
-    if t and t in dashboard_sessions:
-        del dashboard_sessions[t]
     r = web.HTTPFound("/dashboard")
     r.del_cookie("session")
     return r
@@ -294,6 +319,7 @@ async def api_create_poll(request):
     poll.options = [PollOption(text=o.strip()) for o in body.get("options", []) if o.strip()]
     poll.status = "drafting"
     polls[pid] = poll
+    save_polls_to_disk()
     return web.json_response(_poll_to_dict(poll))
 
 
@@ -313,6 +339,7 @@ async def api_start_poll(request):
     if poll.option_count() < 2:
         return web.json_response({"error": "need 2+ options"}, status=400)
     poll.status = "active"
+    save_polls_to_disk()
     return web.json_response(_poll_to_dict(poll))
 
 
@@ -330,6 +357,7 @@ async def api_end_poll(request):
     if poll.status != "active":
         return web.json_response({"error": "not active"}, status=400)
     poll.status = "ended"
+    save_polls_to_disk()
     return web.json_response(_poll_to_dict(poll))
 
 
@@ -345,6 +373,7 @@ async def api_delete_poll(request):
     if request.match_info["pid"] not in polls:
         return web.json_response({"error": "not found"}, status=404)
     del polls[request.match_info["pid"]]
+    save_polls_to_disk()
     return web.json_response({"ok": True})
 
 
@@ -368,6 +397,7 @@ async def api_add_option(request):
     if not text:
         return web.json_response({"error": "empty text"}, status=400)
     poll.options.append(PollOption(text=text))
+    save_polls_to_disk()
     return web.json_response(_poll_to_dict(poll))
 
 
@@ -384,6 +414,7 @@ async def api_set_roles(request):
         return web.json_response({"error": "not found"}, status=404)
     body = await request.json()
     poll.allowed_roles = [int(r) for r in body.get("role_ids", [])]
+    save_polls_to_disk()
     return web.json_response(_poll_to_dict(poll))
 
 
@@ -585,6 +616,74 @@ class Poll:
 guild_polls: Dict[int, Dict[str, Poll]] = {}
 
 
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "polls_data.json")
+
+
+def save_polls_to_disk():
+    """Save all polls to disk for persistence across restarts."""
+    try:
+        os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+        serializable = {}
+        for gid, polls in guild_polls.items():
+            serializable[str(gid)] = {}
+            for pid, poll in polls.items():
+                serializable[str(gid)][pid] = {
+                    "poll_id": poll.poll_id,
+                    "title": poll.title,
+                    "mode": poll.mode,
+                    "status": poll.status,
+                    "options": [{"text": o.text} for o in poll.options],
+                    "votes": {str(k): v for k, v in poll.votes.items()},
+                    "message_id": poll.message_id,
+                    "created_by": poll.created_by,
+                    "allowed_roles": poll.allowed_roles,
+                    "description": getattr(poll, "description", ""),
+                }
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(serializable, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Failed to save polls: {e}")
+
+
+def load_polls_from_disk():
+    """Load polls from disk on startup."""
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json_module.load(f)
+            total = 0
+            for gid_str, polls in data.items():
+                gid = int(gid_str)
+                guild_polls[gid] = {}
+                for pid, p in polls.items():
+                    poll = Poll(
+                        poll_id=p["poll_id"],
+                        title=p["title"],
+                        mode=p.get("mode", "borda"),
+                    )
+                    poll.status = p.get("status", "drafting")
+                    poll.message_id = p.get("message_id")
+                    poll.created_by = p.get("created_by", 0)
+                    poll.allowed_roles = p.get("allowed_roles", [])
+                    if p.get("description"):
+                        poll.description = p["description"]
+                    for o in p.get("options", []):
+                        poll.add_option(o["text"])
+                    poll.votes = {int(k): v for k, v in p.get("votes", {}).items()}
+                    guild_polls[gid][pid] = poll
+                    total += 1
+            print(f"✅ 從磁碟載入 {total} 個投票")
+    except Exception as e:
+        print(f"⚠️ Failed to load polls: {e}")
+
+
+async def auto_save_loop():
+    """Background task: save polls every 30 seconds."""
+    while True:
+        await asyncio.sleep(30)
+        save_polls_to_disk()
+
+
 def get_poll(guild_id: int, poll_id: str) -> Optional[Poll]:
     return guild_polls.get(guild_id, {}).get(poll_id)
 
@@ -636,8 +735,11 @@ async def on_ready():
 
 @bot.event
 async def setup_hook():
+    load_polls_from_disk()
+    save_polls_to_disk()  # Create file if not exists
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
+    asyncio.ensure_future(auto_save_loop())
 
 
 # ──────────────────────────────────────────────
@@ -692,6 +794,7 @@ class RankVoteView(discord.ui.View):
 
         if rank_num >= n:
             self.poll.votes[interaction.user.id] = list(self._current_rank)
+            save_polls_to_disk()
             ranking_text = "\n".join(
                 f"{i+1}. {self.poll.options[idx].text}"
                 for i, idx in enumerate(self._current_rank)
@@ -760,6 +863,7 @@ class SimpleVoteView(discord.ui.View):
                 await interaction.response.send_message("⚠️ 你已經投過票了。", ephemeral=True)
                 return
             self.poll.votes[interaction.user.id] = idx
+            save_polls_to_disk()
             await interaction.response.send_message(
                 f"✅ 已投票給 **{self.poll.options[idx].text}**！謝謝參與。",
                 ephemeral=True,
@@ -825,6 +929,7 @@ class RoleSelectView(discord.ui.View):
             await interaction.response.send_message("❌ 此面板僅限管理員使用。", ephemeral=True)
             return
         self.poll.allowed_roles = []
+        save_polls_to_disk()
         await interaction.response.send_message("🔓 已清除身分組限制，所有人皆可投票。", ephemeral=True)
         self.manage_view._refresh_select()
         embed = self.manage_view._poll_detail_embed(self.poll)
@@ -985,6 +1090,7 @@ class ManagePanelView(discord.ui.View):
             return
 
         poll.status = "active"
+        save_polls_to_disk()
 
         if poll.mode == "borda":
             embed = discord.Embed(
@@ -1035,6 +1141,7 @@ class ManagePanelView(discord.ui.View):
             return
 
         poll.status = "ended"
+        save_polls_to_disk()
         scores = poll.tally()
         total_votes = poll.vote_count()
         n = poll.option_count()
@@ -1162,6 +1269,7 @@ class ManagePanelView(discord.ui.View):
             await interaction.response.send_message("❌ 找不到投票。", ephemeral=True)
             return
         del guild_polls[self.guild_id][self.selected_poll_id]
+        save_polls_to_disk()
         self.selected_poll_id = None
         self._refresh_select()
         embed = self._guild_overview_embed()
@@ -1203,6 +1311,7 @@ class PollGroup(app_commands.Group):
             created_by=interaction.user.id,
         )
         guild_polls[guild_id][poll_id] = poll
+        save_polls_to_disk()
 
         await interaction.response.send_message(
             f"📝 投票「**{title}**」已建立！\n"
@@ -1228,6 +1337,7 @@ class PollGroup(app_commands.Group):
             await interaction.response.send_message("❌ Discord 上限 25 個選項。", ephemeral=True)
             return
         poll.add_option(option)
+        save_polls_to_disk()
         await interaction.response.send_message(
             f"✅ 已新增選項 **{option}**（目前共 {poll.option_count()} 個選項）\n"
             f"投票 ID：`{poll_id}`\n"
@@ -1291,6 +1401,7 @@ class PollGroup(app_commands.Group):
             return
 
         poll.status = "active"
+        save_polls_to_disk()
 
         if poll.mode == "borda":
             embed = discord.Embed(
@@ -1340,6 +1451,7 @@ class PollGroup(app_commands.Group):
             return
 
         poll.status = "ended"
+        save_polls_to_disk()
         scores = poll.tally()
         total_votes = poll.vote_count()
         n = poll.option_count()
@@ -1441,7 +1553,8 @@ class PollGroup(app_commands.Group):
             PollOption(text="選項 B"),
             PollOption(text="選項 C"),
         ]
-        poll.status = "active"  # 直接啟動，方便立即測試
+        poll.status = "active"
+        save_polls_to_disk()  # 直接啟動，方便立即測試
         polls[poll_id] = poll
 
         embed = discord.Embed(
