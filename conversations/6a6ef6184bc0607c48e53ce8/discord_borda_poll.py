@@ -21,6 +21,18 @@
   AI_MODEL      - AI 模型名稱（預設 gpt-4o-mini，也可在 Dashboard 中設定）
   AI_SYSTEM_PROMPT - AI 系統提示詞（預設為會議紀錄整理格式）
   COOKIE_SECRET   - Session 簽名密鑰（不設則每次重啟隨機生成，建議固定設定）
+
+  快報/公報設定存於 data/briefing_settings.json
+  快報/公報指令：
+    /briefing daily_set <time> <channel>  - 設定每日自動快報
+    /briefing daily_off                    - 關閉每日自動快報
+    /briefing daily_now [channel]          - 立即生成每日快報
+    /briefing weekly_set <day> <time> <channel> - 設定每週自動公報
+    /briefing weekly_off                   - 關閉每週自動公報
+    /briefing weekly_now [channel]         - 立即生成每週公報
+    /briefing status                       - 查看設定
+
+  注意：message_content intent 必須在 Discord Developer Portal 中啟用
   持久化：投票資料存於 data/polls_data.json，建議在 Render 掛載 Persistent Disk 以跨部署保留
 
 指令一覽：
@@ -469,6 +481,227 @@ DEFAULT_AI_SYSTEM_PROMPT = """你是一個專業的議會會議紀錄整理助�
 
 請用繁體中文輸出，保持客觀中立的語氣。如果對話中沒有明確的議題分界，請根據內容自動歸類。只整理有意義的討論內容，忽略閒聊和系統訊息。"""
 
+DAILY_BRIEFING_PROMPT = """你是一個微國家組織的每日快報整理助手。請根據以下 Discord 伺服器過去 24 小時所有頻道的對話紀錄，整理出一份簡潔的每日快報。
+
+格式：
+## 📰 每日快報
+
+### 📋 重要事項
+列出最重要的 2-3 件事
+
+### 💬 各頻道摘要
+每個有討論的頻道 1-2 句摘要
+
+### 📊 投票動態
+進行中或剛結束的投票（如有）
+
+### 📌 待辦事項
+提到的待辦或未完成事項（如有）
+
+用繁體中文，簡潔有力。只整理有意義的討論，忽略閒聊和系統訊息。如果某個區塊沒有內容就省略。"""
+
+WEEKLY_BULLETIN_PROMPT = """你是一個微國家組織的每週公報整理助手。請根據以下 Discord 伺服器過去 7 天所有頻道的對話紀錄，整理出一份結構化的每週公報。
+
+格式：
+## 📰 每週公報
+
+### 📋 本週大事
+本週最重要的 3-5 件事
+
+### 💬 各頻道摘要
+每個頻道的主要討論和決策
+
+### 📊 投票與決議
+本週所有投票結果（如有）
+
+### 📌 下週待辦
+預計討論或處理的事項（如有）
+
+用繁體中文，正式但不失親切。只整理有意義的內容，忽略閒聊。如果某個區塊沒有內容就省略。"""
+
+WEEKDAY_NAMES = {0: "週一", 1: "週二", 2: "週三", 3: "週四", 4: "週五", 5: "週六", 6: "週日"}
+
+# 快報/公報設定（持久化到磁碟）
+briefing_settings = {
+    "daily_enabled": False,
+    "daily_time": "23:00",
+    "daily_channel_id": None,
+    "weekly_enabled": False,
+    "weekly_day": 6,  # 0=週一, 6=週日
+    "weekly_time": "23:00",
+    "weekly_channel_id": None,
+}
+
+BRIEFING_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "briefing_settings.json")
+
+
+def save_briefing_settings():
+    try:
+        os.makedirs(os.path.dirname(BRIEFING_DATA_FILE), exist_ok=True)
+        with open(BRIEFING_DATA_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(briefing_settings, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Failed to save briefing settings: {e}")
+
+
+def load_briefing_settings():
+    global briefing_settings
+    try:
+        if os.path.exists(BRIEFING_DATA_FILE):
+            with open(BRIEFING_DATA_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+            briefing_settings.update(loaded)
+            print("✅ 載入快報設定")
+    except Exception as e:
+        print(f"⚠️ Failed to load briefing settings: {e}")
+
+
+async def collect_all_messages(hours: int, max_per_channel: int = 80) -> str:
+    """Collect messages from all text channels in all guilds."""
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    sections = []
+
+    for guild in bot.guilds:
+        for channel in guild.text_channels:
+            try:
+                channel_msgs = []
+                async for msg in channel.history(after=cutoff, limit=max_per_channel):
+                    if msg.author.bot:
+                        continue
+                    text = msg.content.strip()
+                    if not text:
+                        if msg.attachments:
+                            text = f"[附件 x{len(msg.attachments)}]"
+                        elif msg.embeds:
+                            text = f"[嵌入訊息]"
+                        else:
+                            continue
+                    if len(text) > 300:
+                        text = text[:300] + "..."
+                    time_str = msg.created_at.strftime("%m/%d %H:%M")
+                    name = msg.author.display_name
+                    channel_msgs.append(f"[{time_str}] {name}: {text}")
+
+                if channel_msgs:
+                    sections.append(f"### #{channel.name} ({len(channel_msgs)} 則)")
+                    sections.extend(channel_msgs)
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+
+    return "\n".join(sections)
+
+
+async def run_briefing(target_channel: discord.TextChannel, hours: int, mode: str):
+    """Collect all server messages and generate a briefing with AI streaming."""
+    is_daily = mode == "daily"
+    title = "📰 每日快報" if is_daily else "📰 每週公報"
+    prompt = DAILY_BRIEFING_PROMPT if is_daily else WEEKLY_BULLETIN_PROMPT
+
+    # Send initial message
+    live_msg = await target_channel.send(f"{title}\n📝 正在收集各頻道訊息...")
+
+    # Collect messages
+    log_text = await collect_all_messages(hours=hours, max_per_channel=100 if is_daily else 150)
+
+    if not log_text.strip():
+        await live_msg.edit(content=f"{title}\n📭 指定時間內未找到任何訊息。")
+        return
+
+    if len(log_text) > 30000:
+        log_text = log_text[:30000] + "\n...（後續訊息已截斷）"
+
+    # Use a custom system prompt for briefings
+    settings = dict(ai_settings)
+    settings["system_prompt"] = prompt
+
+    await live_msg.edit(content=f"{title}\n📝 收集完成，AI 開始生成{'每日快報' if is_daily else '每週公報'}...")
+
+    accumulated = ""
+    last_edit = 0.0
+    import time as _time
+
+    try:
+        async for chunk in call_ai_api_stream(log_text, settings):
+            accumulated += chunk
+            now = _time.time()
+            if now - last_edit >= 1.5:
+                last_edit = now
+                header = f"{title}\n"
+                display = header + accumulated
+                if len(display) > 1950:
+                    max_body = 1950 - len(header) - 5
+                    display = header + accumulated[:max_body] + "\n⏳..."
+                try:
+                    await live_msg.edit(content=display)
+                except Exception:
+                    pass
+
+        # Final output
+        full_text = f"{title}\n" + accumulated
+        if len(full_text) <= 2000:
+            await live_msg.edit(content=full_text)
+        else:
+            import io
+            await live_msg.edit(content=f"{title}\n✅ 已生成（完整內容見下方附件）")
+            file_content = f"# {title}\n# 生成時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n# 涵蓋範圍：過去 {hours} 小時\n\n---\n\n{accumulated}"
+            file = discord.File(
+                io.BytesIO(file_content.encode("utf-8")),
+                filename=f"{'daily_briefing' if is_daily else 'weekly_bulletin'}_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+            )
+            await target_channel.send(file=file)
+
+    except Exception as e:
+        try:
+            await live_msg.edit(content=f"{title}\n❌ AI 整理失敗：{e}")
+        except Exception:
+            await target_channel.send(f"{title}\n❌ AI 整理失敗：{e}")
+
+
+async def daily_briefing_scheduler():
+    """Background task: run daily briefing at scheduled time."""
+    last_run_date = None
+    while True:
+        await asyncio.sleep(60)
+        if not briefing_settings["daily_enabled"]:
+            last_run_date = None
+            continue
+        now = datetime.now()
+        if now.strftime("%H:%M") == briefing_settings.get("daily_time", "23:00"):
+            today_key = now.date().isoformat()
+            if today_key != last_run_date:
+                last_run_date = today_key
+                channel_id = briefing_settings.get("daily_channel_id")
+                if channel_id:
+                    channel = bot.get_channel(channel_id)
+                    if channel:
+                        print(f"⏰ 自動執行每日快報...")
+                        await run_briefing(channel, hours=24, mode="daily")
+                        print(f"✅ 每日快報完成")
+
+
+async def weekly_briefing_scheduler():
+    """Background task: run weekly bulletin at scheduled day+time."""
+    last_run_date = None
+    while True:
+        await asyncio.sleep(60)
+        if not briefing_settings["weekly_enabled"]:
+            last_run_date = None
+            continue
+        now = datetime.now()
+        target_day = int(briefing_settings.get("weekly_day", 6))
+        if now.weekday() == target_day and now.strftime("%H:%M") == briefing_settings.get("weekly_time", "23:00"):
+            today_key = now.date().isoformat()
+            if today_key != last_run_date:
+                last_run_date = today_key
+                channel_id = briefing_settings.get("weekly_channel_id")
+                if channel_id:
+                    channel = bot.get_channel(channel_id)
+                    if channel:
+                        print(f"⏰ 自動執行每週公報...")
+                        await run_briefing(channel, hours=168, mode="weekly")
+                        print(f"✅ 每週公報完成")
+
+
 ai_settings = {
     "api_url": os.getenv("AI_API_URL", "https://api.openai.com/v1/chat/completions"),
     "api_key": os.getenv("AI_API_KEY", ""),
@@ -798,6 +1031,7 @@ def mode_name(mode: str) -> str:
 # ──────────────────────────────────────────────
 
 intents = discord.Intents.default()
+intents.message_content = True  # Needed to read message content from channel history
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -805,6 +1039,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     bot.tree.add_command(PollGroup())
     bot.tree.add_command(MeetingGroup())
+    bot.tree.add_command(BriefingGroup())
     try:
         synced = await bot.tree.sync()
         print(f"✅ Bot 上線：{bot.user}（已同步 {len(synced)} 個 slash commands）")
@@ -816,9 +1051,13 @@ async def on_ready():
 async def setup_hook():
     load_polls_from_disk()
     save_polls_to_disk()  # Create file if not exists
+    load_briefing_settings()
+    save_briefing_settings()  # Create file if not exists
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
     asyncio.ensure_future(auto_save_loop())
+    asyncio.ensure_future(daily_briefing_scheduler())
+    asyncio.ensure_future(weekly_briefing_scheduler())
 
 
 # ──────────────────────────────────────────────
@@ -1813,6 +2052,143 @@ class MeetingGroup(app_commands.Group):
             await interaction.followup.send(f"✅ AI API 連線成功！\n模型：{ai_settings['model']}\n回覆：{result}", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ AI API 連線失敗：{e}", ephemeral=True)
+
+
+# ──────────────────────────────────────────────
+# 快報與公報指令
+# ──────────────────────────────────────────────
+
+class BriefingGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="briefing", description="每日快報與每週公報")
+
+    @app_commands.command(name="daily_set", description="設定每日自動快報時間（管理員限定）")
+    @app_commands.describe(time="執行時間 HH:MM（例如：23:00）", channel="發佈快報的頻道")
+    async def daily_set(self, interaction: discord.Interaction, time: str, channel: discord.TextChannel):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        # Validate time format
+        try:
+            h, m = time.strip().split(":")
+            if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                raise ValueError
+        except Exception:
+            await interaction.response.send_message("❌ 時間格式錯誤。請用 HH:MM 格式，例如 `23:00`。", ephemeral=True)
+            return
+        briefing_settings["daily_enabled"] = True
+        briefing_settings["daily_time"] = time.strip()
+        briefing_settings["daily_channel_id"] = channel.id
+        save_briefing_settings()
+        await interaction.response.send_message(
+            f"✅ 每日快報已設定\n⏰ 每天 `{time.strip()}` 自動發佈到 {channel.mention}",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="daily_off", description="關閉每日自動快報（管理員限定）")
+    async def daily_off(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        briefing_settings["daily_enabled"] = False
+        save_briefing_settings()
+        await interaction.response.send_message("✅ 每日自動快報已關閉。可用 `/briefing daily_now` 手動執行。", ephemeral=True)
+
+    @app_commands.command(name="daily_now", description="立即生成每日快報（管理員限定）")
+    @app_commands.describe(channel="發佈快報的頻道（預設：當前頻道）")
+    async def daily_now(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        if not ai_settings["api_key"]:
+            await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定。", ephemeral=True)
+            return
+        target = channel or interaction.channel
+        await interaction.response.send_message(f"📝 每日快報開始生成，請到 {target.mention} 查看。", ephemeral=True)
+        await run_briefing(target, hours=24, mode="daily")
+
+    @app_commands.command(name="weekly_set", description="設定每週自動公報時間（管理員限定）")
+    @app_commands.describe(
+        day="星期幾",
+        time="執行時間 HH:MM",
+        channel="發佈公報的頻道",
+    )
+    @app_commands.choices(day=[
+        app_commands.Choice(name="週一", value="0"),
+        app_commands.Choice(name="週二", value="1"),
+        app_commands.Choice(name="週三", value="2"),
+        app_commands.Choice(name="週四", value="3"),
+        app_commands.Choice(name="週五", value="4"),
+        app_commands.Choice(name="週六", value="5"),
+        app_commands.Choice(name="週日", value="6"),
+    ])
+    async def weekly_set(self, interaction: discord.Interaction, day: app_commands.Choice[str], time: str, channel: discord.TextChannel):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        try:
+            h, m = time.strip().split(":")
+            if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                raise ValueError
+        except Exception:
+            await interaction.response.send_message("❌ 時間格式錯誤。請用 HH:MM 格式，例如 `23:00`。", ephemeral=True)
+            return
+        briefing_settings["weekly_enabled"] = True
+        briefing_settings["weekly_day"] = int(day.value)
+        briefing_settings["weekly_time"] = time.strip()
+        briefing_settings["weekly_channel_id"] = channel.id
+        save_briefing_settings()
+        day_name = WEEKDAY_NAMES.get(int(day.value), day.name)
+        await interaction.response.send_message(
+            f"✅ 每週公報已設定\n⏰ 每{day_name} `{time.strip()}` 自動發佈到 {channel.mention}",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="weekly_off", description="關閉每週自動公報（管理員限定）")
+    async def weekly_off(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        briefing_settings["weekly_enabled"] = False
+        save_briefing_settings()
+        await interaction.response.send_message("✅ 每週自動公報已關閉。可用 `/briefing weekly_now` 手動執行。", ephemeral=True)
+
+    @app_commands.command(name="weekly_now", description="立即生成每週公報（管理員限定）")
+    @app_commands.describe(channel="發佈公報的頻道（預設：當前頻道）")
+    async def weekly_now(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        if not ai_settings["api_key"]:
+            await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定。", ephemeral=True)
+            return
+        target = channel or interaction.channel
+        await interaction.response.send_message(f"📝 每週公報開始生成，請到 {target.mention} 查看。", ephemeral=True)
+        await run_briefing(target, hours=168, mode="weekly")
+
+    @app_commands.command(name="status", description="查看快報與公報設定")
+    async def briefing_status(self, interaction: discord.Interaction):
+        daily_on = "✅ 開啟" if briefing_settings["daily_enabled"] else "❌ 關閉"
+        weekly_on = "✅ 開啟" if briefing_settings["weekly_enabled"] else "❌ 關閉"
+        daily_time = briefing_settings.get("daily_time", "23:00")
+        daily_ch = f"<#{briefing_settings['daily_channel_id']}>" if briefing_settings.get("daily_channel_id") else "未設定"
+        weekly_day_name = WEEKDAY_NAMES.get(int(briefing_settings.get("weekly_day", 6)), "週日")
+        weekly_time = briefing_settings.get("weekly_time", "23:00")
+        weekly_ch = f"<#{briefing_settings['weekly_channel_id']}>" if briefing_settings.get("weekly_channel_id") else "未設定"
+
+        embed = discord.Embed(title="📰 快報與公報設定", color=discord.Color.blue())
+        embed.add_field(
+            name="📊 每日快報",
+            value=f"狀態：{daily_on}\n時間：每天 `{daily_time}`\n頻道：{daily_ch}",
+            inline=False
+        )
+        embed.add_field(
+            name="📋 每週公報",
+            value=f"狀態：{weekly_on}\n時間：每{weekly_day_name} `{weekly_time}`\n頻道：{weekly_ch}",
+            inline=False
+        )
+        embed.set_footer(text="使用 /briefing daily_set, weekly_set 設定 | daily_off, weekly_off 關閉")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ──────────────────────────────────────────────
