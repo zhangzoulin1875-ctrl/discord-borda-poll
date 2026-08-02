@@ -22,6 +22,7 @@
 <nav class="bg-[#2b2d31] border-b border-black/30 px-6 py-3 flex items-center justify-between sticky top-0 z-50">
   <div class="flex items-center gap-3">
     <button onclick="navigate('guilds')" class="text-xl font-bold text-[#5865f2]">ICEA official</button>
+    <button onclick="showAISettings()" class="text-sm text-gray-400 hover:text-white ml-4">⚙️ AI 設定</button>
   </div>
   <div id="nav-user" class="hidden flex items-center gap-3">
     <img id="nav-avatar" class="w-8 h-8 rounded-full" src="">
@@ -425,7 +426,55 @@ async function addOption() {
 }
 
 async function logout() { await fetch('/logout', { method: 'POST', credentials: 'include' }); location.reload(); }
+// AI Settings
+async function showAISettings() {
+  document.getElementById('ai-modal').classList.remove('hidden');
+  // Load current settings
+  const s = await api('/api/ai-settings');
+  if (s.error) { alert('載入設定失敗：' + s.error); return; }
+  document.getElementById('ai-api-url').value = s.api_url || '';
+  document.getElementById('ai-api-key').placeholder = s.has_key ? '已設定（' + s.api_key_masked + '）輸入新值可覆蓋' : '輸入 API Key';
+  document.getElementById('ai-model').value = s.model || 'gpt-4o-mini';
+  document.getElementById('ai-system-prompt').value = s.system_prompt || '';
+}
+
+function closeAISettings() { document.getElementById('ai-modal').classList.add('hidden'); }
+
+async function saveAISettings() {
+  const data = {
+    api_url: document.getElementById('ai-api-url').value.trim(),
+    api_key: document.getElementById('ai-api-key').value.trim(),
+    model: document.getElementById('ai-model').value.trim(),
+    system_prompt: document.getElementById('ai-system-prompt').value,
+  };
+  if (!data.api_key) delete data.api_key; // Don't overwrite with empty
+  const r = await api('/api/ai-settings', 'PUT', data);
+  if (r.error) { alert('儲存失敗：' + r.error); return; }
+  closeAISettings();
+  alert('✅ AI 設定已儲存！');
+}
+
 init();
 </script>
+<!-- AI Settings Modal -->
+<div id="ai-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+  <div class="bg-[#2b2d31] rounded-xl p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
+    <h3 class="text-lg font-bold mb-4">⚙️ AI 會議紀錄設定</h3>
+    <p class="text-xs text-gray-400 mb-4">用於 <code class="bg-[#1e1f22] px-1 rounded">/meeting adjourn</code> 自動整理會議紀錄。支援 OpenAI 相容 API。</p>
+    <label class="block text-sm text-gray-400 mb-1">API 端點 URL</label>
+    <input id="ai-api-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/chat/completions">
+    <label class="block text-sm text-gray-400 mb-1">API Key</label>
+    <input id="ai-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
+    <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
+    <input id="ai-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+    <label class="block text-sm text-gray-400 mb-1">系統提示詞（System Prompt）</label>
+    <textarea id="ai-system-prompt" rows="6" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] resize-none text-sm" placeholder="定義 AI 整理會議紀錄的格式和風格"></textarea>
+    <div class="flex justify-end gap-2 mt-4">
+      <button onclick="closeAISettings()" class="px-4 py-2 text-gray-400 hover:text-white">取消</button>
+      <button onclick="saveAISettings()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg font-semibold text-sm">儲存</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
