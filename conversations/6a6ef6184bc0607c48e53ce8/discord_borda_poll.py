@@ -237,12 +237,12 @@ async def dashboard_callback(request):
             u = await resp.json()
         async with sess.get("https://discord.com/api/users/@me/guilds", headers=h) as resp:
             g = await resp.json()
+    # Store only essential data in cookie (keep it small - browsers limit ~4KB)
     user_data = {
         "user_id": u.get("id", ""),
         "username": u.get("username", "unknown"),
         "avatar": u.get("avatar"),
         "access_token": tk,
-        "guilds": g if isinstance(g, list) else [],
     }
     signed = _create_signed_cookie(user_data)
     r = web.HTTPFound("/dashboard")
@@ -256,12 +256,25 @@ async def dashboard_logout(request):
     return r
 
 
+async def _fetch_guilds(access_token):
+    """Fetch user's guilds from Discord API."""
+    try:
+        h = {"Authorization": f"Bearer {access_token}"}
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get("https://discord.com/api/users/@me/guilds", headers=h) as resp:
+                g = await resp.json()
+                return g if isinstance(g, list) else []
+    except Exception:
+        return []
+
+
 async def api_me(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     av = f"https://cdn.discordapp.com/avatars/{user['user_id']}/{user['avatar']}.png" if user.get("avatar") else "https://cdn.discordapp.com/embed/avatars/0.png"
-    ag = [g for g in user["guilds"] if _is_guild_admin(g)]
+    guilds = await _fetch_guilds(user["access_token"])
+    ag = [g for g in guilds if _is_guild_admin(g)]
     return web.json_response({"username": user["username"], "avatar_url": av, "admin_guild_count": len(ag)})
 
 
@@ -269,8 +282,9 @@ async def api_guilds(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
+    guilds = await _fetch_guilds(user["access_token"])
     out = []
-    for g in user["guilds"]:
+    for g in guilds:
         if _is_guild_admin(g):
             ic = f"https://cdn.discordapp.com/icons/{g['id']}/{g['icon']}.png" if g.get("icon") else None
             out.append({"id": g["id"], "name": g["name"], "icon_url": ic})
@@ -282,7 +296,8 @@ async def api_polls(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
-    ge = next((g for g in user["guilds"] if int(g["id"]) == gid), None)
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
         return web.json_response({"error": "forbidden"}, status=403)
     polls = guild_polls.get(gid, {})
@@ -294,7 +309,8 @@ async def api_poll_detail(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
-    ge = next((g for g in user["guilds"] if int(g["id"]) == gid), None)
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
         return web.json_response({"error": "forbidden"}, status=403)
     poll = get_poll(gid, request.match_info["pid"])
@@ -308,7 +324,8 @@ async def api_create_poll(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
-    ge = next((g for g in user["guilds"] if int(g["id"]) == gid), None)
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
         return web.json_response({"error": "forbidden"}, status=403)
     body = await request.json()
@@ -328,7 +345,8 @@ async def api_start_poll(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
-    ge = next((g for g in user["guilds"] if int(g["id"]) == gid), None)
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
         return web.json_response({"error": "forbidden"}, status=403)
     poll = get_poll(gid, request.match_info["pid"])
@@ -348,7 +366,8 @@ async def api_end_poll(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
-    ge = next((g for g in user["guilds"] if int(g["id"]) == gid), None)
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
         return web.json_response({"error": "forbidden"}, status=403)
     poll = get_poll(gid, request.match_info["pid"])
@@ -366,7 +385,8 @@ async def api_delete_poll(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
-    ge = next((g for g in user["guilds"] if int(g["id"]) == gid), None)
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
         return web.json_response({"error": "forbidden"}, status=403)
     polls = guild_polls.get(gid, {})
@@ -382,7 +402,8 @@ async def api_add_option(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
-    ge = next((g for g in user["guilds"] if int(g["id"]) == gid), None)
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
         return web.json_response({"error": "forbidden"}, status=403)
     poll = get_poll(gid, request.match_info["pid"])
@@ -406,7 +427,8 @@ async def api_set_roles(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
-    ge = next((g for g in user["guilds"] if int(g["id"]) == gid), None)
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
         return web.json_response({"error": "forbidden"}, status=403)
     poll = get_poll(gid, request.match_info["pid"])
