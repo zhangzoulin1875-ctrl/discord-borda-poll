@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>投票系統 Dashboard</title>
+<title>ICEA official</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>tailwind.config={darkMode:'class'}</script>
 <style>
@@ -19,7 +19,7 @@
 <!-- Header -->
 <nav class="bg-[#2b2d31] border-b border-black/30 px-6 py-3 flex items-center justify-between sticky top-0 z-50">
   <div class="flex items-center gap-3">
-    <button onclick="navigate('guilds')" class="text-xl font-bold text-[#5865f2]">🗳️ 投票 Dashboard</button>
+    <button onclick="navigate('guilds')" class="text-xl font-bold text-[#5865f2]">ICEA official</button>
   </div>
   <div id="nav-user" class="hidden flex items-center gap-3">
     <img id="nav-avatar" class="w-8 h-8 rounded-full" src="">
@@ -29,20 +29,28 @@
 </nav>
 
 <!-- Loading -->
-<div id="loading" class="flex items-center justify-center min-h-[60vh]">
+<div id="loading" class="flex flex-col items-center justify-center min-h-[60vh] gap-4">
   <div class="spinner"></div>
+  <p id="loading-msg" class="text-sm text-gray-400">載入中...</p>
 </div>
 
 <!-- Login -->
-<div id="login-view" class="hidden flex flex-col items-center justify-center min-h-[70vh] gap-6">
+<div id="login-view" class="hidden flex-col items-center justify-center min-h-[70vh] gap-6">
   <div class="text-center">
-    <h1 class="text-3xl font-bold mb-2">🗳️ 投票系統 Dashboard</h1>
-    <p class="text-gray-400">使用 Discord 帳號登入以管理你的投票</p>
+    <h1 class="text-3xl font-bold mb-2">ICEA official</h1>
+    <p class="text-gray-400">使用 Discord 帳號登入以管理投票</p>
   </div>
   <a href="/login" class="bg-[#5865f2] hover:bg-[#4752c4] text-white font-semibold px-8 py-3 rounded-lg transition flex items-center gap-2">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .373-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.099.246.198.373.292a.077.077 0 0 1-.006.127 12.3 12.3 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.056c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
     用 Discord 登入
   </a>
+</div>
+
+<!-- Error -->
+<div id="error-view" class="hidden flex-col items-center justify-center min-h-[60vh] gap-4">
+  <div class="text-red-400 text-4xl">⚠️</div>
+  <p id="error-msg" class="text-gray-300"></p>
+  <button onclick="init()" class="text-[#5865f2] hover:underline text-sm">重試</button>
 </div>
 
 <!-- Main -->
@@ -120,86 +128,125 @@ const statusBadge = {
 };
 const modeName = { borda: '波達計數法', simple: '一般投票' };
 
+function showOnly(id) {
+  ['loading','login-view','main-view','error-view'].forEach(v => {
+    const el = document.getElementById(v);
+    if (v === id) {
+      el.classList.remove('hidden');
+      if (v === 'login-view' || v === 'error-view') el.classList.add('flex');
+    } else {
+      el.classList.add('hidden');
+      if (v === 'login-view' || v === 'error-view') el.classList.remove('flex');
+    }
+  });
+}
+
 async function api(path, method = 'GET', body = null) {
-  const opts = { method, headers: {} };
+  const opts = { method, headers: {}, credentials: 'include' };
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-  const res = await fetch(path, opts);
-  if (res.status === 401) { location.reload(); return null; }
-  return res.json();
+  try {
+    const res = await fetch(path, opts);
+    if (res.status === 401) return { error: 'unauthorized', status: 401 };
+    if (res.status === 403) return { error: 'forbidden', status: 403 };
+    if (!res.ok) return { error: `HTTP ${res.status}`, status: res.status };
+    return res.json();
+  } catch (e) {
+    return { error: e.message };
+  }
 }
 
 async function init() {
+  showOnly('loading');
+  document.getElementById('loading-msg').textContent = '驗證登入狀態...';
   try {
     const me = await api('/api/me');
-    if (!me || me.error) { showLogin(); return; }
+    if (me.error || me.status === 401) {
+      showOnly('login-view');
+      return;
+    }
     document.getElementById('nav-user').classList.remove('hidden');
     document.getElementById('nav-user').classList.add('flex');
     document.getElementById('nav-avatar').src = me.avatar_url;
     document.getElementById('nav-username').textContent = me.username;
+    showOnly('main-view');
     navigate('guilds');
-  } catch { showLogin(); }
+  } catch(e) {
+    showError('無法連線到伺服器：' + e.message);
+  }
 }
 
-function showLogin() {
-  document.getElementById('loading').classList.add('hidden');
-  document.getElementById('login-view').classList.remove('hidden');
-  document.getElementById('login-view').classList.add('flex');
-  document.getElementById('main-view').classList.add('hidden');
+function showError(msg) {
+  showOnly('error-view');
+  document.getElementById('error-msg').textContent = msg;
+}
+
+function showLoading(msg) {
+  document.getElementById('loading-msg').textContent = msg || '載入中...';
+  showOnly('loading');
 }
 
 function navigate(view) {
   ['guilds-view', 'polls-view', 'detail-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
-  document.getElementById('loading').classList.remove('hidden');
-  document.getElementById('main-view').classList.remove('hidden');
+  showOnly('main-view');
   if (view === 'guilds') loadGuilds();
   else if (view === 'polls') loadPolls();
   else if (view === 'detail') loadDetail();
 }
 
 async function loadGuilds() {
+  showLoading('載入伺服器列表...');
   const guilds = await api('/api/guilds');
-  document.getElementById('loading').classList.add('hidden');
+  if (guilds.error) { showError('載入伺服器失敗：' + guilds.error); return; }
+  showOnly('main-view');
   document.getElementById('guilds-view').classList.remove('hidden');
   const html = guilds.map(g => `
-    <div onclick="enterGuild('${g.id}','${g.name.replace(/'/g,"\\'")}')" class="bg-[#2b2d31] hover:bg-[#3f4147] rounded-xl p-4 cursor-pointer transition flex items-center gap-3">
-      ${g.icon_url ? `<img src="${g.icon_url}" class="w-12 h-12 rounded-full">` : `<div class="w-12 h-12 rounded-full bg-[#5865f2] flex items-center justify-center text-lg font-bold">${g.name[0]}</div>`}
-      <div><div class="font-semibold">${g.name}</div><div class="text-xs text-gray-400">${g.id}</div></div>
+    <div onclick="enterGuild('${g.id}','${escHtml(g.name)}')" class="bg-[#2b2d31] hover:bg-[#3f4147] rounded-xl p-4 cursor-pointer transition flex items-center gap-3">
+      ${g.icon_url ? `<img src="${g.icon_url}" class="w-12 h-12 rounded-full">` : `<div class="w-12 h-12 rounded-full bg-[#5865f2] flex items-center justify-center text-lg font-bold">${escHtml(g.name[0])}</div>`}
+      <div><div class="font-semibold">${escHtml(g.name)}</div><div class="text-xs text-gray-400">${g.id}</div></div>
     </div>`).join('');
-  document.getElementById('guild-list').innerHTML = html || '<p class="text-gray-400">沒有可管理的伺服器</p>';
+  document.getElementById('guild-list').innerHTML = html || '<p class="text-gray-400">沒有可管理的伺服器（你需要在伺服器中有管理員權限）</p>';
 }
+
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 function enterGuild(id, name) { currentGuild = id; currentGuildName = name; navigate('polls'); }
 
 async function loadPolls() {
   if (!currentGuild) return navigate('guilds');
+  showLoading('載入投票列表...');
   const polls = await api(`/api/guilds/${currentGuild}/polls`);
-  document.getElementById('loading').classList.add('hidden');
+  if (polls.error) { showError('載入投票失敗：' + polls.error); return; }
+  showOnly('main-view');
   document.getElementById('polls-view').classList.remove('hidden');
   document.getElementById('polls-title').textContent = currentGuildName;
   const html = polls.map(p => `
-    <div onclick="viewPoll('${p.poll_id}')" class="bg-[#2b2d31] hover:bg-[#3f4147] rounded-xl p-4 cursor-pointer transition">
+    <div onclick="viewPoll('${escHtml(p.poll_id)}')" class="bg-[#2b2d31] hover:bg-[#3f4147] rounded-xl p-4 cursor-pointer transition">
       <div class="flex items-center justify-between">
-        <div class="font-semibold">${p.title}</div>
-        ${statusBadge[p.status]}
+        <div class="font-semibold">${escHtml(p.title)}</div>
+        ${statusBadge[p.status] || ''}
       </div>
-      <div class="text-xs text-gray-400 mt-1">${modeName[p.mode]} · ${p.option_count} 選項 · ${p.vote_count} 人投票 · ID: ${p.poll_id}</div>
+      <div class="text-xs text-gray-400 mt-1">${modeName[p.mode] || p.mode} · ${p.option_count} 選項 · ${p.vote_count} 人投票 · ID: ${escHtml(p.poll_id)}</div>
     </div>`).join('');
-  document.getElementById('poll-list').innerHTML = html || '<p class="text-gray-400">尚無投票，點上方按鈕建立</p>';
+  document.getElementById('poll-list').innerHTML = html || '<p class="text-gray-400 py-4">尚無投票，點右上角按鈕建立</p>';
 }
 
 function viewPoll(id) { currentPollId = id; navigate('detail'); }
 
 async function loadDetail() {
   if (!currentGuild || !currentPollId) return navigate('polls');
+  showLoading('載入投票詳情...');
   const p = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`);
-  document.getElementById('loading').classList.add('hidden');
+  if (p.error) { showError('載入投票失敗：' + p.error); return; }
+  showOnly('main-view');
   document.getElementById('detail-view').classList.remove('hidden');
 
   const tally = {};
   if (p.status !== 'drafting') {
     if (p.mode === 'borda') {
       Object.values(p.votes).forEach(rank => {
-        rank.forEach((optIdx, pos) => { const txt = p.options[optIdx]?.text || '?'; tally[txt] = (tally[txt]||0) + (p.options.length - 1 - pos); });
+        if (Array.isArray(rank)) {
+          rank.forEach((optIdx, pos) => { const txt = p.options[optIdx]?.text || '?'; tally[txt] = (tally[txt]||0) + (p.options.length - 1 - pos); });
+        }
       });
     } else {
       Object.values(p.votes).forEach(idx => { const txt = p.options[idx]?.text || '?'; tally[txt] = (tally[txt]||0) + 1; });
@@ -212,72 +259,76 @@ async function loadDetail() {
   let actions = '';
   if (p.status === 'drafting') {
     actions = `
-      <button onclick="startPoll()" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg text-sm font-semibold">啟動投票</button>
-      <button onclick="showOptionModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">新增選項</button>`;
+      <button onclick="startPoll()" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg text-sm font-semibold">▶ 啟動投票</button>
+      <button onclick="showOptionModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">+ 新增選項</button>`;
   } else if (p.status === 'active') {
-    actions = `<button onclick="endPoll()" class="bg-orange-600 hover:bg-orange-700 px-4 py-2 rounded-lg text-sm font-semibold">結束投票</button>`;
+    actions = `<button onclick="endPoll()" class="bg-orange-600 hover:bg-orange-700 px-4 py-2 rounded-lg text-sm font-semibold">⏹ 結束投票</button>`;
   }
-  actions += ` <button onclick="deletePoll()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg text-sm font-semibold">刪除投票</button>`;
+  actions += ` <button onclick="deletePoll()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg text-sm font-semibold">🗑 刪除投票</button>`;
 
   let voteDetail = '';
-  const voteEntries = Object.entries(p.votes);
+  const voteEntries = Object.entries(p.votes || {});
   if (voteEntries.length > 0) {
     voteDetail = '<div class="mt-4"><h4 class="text-sm font-semibold text-gray-400 mb-2">投票明細</h4><div class="space-y-1 text-sm">';
     voteEntries.forEach(([uid, data]) => {
-      if (p.mode === 'borda') {
-        const ranking = data.map((idx, pos) => `${pos+1}. ${p.options[idx]?.text||'?'}`).join('  ');
-        voteDetail += `<div class="bg-[#1e1f22] rounded px-3 py-1.5"><span class="text-gray-300">用戶 ${uid}</span><br><span class="text-gray-400 text-xs">${ranking}</span></div>`;
+      if (p.mode === 'borda' && Array.isArray(data)) {
+        const ranking = data.map((idx, pos) => `${pos+1}. ${escHtml(p.options[idx]?.text||'?')}`).join('  ');
+        voteDetail += `<div class="bg-[#1e1f22] rounded px-3 py-1.5"><span class="text-gray-300">用戶 ${escHtml(uid)}</span><br><span class="text-gray-400 text-xs">${ranking}</span></div>`;
       } else {
-        voteDetail += `<div class="bg-[#1e1f22] rounded px-3 py-1.5"><span class="text-gray-300">用戶 ${uid}</span>: <span class="text-[#5865f2]">${p.options[data]?.text||'?'}</span></div>`;
+        voteDetail += `<div class="bg-[#1e1f22] rounded px-3 py-1.5"><span class="text-gray-300">用戶 ${escHtml(uid)}</span>: <span class="text-[#5865f2]">${escHtml(p.options[data]?.text||'?')}</span></div>`;
       }
     });
     voteDetail += '</div></div>';
   } else {
-    voteDetail = '<p class="text-gray-400 text-sm mt-4">尚無投票紀錄</p>';
+    voteDetail = '<p class="text-gray-400 text-sm mt-4">📭 尚無投票紀錄</p>';
   }
+
+  const optionHtml = ranked.length
+    ? ranked.map(([txt, score], i) => `<div class="flex items-center justify-between bg-[#1e1f22] rounded-lg px-3 py-2 mb-1"><span>${medals[i]||`#${i+1}`} ${escHtml(txt)}</span><span class="font-bold text-[#5865f2]">${score} ${unit}</span></div>`).join('')
+    : p.options.map((o,i)=>`<div class="bg-[#1e1f22] rounded-lg px-3 py-2 mb-1">${i+1}. ${escHtml(o.text)}</div>`).join('');
 
   document.getElementById('detail-content').innerHTML = `
     <div class="bg-[#2b2d31] rounded-xl p-6">
       <div class="flex items-center justify-between mb-4">
         <div>
-          <h3 class="text-xl font-bold">${p.title}</h3>
-          <div class="text-sm text-gray-400 mt-1">${modeName[p.mode]} · ${statusBadge[p.status]} · ID: ${p.poll_id}</div>
+          <h3 class="text-xl font-bold">${escHtml(p.title)}</h3>
+          <div class="text-sm text-gray-400 mt-1">${modeName[p.mode]||p.mode} · ${statusBadge[p.status]||p.status} · ID: ${escHtml(p.poll_id)}</div>
         </div>
       </div>
-      <div class="flex gap-2 mb-4">${actions}</div>
+      <div class="flex flex-wrap gap-2 mb-4">${actions}</div>
       <div>
         <h4 class="text-sm font-semibold text-gray-400 mb-2">選項與結果</h4>
-        ${ranked.length ? ranked.map(([txt, score], i) => `<div class="flex items-center justify-between bg-[#1e1f22] rounded-lg px-3 py-2 mb-1"><span>${medals[i]||\`#\${i+1}\`} ${txt}</span><span class="font-bold text-[#5865f2]">${score} ${unit}</span></div>`).join('') : p.options.map((o,i)=>`<div class="bg-[#1e1f22] rounded-lg px-3 py-2 mb-1">${i+1}. ${o.text}</div>`).join('')}
+        ${optionHtml}
       </div>
       ${voteDetail}
     </div>`;
 }
 
-// --- Actions ---
 async function startPoll() {
   if (!confirm('確定啟動投票？')) return;
-  await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/start`, 'POST');
+  const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/start`, 'POST');
+  if (r.error) { alert('啟動失敗：' + r.error); return; }
   loadDetail();
 }
 async function endPoll() {
   if (!confirm('確定結束投票？')) return;
-  await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/end`, 'POST');
+  const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/end`, 'POST');
+  if (r.error) { alert('結束失敗：' + r.error); return; }
   loadDetail();
 }
 async function deletePoll() {
   if (!confirm('確定刪除此投票？此操作無法復原。')) return;
-  await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`, 'DELETE');
+  const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`, 'DELETE');
+  if (r.error) { alert('刪除失敗：' + r.error); return; }
   navigate('polls');
 }
 
-// --- Create Modal ---
 function showCreateModal() {
   document.getElementById('create-title').value = '';
   document.getElementById('create-mode').value = 'borda';
   document.getElementById('create-options').innerHTML = '';
   addOptionInput(); addOptionInput();
   document.getElementById('create-modal').classList.remove('hidden');
-  document.getElementById('create-modal').classList.add('flex');
 }
 function closeCreateModal() { document.getElementById('create-modal').classList.add('hidden'); }
 function addOptionInput() {
@@ -292,21 +343,28 @@ async function createPoll() {
   const options = [...document.querySelectorAll('#create-options input')].map(i => i.value.trim()).filter(Boolean);
   if (!title) return alert('請輸入標題');
   if (options.length < 2) return alert('至少需要 2 個選項');
-  await api(`/api/guilds/${currentGuild}/polls`, 'POST', { title, mode, options });
+  const r = await api(`/api/guilds/${currentGuild}/polls`, 'POST', { title, mode, options });
+  if (r.error) { alert('建立失敗：' + r.error); return; }
   closeCreateModal(); loadPolls();
 }
 
-// --- Add Option Modal ---
-function showOptionModal() { document.getElementById('option-text').value=''; document.getElementById('option-modal').classList.remove('hidden'); document.getElementById('option-modal').classList.add('flex'); }
+function showOptionModal() {
+  document.getElementById('option-text').value = '';
+  document.getElementById('option-modal').classList.remove('hidden');
+}
 function closeOptionModal() { document.getElementById('option-modal').classList.add('hidden'); }
 async function addOption() {
   const text = document.getElementById('option-text').value.trim();
   if (!text) return alert('請輸入選項文字');
-  await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/options`, 'POST', { text });
+  const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/options`, 'POST', { text });
+  if (r.error) { alert('新增失敗：' + r.error); return; }
   closeOptionModal(); loadDetail();
 }
 
-async function logout() { await fetch('/logout', { method: 'POST' }); location.reload(); }
+async function logout() {
+  await fetch('/logout', { method: 'POST', credentials: 'include' });
+  location.reload();
+}
 
 init();
 </script>
