@@ -570,6 +570,43 @@ async def call_ai_api(conversation: str, settings: dict) -> str:
     return "".join(result_chunks)
 
 
+async def call_ai_api_stream(conversation: str, settings: dict):
+    """Async generator: yields text chunks from AI API as they stream in."""
+    headers = {
+        "Authorization": f"Bearer {settings['api_key']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.get("model", "gpt-4o-mini"),
+        "messages": [
+            {"role": "system", "content": settings.get("system_prompt", DEFAULT_AI_SYSTEM_PROMPT)},
+            {"role": "user", "content": conversation},
+        ],
+        "temperature": 0.3,
+        "stream": True,
+    }
+    timeout = aiohttp.ClientTimeout(total=300, connect=15, sock_read=90)
+    async with aiohttp.ClientSession() as session:
+        async with session.post(settings["api_url"], json=payload, headers=headers, timeout=timeout) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise Exception(f"AI API returned {resp.status}: {error_text[:500]}")
+            async for raw_line in resp.content:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json_module.loads(data_str)
+                    delta = chunk["choices"][0].get("delta", {})
+                    if "content" in delta and delta["content"]:
+                        yield delta["content"]
+                except Exception:
+                    continue
+
+
 async def api_get_ai_settings(request):
     user = await _get_session_user(request)
     if not user:
@@ -1660,7 +1697,7 @@ class MeetingGroup(app_commands.Group):
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()  # public — meeting minutes should be visible
 
         # Collect messages
         formatted = []
@@ -1684,13 +1721,12 @@ class MeetingGroup(app_commands.Group):
                 formatted.append(f"[{time_str}] {name}: {content}")
                 count += 1
         except discord.Forbidden:
-            await interaction.followup.send("❌ 沒有權限讀取該頻道的訊息。", ephemeral=True)
+            await interaction.followup.send("❌ 沒有權限讀取該頻道的訊息。")
             return
 
         if not formatted:
             await interaction.followup.send(
-                f"❌ 在指定時間後未找到任何訊息（頻道：{channel.mention}，起始：{after_time.strftime('%Y-%m-%d %H:%M UTC')}）",
-                ephemeral=True,
+                f"❌ 在指定時間後未找到任何訊息（頻道：{channel.mention}，起始：{after_time.strftime('%Y-%m-%d %H:%M UTC')}）"
             )
             return
 
@@ -1701,52 +1737,67 @@ class MeetingGroup(app_commands.Group):
         if len(log_text) > 30000:
             log_text = log_text[:30000] + "\n...（後續訊息已截斷）"
 
-        # Send progress message
-        progress_msg = await interaction.followup.send(
-            f"📝 正在整理 **{count}** 則訊息，AI 正在思考中... （最多等候 5 分鐘）",
-            ephemeral=True, wait=True
+        # Send live message — will be edited as AI streams
+        live_msg = await interaction.followup.send(
+            f"📋 **會議紀錄 — #{channel.name}**\n📝 正在整理 {count} 則訊息，AI 開始生成...",
+            wait=True
         )
 
-        # Call AI with periodic heartbeat to keep interaction alive
+        # Stream AI response, edit message live
+        import time as _time
+        accumulated = ""
+        last_edit = 0
+        edit_interval = 1.5  # seconds between edits (Discord rate limit safe)
+        header = f"📋 **會議紀錄 — #{channel.name}**\n"
+
         try:
-            ai_task = asyncio.ensure_future(call_ai_api(log_text, ai_settings))
-            elapsed = 0
-            while not ai_task.done():
-                await asyncio.sleep(15)
-                elapsed += 15
-                if not ai_task.done():
+            async for chunk in call_ai_api_stream(log_text, ai_settings):
+                accumulated += chunk
+                now = _time.time()
+                if now - last_edit >= edit_interval:
+                    last_edit = now
+                    # Truncate to fit Discord 2000 char limit
+                    display = header + accumulated
+                    if len(display) > 1950:
+                        max_body = 1950 - len(header) - 5
+                        display = header + accumulated[:max_body] + "\n⏳..."
                     try:
-                        await progress_msg.edit(content=f"📝 正在整理 **{count}** 則訊息... ⏱️ 已等候 {elapsed} 秒")
+                        await live_msg.edit(content=display)
                     except Exception:
                         pass
-            result = await ai_task
+
+            # Final edit with complete content
+            full_text = header + accumulated
+            if len(full_text) <= 2000:
+                try:
+                    await live_msg.edit(content=full_text)
+                except Exception:
+                    pass
+            else:
+                # Too long for one message — send as file
+                import io
+                try:
+                    await live_msg.edit(content=header + "✅ 會議紀錄已生成（完整內容見下方附件）")
+                except Exception:
+                    pass
+                file_content = f"# 會議紀錄 — #{channel.name}\n# 整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n# 共 {count} 則訊息\n# 由 {interaction.user.display_name} 整理\n# AI 模型：{ai_settings['model']}\n\n---\n\n{accumulated}"
+                file = discord.File(
+                    io.BytesIO(file_content.encode("utf-8")),
+                    filename=f"meeting_minutes_{channel.name}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.md"
+                )
+                embed = discord.Embed(
+                    title=f"📋 會議紀錄 — {channel.name}",
+                    description=f"整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n共 {count} 則訊息\nAI 模型：{ai_settings['model']}",
+                    color=discord.Color.blue(),
+                )
+                embed.set_footer(text=f"由 {interaction.user.display_name} 整理")
+                await interaction.followup.send(embed=embed, file=file)
+
         except Exception as e:
-            await interaction.followup.send(f"❌ AI 整理失敗：{e}", ephemeral=True)
-            return
-
-        # Post result
-        embed = discord.Embed(
-            title=f"📋 會議紀錄 — {channel.name}",
-            description=f"整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n共 {count} 則訊息\nAI 模型：{ai_settings['model']}",
-            color=discord.Color.blue(),
-        )
-        embed.set_footer(text=f"由 {interaction.user.display_name} 整理")
-
-        # Delete the progress message and post the result
-        try:
-            await progress_msg.delete()
-        except Exception:
-            pass
-
-        if len(result) <= 4000:
-            embed.add_field(name="會議紀錄", value=result, inline=False)
-            await interaction.followup.send(embed=embed)
-        else:
-            import io
-            file_content = f"# 會議紀錄 — #{channel.name}\n# 整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n# 共 {count} 則訊息\n# 由 {interaction.user.display_name} 整理\n# AI 模型：{ai_settings['model']}\n\n---\n\n{result}"
-            file = discord.File(io.BytesIO(file_content.encode("utf-8")), filename=f"meeting_minutes_{channel.name}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.md")
-            embed.add_field(name="會議紀錄", value="（內容過長，已附加為 .md 檔案）", inline=False)
-            await interaction.followup.send(embed=embed, file=file)
+            try:
+                await live_msg.edit(content=f"❌ AI 整理失敗：{e}")
+            except Exception:
+                await interaction.followup.send(f"❌ AI 整理失敗：{e}")
 
     @app_commands.command(name="test", description="測試 AI API 連線（管理員限定）")
     async def test_ai(self, interaction: discord.Interaction):
