@@ -33,6 +33,22 @@
     /briefing status                       - 查看設定
 
   注意：message_content intent 必須在 Discord Developer Portal 中啟用
+
+  AI 聊天設定存於 data/chat_ai_settings.json
+  AI 聊天指令（/chat ...）：
+    /chat toggle               - 開啟/關閉 AI 聊天
+    /chat model <model>        - 設定模型
+    /chat prompt <prompt>      - 設定人設
+    /chat cooldown <seconds>   - 設定冷卻時間
+    /chat channel <action> [channel] - 管理頻道白名單
+    /chat test <message>       - 測試 AI 回覆
+    /chat status               - 查看設定
+
+  AI 聊天環境變數（與會議紀錄/快報使用不同 API）：
+    CHAT_AI_API_URL  - 聊天 AI API 端點
+    CHAT_AI_API_KEY  - 聊天 AI API Key
+    CHAT_AI_MODEL    - 聊天 AI 模型
+    CHAT_AI_SYSTEM_PROMPT - 聊天 AI 人設
   持久化：投票資料存於 data/polls_data.json，建議在 Render 掛載 Persistent Disk 以跨部署保留
 
 指令一覽：
@@ -64,6 +80,7 @@ import aiohttp
 import random
 import string
 import re
+import time as _time
 import hmac
 import hashlib
 import json as json_module
@@ -114,6 +131,9 @@ async def keep_alive_server():
     # AI settings API
     app.router.add_get("/api/ai-settings", api_get_ai_settings)
     app.router.add_put("/api/ai-settings", api_set_ai_settings)
+    # Chat AI settings API
+    app.router.add_get("/api/chat-ai-settings", api_get_chat_ai_settings)
+    app.router.add_put("/api/chat-ai-settings", api_set_chat_ai_settings)
     # Dashboard routes
     app.router.add_get("/dashboard", dashboard_index)
     app.router.add_get("/login", dashboard_login)
@@ -702,6 +722,203 @@ async def weekly_briefing_scheduler():
                         print(f"✅ 每週公報完成")
 
 
+# ──────────────────────────────────────────────
+# AI 聊天設定（獨立 API，與會議紀錄/快報分開）
+# ──────────────────────────────────────────────
+
+DEFAULT_CHAT_AI_PROMPT = """你是一個微國家組織的 Discord 成員，也是一個 AI 助手。你會參與頻道中的討論，提供有建設性的意見。
+
+規則：
+- 用繁體中文回覆
+- 保持簡潔，通常 1-3 句話，最多不超過 5 句
+- 有自己的觀點，不要只是附和或重複別人說的話
+- 可以討論政策、法案、投票、組織運作等話題
+- 如果不確定的事實，直接說不確定，不要編造
+- 語氣自然輕鬆，像群組裡的一個朋友
+- 不要使用 markdown 標題（## ###）
+- 不要每次都長篇大論，有時候一句話就夠了
+- 可以開玩笑，但不要冒犯別人"""
+
+chat_ai_settings = {
+    "api_url": os.getenv("CHAT_AI_API_URL", "https://api.openai.com/v1/chat/completions"),
+    "api_key": os.getenv("CHAT_AI_API_KEY", ""),
+    "model": os.getenv("CHAT_AI_MODEL", "gpt-4o-mini"),
+    "system_prompt": os.getenv("CHAT_AI_SYSTEM_PROMPT", DEFAULT_CHAT_AI_PROMPT),
+    "enabled": False,
+    "cooldown_seconds": 60,
+    "channels_whitelist": [],  # empty = all channels
+}
+
+CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
+
+# Per-channel cooldown tracking
+chat_cooldowns: dict = {}  # channel_id -> timestamp
+chat_generating: set = set()  # channel_ids currently generating
+
+
+def save_chat_ai_settings():
+    try:
+        os.makedirs(os.path.dirname(CHAT_AI_DATA_FILE), exist_ok=True)
+        with open(CHAT_AI_DATA_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(chat_ai_settings, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Failed to save chat AI settings: {e}")
+
+
+def load_chat_ai_settings():
+    global chat_ai_settings
+    try:
+        if os.path.exists(CHAT_AI_DATA_FILE):
+            with open(CHAT_AI_DATA_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+            chat_ai_settings.update(loaded)
+            print("✅ 載入 AI 聊天設定")
+    except Exception as e:
+        print(f"⚠️ Failed to load chat AI settings: {e}")
+
+
+def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int) -> tuple:
+    """Heuristic check: is this message worth an AI reply? Returns (worth, clean_content)."""
+    # Remove bot mention
+    clean = content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
+
+    # Too short
+    if len(clean) < 5:
+        return False, clean
+
+    # Just greetings / low-value messages
+    low_value = {"hi", "hello", "hey", "yo", "ok", "okay", "lol", "haha", "nice",
+                 "你好", "哈囉", "嗨", "測試", "test", "ping", "pong", "好的", "嗯",
+                 "喔", "啊", "喔喔", "哈哈", "推", "+1", "ss"}
+    if clean.lower().strip("!.?？。！，,") in low_value:
+        return False, clean
+
+    # Just a link
+    if clean.startswith("http") and len(clean.split()) == 1:
+        return False, clean
+
+    if is_mentioned:
+        # When @mentioned, require substantive content (> 10 chars)
+        if len(clean) < 10:
+            return False, clean
+        return True, clean
+    else:
+        # Not mentioned - be selective to save tokens
+        # Questions are worth replying
+        if "?" in clean or "？" in clean:
+            return True, clean
+        # Discussion keywords
+        keywords = ["投票", "議", "法案", "政策", "選舉", "建議", "想法", "討論",
+                    "如何", "為什麼", "怎麼", "認為", "覺得", "提案", "決議", "規定",
+                    "憲法", "入籍", "公民", "政府", "國家"]
+        if any(kw in clean for kw in keywords):
+            return True, clean
+        # Very low random chance for other messages
+        if random.random() < 0.03:  # 3% — keep token usage minimal
+            return True, clean
+        return False, clean
+
+
+async def call_chat_api(messages: list, settings: dict) -> str:
+    """Call the chat AI API (non-streaming, short replies)."""
+    headers = {
+        "Authorization": f"Bearer {settings['api_key']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.get("model", "gpt-4o-mini"),
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 300,
+    }
+    timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
+    async with aiohttp.ClientSession() as session:
+        async with session.post(settings["api_url"], json=payload, headers=headers, timeout=timeout) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise Exception(f"Chat AI API returned {resp.status}: {error_text[:300]}")
+            data = await resp.json()
+            return data["choices"][0]["message"]["content"]
+
+
+async def generate_chat_reply(message, settings: dict) -> str:
+    """Generate a reply for a chat message with brief context."""
+    # Collect brief context (last 5 messages before this one)
+    context_lines = []
+    try:
+        async for msg in message.channel.history(limit=5, before=message):
+            if not msg.content.strip():
+                continue
+            name = msg.author.display_name
+            if msg.author.id == bot.user.id:
+                context_lines.insert(0, f"你: {msg.content[:150]}")
+            else:
+                context_lines.insert(0, f"{name}: {msg.content[:150]}")
+    except Exception:
+        pass
+
+    context = "\n".join(context_lines[-3:])  # Keep last 3 for context
+
+    bot_id = bot.user.id
+    clean_content = message.content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
+    author_name = message.author.display_name
+
+    if context:
+        full_prompt = f"近期對話:\n{context}\n\n{author_name}: {clean_content}"
+    else:
+        full_prompt = f"{author_name}: {clean_content}"
+
+    messages = [
+        {"role": "system", "content": settings["system_prompt"]},
+        {"role": "user", "content": full_prompt},
+    ]
+    return await call_chat_api(messages, settings)
+
+
+# ──────────────────────────────────────────────
+# Dashboard API: Chat AI settings
+# ──────────────────────────────────────────────
+
+async def api_get_chat_ai_settings(request):
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    key = chat_ai_settings["api_key"]
+    masked = key[:6] + "..." + key[-4:] if len(key) > 10 else ("***" if key else "")
+    return web.json_response({
+        "api_url": chat_ai_settings["api_url"],
+        "api_key_masked": masked,
+        "model": chat_ai_settings["model"],
+        "system_prompt": chat_ai_settings["system_prompt"],
+        "enabled": chat_ai_settings["enabled"],
+        "cooldown_seconds": chat_ai_settings["cooldown_seconds"],
+        "channels_whitelist": chat_ai_settings["channels_whitelist"],
+    })
+
+
+async def api_set_chat_ai_settings(request):
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await request.json()
+    if "api_url" in body:
+        chat_ai_settings["api_url"] = body["api_url"]
+    if "api_key" in body and body["api_key"]:
+        chat_ai_settings["api_key"] = body["api_key"]
+    if "model" in body:
+        chat_ai_settings["model"] = body["model"]
+    if "system_prompt" in body:
+        chat_ai_settings["system_prompt"] = body["system_prompt"]
+    if "enabled" in body:
+        chat_ai_settings["enabled"] = body["enabled"]
+    if "cooldown_seconds" in body:
+        chat_ai_settings["cooldown_seconds"] = int(body["cooldown_seconds"])
+    if "channels_whitelist" in body:
+        chat_ai_settings["channels_whitelist"] = body["channels_whitelist"]
+    save_chat_ai_settings()
+    return web.json_response({"ok": True})
+
+
 ai_settings = {
     "api_url": os.getenv("AI_API_URL", "https://api.openai.com/v1/chat/completions"),
     "api_key": os.getenv("AI_API_KEY", ""),
@@ -1040,6 +1257,7 @@ async def on_ready():
     bot.tree.add_command(PollGroup())
     bot.tree.add_command(MeetingGroup())
     bot.tree.add_command(BriefingGroup())
+    bot.tree.add_command(ChatGroup())
     try:
         synced = await bot.tree.sync()
         print(f"✅ Bot 上線：{bot.user}（已同步 {len(synced)} 個 slash commands）")
@@ -1053,11 +1271,62 @@ async def setup_hook():
     save_polls_to_disk()  # Create file if not exists
     load_briefing_settings()
     save_briefing_settings()  # Create file if not exists
+    load_chat_ai_settings()
+    save_chat_ai_settings()  # Create file if not exists
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
     asyncio.ensure_future(auto_save_loop())
     asyncio.ensure_future(daily_briefing_scheduler())
     asyncio.ensure_future(weekly_briefing_scheduler())
+
+
+@bot.event
+async def on_message(message):
+    # Ignore bot messages
+    if message.author.bot:
+        return
+
+    # Ignore slash commands and prefix commands
+    if message.content.startswith("/") or message.content.startswith("!"):
+        return
+
+    # Check if chat AI is enabled and has API key
+    if not chat_ai_settings.get("enabled") or not chat_ai_settings.get("api_key"):
+        return
+
+    # Check channel whitelist
+    whitelist = chat_ai_settings.get("channels_whitelist", [])
+    if whitelist and message.channel.id not in whitelist:
+        return
+
+    # Skip if already generating in this channel
+    if message.channel.id in chat_generating:
+        return
+
+    # Check cooldown (skip for @mentions)
+    is_mentioned = bot.user in message.mentions
+    if not is_mentioned:
+        last_reply = chat_cooldowns.get(message.channel.id, 0)
+        if _time.time() - last_reply < chat_ai_settings.get("cooldown_seconds", 60):
+            return
+
+    # Worthiness check
+    worth, clean = _is_worth_replying(message.content, is_mentioned, bot.user.id)
+    if not worth:
+        return
+
+    # Generate reply
+    chat_generating.add(message.channel.id)
+    try:
+        async with message.channel.typing():
+            reply = await generate_chat_reply(message, chat_ai_settings)
+        if reply and reply.strip():
+            chat_cooldowns[message.channel.id] = _time.time()
+            await message.reply(reply[:2000], mention_author=False)
+    except Exception as e:
+        print(f"⚠️ Chat AI error: {e}")
+    finally:
+        chat_generating.discard(message.channel.id)
 
 
 # ──────────────────────────────────────────────
@@ -2052,6 +2321,127 @@ class MeetingGroup(app_commands.Group):
             await interaction.followup.send(f"✅ AI API 連線成功！\n模型：{ai_settings['model']}\n回覆：{result}", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ AI API 連線失敗：{e}", ephemeral=True)
+
+
+# ──────────────────────────────────────────────
+# AI 聊天指令
+# ──────────────────────────────────────────────
+
+class ChatGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="chat", description="AI 聊天設定")
+
+    @app_commands.command(name="toggle", description="開啟/關閉 AI 聊天功能（管理員限定）")
+    async def chat_toggle(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        chat_ai_settings["enabled"] = not chat_ai_settings["enabled"]
+        save_chat_ai_settings()
+        status = "✅ 開啟" if chat_ai_settings["enabled"] else "❌ 關閉"
+        await interaction.response.send_message(f"AI 聊天功能已{status}", ephemeral=True)
+
+    @app_commands.command(name="model", description="設定 AI 聊天模型（管理員限定）")
+    @app_commands.describe(model="模型名稱（例如：gpt-4o-mini, gemini-1.5-flash）")
+    async def chat_model(self, interaction: discord.Interaction, model: str):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        chat_ai_settings["model"] = model
+        save_chat_ai_settings()
+        await interaction.response.send_message(f"✅ AI 聊天模型已設為 `{model}`", ephemeral=True)
+
+    @app_commands.command(name="prompt", description="設定 AI 聊天人設（管理員限定）")
+    @app_commands.describe(prompt="系統提示詞（人設描述）")
+    async def chat_prompt(self, interaction: discord.Interaction, prompt: str):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        chat_ai_settings["system_prompt"] = prompt
+        save_chat_ai_settings()
+        await interaction.response.send_message("✅ AI 聊天人設已更新", ephemeral=True)
+
+    @app_commands.command(name="cooldown", description="設定 AI 聊天冷卻時間（管理員限定）")
+    @app_commands.describe(seconds="冷卻秒數（自動回覆間隔，@提及不受限）")
+    async def chat_cooldown(self, interaction: discord.Interaction, seconds: int):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        chat_ai_settings["cooldown_seconds"] = max(0, seconds)
+        save_chat_ai_settings()
+        await interaction.response.send_message(f"✅ 冷卻時間已設為 {seconds} 秒", ephemeral=True)
+
+    @app_commands.command(name="channel", description="新增/移除頻道白名單（管理員限定）")
+    @app_commands.describe(action="新增或移除", channel="要設定的頻道")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="新增", value="add"),
+        app_commands.Choice(name="移除", value="remove"),
+        app_commands.Choice(name="清空（所有頻道）", value="clear"),
+    ])
+    async def chat_channel(self, interaction: discord.Interaction, action: app_commands.Choice[str], channel: discord.TextChannel = None):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        wl = chat_ai_settings.get("channels_whitelist", [])
+        act = action.value
+        if act == "clear":
+            chat_ai_settings["channels_whitelist"] = []
+            save_chat_ai_settings()
+            await interaction.response.send_message("✅ 頻道白名單已清空（AI 聊天在所有頻道啟用）", ephemeral=True)
+        elif channel:
+            if act == "add" and channel.id not in wl:
+                wl.append(channel.id)
+                chat_ai_settings["channels_whitelist"] = wl
+                save_chat_ai_settings()
+                await interaction.response.send_message(f"✅ 已新增 {channel.mention} 到白名單", ephemeral=True)
+            elif act == "remove" and channel.id in wl:
+                wl.remove(channel.id)
+                chat_ai_settings["channels_whitelist"] = wl
+                save_chat_ai_settings()
+                await interaction.response.send_message(f"✅ 已從白名單移除 {channel.mention}", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ 頻道已在/不在白名單中", ephemeral=True)
+
+    @app_commands.command(name="test", description="測試 AI 聊天回覆（管理員限定）")
+    @app_commands.describe(message="要測試的訊息")
+    async def chat_test(self, interaction: discord.Interaction, message: str):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        if not chat_ai_settings.get("api_key"):
+            await interaction.response.send_message("❌ 尚未設定 AI 聊天 API Key。請到 Dashboard 設定。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            messages = [
+                {"role": "system", "content": chat_ai_settings["system_prompt"]},
+                {"role": "user", "content": f"測試者: {message}"},
+            ]
+            reply = await call_chat_api(messages, chat_ai_settings)
+            await interaction.followup.send(f"✅ AI 回覆：\n{reply}", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ AI 聊天測試失敗：{e}", ephemeral=True)
+
+    @app_commands.command(name="status", description="查看 AI 聊天設定")
+    async def chat_status(self, interaction: discord.Interaction):
+        enabled = "✅ 開啟" if chat_ai_settings["enabled"] else "❌ 關閉"
+        model = chat_ai_settings.get("model", "gpt-4o-mini")
+        cooldown = chat_ai_settings.get("cooldown_seconds", 60)
+        wl = chat_ai_settings.get("channels_whitelist", [])
+        if wl:
+            channels = ", ".join(f"<#{cid}>" for cid in wl)
+        else:
+            channels = "所有頻道"
+        key_set = "✅ 已設定" if chat_ai_settings.get("api_key") else "❌ 未設定"
+
+        embed = discord.Embed(title="🤖 AI 聊天設定", color=discord.Color.green())
+        embed.add_field(name="狀態", value=enabled, inline=True)
+        embed.add_field(name="API Key", value=key_set, inline=True)
+        embed.add_field(name="模型", value=f"`{model}`", inline=True)
+        embed.add_field(name="冷卻時間", value=f"{cooldown} 秒", inline=True)
+        embed.add_field(name="頻道白名單", value=channels, inline=False)
+        embed.set_footer(text="使用 /chat toggle 開關 | /chat model 設模型 | /chat prompt 設人設")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ──────────────────────────────────────────────
