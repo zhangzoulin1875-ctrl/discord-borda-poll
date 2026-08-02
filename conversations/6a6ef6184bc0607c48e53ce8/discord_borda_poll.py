@@ -49,6 +49,12 @@
     CHAT_AI_API_KEY  - 聊天 AI API Key
     CHAT_AI_MODEL    - 聊天 AI 模型
     CHAT_AI_SYSTEM_PROMPT - 聊天 AI 人設
+
+  Google Drive 檔案儲存（免費，替代 Render 付費硬碟）：
+    GOOGLE_SERVICE_ACCOUNT_B64 - Base64 編碼的 Google 服務帳號 JSON
+    GOOGLE_DRIVE_FOLDER_ID      - Drive 資料夾 ID（選填，建議設定）
+    設定後：啟動時從 Drive 載入資料，每 60 秒同步到 Drive
+    未設定：使用本地檔案（重部署後資料會遺失）
   持久化：投票資料存於 data/polls_data.json，建議在 Render 掛載 Persistent Disk 以跨部署保留
 
 指令一覽：
@@ -81,6 +87,11 @@ import random
 import string
 import re
 import time as _time
+
+try:
+    import jwt as pyjwt  # PyJWT for Google Drive service account auth
+except ImportError:
+    pyjwt = None
 import hmac
 import hashlib
 import json as json_module
@@ -879,6 +890,198 @@ async def generate_chat_reply(message, settings: dict) -> str:
 # Dashboard API: Chat AI settings
 # ──────────────────────────────────────────────
 
+# ──────────────────────────────────────────────
+# Google Drive 檔案儲存（替代 Render 付費硬碟）
+# 環境變數：
+#   GOOGLE_SERVICE_ACCOUNT_B64 - Base64 編碼的服務帳號 JSON
+#   GOOGLE_DRIVE_FOLDER_ID      - Drive 資料夾 ID（選填，建議設定）
+# ──────────────────────────────────────────────
+
+_drive_token_cache = {"token": None, "expires": 0.0}
+
+
+def _get_drive_access_token():
+    """Get Google API access token from service account JWT (cached 50 min)."""
+    if not pyjwt:
+        return None
+    if _drive_token_cache["token"] and _time.time() < _drive_token_cache["expires"]:
+        return _drive_token_cache["token"]
+
+    creds_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
+    if not creds_b64:
+        return None
+
+    try:
+        creds_info = json_module.loads(base64.b64decode(creds_b64).decode())
+        now = int(_time.time())
+
+        payload = {
+            "iss": creds_info["client_email"],
+            "scope": "https://www.googleapis.com/auth/drive.file",
+            "aud": "https://oauth2.googleapis.com/token",
+            "iat": now,
+            "exp": now + 3600,
+        }
+
+        token = pyjwt.encode(payload, creds_info["private_key"], algorithm="RS256")
+        if isinstance(token, bytes):
+            token = token.decode()
+
+        data = urllib.parse.urlencode({
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": token,
+        }).encode()
+
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        result = json_module.loads(resp.read())
+
+        _drive_token_cache["token"] = result["access_token"]
+        _drive_token_cache["expires"] = _time.time() + 3000
+        return result["access_token"]
+    except Exception as e:
+        print(f"⚠️ Drive auth failed: {e}")
+        return None
+
+
+async def _drive_upload(filename: str, content: str) -> bool:
+    """Upload (create or update) a file on Google Drive."""
+    token = _get_drive_access_token()
+    if not token:
+        return False
+
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Search for existing file
+            query = f"name='{filename}' and trashed=false"
+            if folder_id:
+                query += f" and '{folder_id}' in parents"
+            search_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
+            async with session.get(search_url, headers=headers) as resp:
+                data = await resp.json()
+            existing = data.get("files", [])
+
+            if existing:
+                # Update existing file
+                file_id = existing[0]["id"]
+                upload_url = f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media"
+                async with session.patch(
+                    upload_url,
+                    headers={**headers, "Content-Type": "application/json"},
+                    data=content.encode("utf-8"),
+                ) as resp:
+                    return resp.status in (200, 204)
+            else:
+                # Create new file via multipart upload
+                import uuid as _uuid
+                boundary = _uuid.uuid4().hex
+
+                metadata = {"name": filename}
+                if folder_id:
+                    metadata["parents"] = [folder_id]
+
+                body = (
+                    f"--{boundary}\n"
+                    f"Content-Type: application/json; charset=UTF-8\n\n"
+                    f"{json_module.dumps(metadata)}\n"
+                    f"--{boundary}\n"
+                    f"Content-Type: application/json\n\n"
+                    f"{content}\n"
+                    f"--{boundary}--"
+                ).encode("utf-8")
+
+                upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+                async with session.post(
+                    upload_url,
+                    headers={**headers, "Content-Type": f"multipart/related; boundary={boundary}"},
+                    data=body,
+                ) as resp:
+                    return resp.status in (200, 201)
+    except Exception as e:
+        print(f"⚠️ Drive upload failed ({filename}): {e}")
+        return False
+
+
+async def _drive_download(filename: str) -> str:
+    """Download a file from Google Drive. Returns content or None."""
+    token = _get_drive_access_token()
+    if not token:
+        return None
+
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            query = f"name='{filename}' and trashed=false"
+            if folder_id:
+                query += f" and '{folder_id}' in parents"
+            search_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
+            async with session.get(search_url, headers=headers) as resp:
+                data = await resp.json()
+            files = data.get("files", [])
+            if not files:
+                return None
+
+            file_id = files[0]["id"]
+            download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+            async with session.get(download_url, headers=headers) as resp:
+                return await resp.text()
+    except Exception as e:
+        print(f"⚠️ Drive download failed ({filename}): {e}")
+        return None
+
+
+async def sync_to_drive():
+    """Sync all local data files to Google Drive."""
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"):
+        return
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json"]:
+        filepath = os.path.join(data_dir, filename)
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                await _drive_upload(filename, content)
+            except Exception as e:
+                print(f"⚠️ Sync {filename} failed: {e}")
+
+
+async def load_from_drive():
+    """Load all data files from Google Drive on startup (overwrites local)."""
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"):
+        return
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json"]:
+        content = await _drive_download(filename)
+        if content:
+            try:
+                filepath = os.path.join(data_dir, filename)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"✅ 從 Google Drive 載入 {filename}")
+            except Exception as e:
+                print(f"⚠️ 寫入 {filename} 失敗：{e}")
+        else:
+            print(f"ℹ️ Drive 上找不到 {filename}（首次使用正常）")
+
+
+async def drive_sync_loop():
+    """Background task: sync local data to Google Drive every 60 seconds."""
+    while True:
+        await asyncio.sleep(60)
+        await sync_to_drive()
+
+
 async def api_get_chat_ai_settings(request):
     user = await _get_session_user(request)
     if not user:
@@ -1267,6 +1470,9 @@ async def on_ready():
 
 @bot.event
 async def setup_hook():
+    # Load from Google Drive first (if configured), then from local
+    await load_from_drive()
+    # Load local files (will use Drive-downloaded data if available)
     load_polls_from_disk()
     save_polls_to_disk()  # Create file if not exists
     load_briefing_settings()
@@ -1278,6 +1484,7 @@ async def setup_hook():
     asyncio.ensure_future(auto_save_loop())
     asyncio.ensure_future(daily_briefing_scheduler())
     asyncio.ensure_future(weekly_briefing_scheduler())
+    asyncio.ensure_future(drive_sync_loop())
 
 
 @bot.event
