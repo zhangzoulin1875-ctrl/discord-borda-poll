@@ -2148,6 +2148,8 @@ async def _refresh_forum_index(guild) -> list:
     proposal/policy forums are submitted via a bot/webhook that posts a
     pure embed with EMPTY message content."""
     posts = []
+    _t0 = _time.time()
+    _processed = 0
     try:
         for forum in guild.forums:
             threads = list(forum.threads)  # active posts (already cached)
@@ -2157,12 +2159,16 @@ async def _refresh_forum_index(guild) -> list:
             except Exception as e:
                 print(f"⚠️ 無法取得「{forum.name}」的封存貼文：{e}")
 
+            print(f"🗂️ 開始索引「{forum.name}」— {len(threads)} 篇貼文...")
             for thread in threads:
+                _processed += 1
+                if _processed % 10 == 0:
+                    print(f"🗂️ 索引進度：已處理 {_processed} 篇，耗時 {_time.time() - _t0:.1f}s")
                 try:
                     starter = thread.starter_message
                     if starter is None:
                         try:
-                            starter = await thread.fetch_message(thread.id)
+                            starter = await asyncio.wait_for(thread.fetch_message(thread.id), timeout=5)
                         except Exception:
                             starter = None
 
@@ -2183,12 +2189,18 @@ async def _refresh_forum_index(guild) -> list:
 
                     # Fetch reply messages — this is what captures status
                     # updates (withdrawals, resolutions, follow-ups) that
-                    # happen AFTER the original post.
+                    # happen AFTER the original post. Wrapped in a hard
+                    # per-thread timeout so one slow/rate-limited thread can
+                    # never stall the whole index refresh indefinitely.
                     reply_lines = []
-                    try:
+                    last_activity = thread.created_at
+
+                    async def _walk_replies():
+                        nonlocal last_activity
                         async for msg in thread.history(limit=50, oldest_first=True):
                             if starter and msg.id == starter.id:
                                 continue
+                            last_activity = msg.created_at  # track newest as we go — no extra API call needed
                             body = msg.content.strip()
                             if not body:
                                 for embed in msg.embeds:
@@ -2202,19 +2214,17 @@ async def _refresh_forum_index(guild) -> list:
                             date_str = msg.created_at.strftime("%Y-%m-%d") if msg.created_at else "?"
                             author = msg.author.display_name if msg.author else "未知"
                             reply_lines.append(f"[{date_str}] {author}: {body[:200]}")
+
+                    try:
+                        await asyncio.wait_for(_walk_replies(), timeout=8)
+                    except asyncio.TimeoutError:
+                        print(f"⚠️ 討論串「{thread.name}」回覆讀取逾時，改用已讀到的部分")
                     except Exception:
                         pass
 
                     if reply_lines:
                         text_parts.append("─── 討論串回覆（含後續進展/狀態更新）───")
                         text_parts.extend(reply_lines)
-
-                    last_activity = thread.created_at
-                    if reply_lines:
-                        try:
-                            last_activity = [m async for m in thread.history(limit=1)][0].created_at
-                        except Exception:
-                            pass
 
                     posts.append({
                         "title": thread.name,
@@ -2236,7 +2246,7 @@ async def _refresh_forum_index(guild) -> list:
     _forum_index_cache[guild.id] = {"posts": posts, "updated": _time.time()}
     forum_count = len(list(guild.forums)) if hasattr(guild, "forums") else 0
     total_replies = sum(len(p.get("reply_lines", [])) for p in posts)
-    print(f"🗂️ Forum 索引已更新：{guild.name} — {len(posts)} 篇貼文（{forum_count} 個論壇頻道，共索引 {total_replies} 則回覆）")
+    print(f"🗂️ Forum 索引已更新：{guild.name} — {len(posts)} 篇貼文（{forum_count} 個論壇頻道，共索引 {total_replies} 則回覆），總耗時 {_time.time() - _t0:.1f}s")
     return posts
 
 
@@ -5704,7 +5714,24 @@ class ChatGroup(app_commands.Group):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        posts = await _refresh_forum_index(interaction.guild)
+
+        # Hard cap so this command can NEVER leave the user staring at
+        # "思考中..." forever — if indexing genuinely takes longer than 60s
+        # (large server, many threads/replies), let it keep running as a
+        # background task and tell the user to check back with this same
+        # command shortly instead of blocking the interaction indefinitely.
+        try:
+            posts = await asyncio.wait_for(_refresh_forum_index(interaction.guild), timeout=60)
+        except asyncio.TimeoutError:
+            print("⚠️ /system forum_index 手動刷新超過 60s，轉為背景執行")
+            asyncio.ensure_future(_refresh_forum_index(interaction.guild))
+            await interaction.followup.send(
+                "⏳ 索引的貼文/回覆數量較多，60 秒內沒跑完，已轉為背景繼續執行。"
+                "大約 1-2 分鐘後再用這個指令查看結果就會是最新的。",
+                ephemeral=True,
+            )
+            return
+
         forum_count = len(list(interaction.guild.forums))
 
         embed = discord.Embed(
