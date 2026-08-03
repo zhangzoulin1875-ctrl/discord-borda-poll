@@ -766,6 +766,55 @@ CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "da
 chat_cooldowns: dict = {}  # channel_id -> timestamp
 chat_generating: set = set()  # channel_ids currently generating
 
+# ──────────────────────────────────────────────
+# 每用戶記憶系統（per-user memory）
+# ──────────────────────────────────────────────
+
+USER_MEMORIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "user_memories.json")
+user_memories: dict = {}  # {user_id_str: {facts: [...], name: str, interaction_count: int, last_seen: float}}
+
+
+def save_user_memories():
+    try:
+        os.makedirs(os.path.dirname(USER_MEMORIES_FILE), exist_ok=True)
+        with open(USER_MEMORIES_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(user_memories, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️ Failed to save user memories: {e}")
+
+
+def load_user_memories():
+    global user_memories
+    try:
+        if os.path.exists(USER_MEMORIES_FILE):
+            with open(USER_MEMORIES_FILE, "r", encoding="utf-8") as f:
+                user_memories = json_module.load(f)
+            print(f"✅ 載入 {len(user_memories)} 位使用者記憶")
+    except Exception as e:
+        print(f"⚠️ Failed to load user memories: {e}")
+
+
+def _update_user_memory(user_id: str, user_name: str, new_facts: list):
+    """Update a user's memory with new facts (deduped, capped at 20)."""
+    mem = user_memories.get(user_id, {
+        "facts": [], "name": user_name,
+        "interaction_count": 0, "last_seen": 0.0,
+    })
+    existing_lower = set(f.lower().strip() for f in mem.get("facts", []))
+    for f in new_facts:
+        f = f.strip()
+        if f and f.lower() not in existing_lower and len(f) < 100:
+            mem["facts"].append(f)
+            existing_lower.add(f.lower())
+    # Cap at 20 facts (keep most recent)
+    if len(mem["facts"]) > 20:
+        mem["facts"] = mem["facts"][-20:]
+    mem["name"] = user_name
+    mem["interaction_count"] = mem.get("interaction_count", 0) + 1
+    mem["last_seen"] = _time.time()
+    user_memories[user_id] = mem
+    save_user_memories()
+
 
 def save_chat_ai_settings():
     try:
@@ -861,8 +910,26 @@ async def call_chat_api(messages: list, settings: dict) -> str:
             return data["choices"][0]["message"]["content"]
 
 
-async def generate_chat_reply(message, settings: dict) -> str:
-    """Generate a reply for a chat message with brief context."""
+async def generate_chat_reply(message, settings: dict) -> tuple:
+    """Generate a reply for a chat message with brief context and per-user memory.
+    Returns (reply_text, new_facts_or_None)."""
+    user_id = str(message.author.id)
+    user_name = message.author.display_name
+
+    # Load user memory
+    mem = user_memories.get(user_id, {})
+    facts = mem.get("facts", [])
+
+    # Build system prompt with memory
+    system_prompt = settings["system_prompt"]
+    if facts:
+        memory_text = "\n".join(f"- {f}" for f in facts)
+        system_prompt += f"\n\n你對這位使用者（{user_name}）的記憶：\n{memory_text}"
+    system_prompt += (
+        "\n\n每次回覆最後加一行 [MEMORY: 1-3個要記住關於這位使用者的重點，用逗號分隔]。"
+        "如果沒有新東西值得記就寫 [MEMORY: none]。這行不會顯示給用戶看。"
+    )
+
     # Collect brief context (last 5 messages before this one)
     context_lines = []
     try:
@@ -881,18 +948,29 @@ async def generate_chat_reply(message, settings: dict) -> str:
 
     bot_id = bot.user.id
     clean_content = message.content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
-    author_name = message.author.display_name
 
     if context:
-        full_prompt = f"近期對話:\n{context}\n\n{author_name}: {clean_content}"
+        full_prompt = f"近期對話:\n{context}\n\n{user_name}: {clean_content}"
     else:
-        full_prompt = f"{author_name}: {clean_content}"
+        full_prompt = f"{user_name}: {clean_content}"
 
     messages = [
-        {"role": "system", "content": settings["system_prompt"]},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": full_prompt},
     ]
-    return await call_chat_api(messages, settings)
+    raw_reply = await call_chat_api(messages, settings)
+
+    # Parse [MEMORY:] tag from reply
+    actual_reply = raw_reply
+    new_facts = None
+    if "[MEMORY:" in raw_reply:
+        parts = raw_reply.rsplit("[MEMORY:", 1)
+        actual_reply = parts[0].strip()
+        memory_str = parts[1].rstrip("]").strip()
+        if memory_str.lower() != "none" and memory_str:
+            new_facts = [f.strip() for f in memory_str.split(",") if f.strip()]
+
+    return actual_reply, new_facts
 
 
 # ──────────────────────────────────────────────
@@ -1053,7 +1131,7 @@ async def sync_to_drive():
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"):
         return
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json"]:
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json"]:
         filepath = os.path.join(data_dir, filename)
         if os.path.exists(filepath):
             try:
@@ -1070,7 +1148,7 @@ async def load_from_drive():
         return
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json"]:
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json"]:
         content = await _drive_download(filename)
         if content:
             try:
@@ -1508,6 +1586,7 @@ async def setup_hook():
     save_briefing_settings()  # Create file if not exists
     load_chat_ai_settings()
     save_chat_ai_settings()  # Create file if not exists
+    load_user_memories()
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
     asyncio.ensure_future(auto_save_loop())
@@ -1576,10 +1655,14 @@ async def on_message(message):
     chat_generating.add(message.channel.id)
     try:
         async with message.channel.typing():
-            reply = await generate_chat_reply(message, chat_ai_settings)
+            reply, new_facts = await generate_chat_reply(message, chat_ai_settings)
         if reply and reply.strip():
             chat_cooldowns[message.channel.id] = _time.time()
             await message.reply(reply[:2000], mention_author=False)
+            # Save user memory if AI extracted facts
+            if new_facts:
+                _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
+                print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
     except Exception as e:
         print(f"⚠️ Chat AI error: {e}")
     finally:
@@ -2670,14 +2753,56 @@ class ChatGroup(app_commands.Group):
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            messages = [
-                {"role": "system", "content": chat_ai_settings["system_prompt"]},
-                {"role": "user", "content": f"測試者: {message}"},
-            ]
-            reply = await call_chat_api(messages, chat_ai_settings)
-            await interaction.followup.send(f"✅ AI 回覆：\n{reply}", ephemeral=True)
+            # Use generate_chat_reply for full memory integration
+            class FakeMsg:
+                pass
+            fake = FakeMsg()
+            fake.channel = interaction.channel
+            fake.author = interaction.user
+            fake.content = message
+            reply, new_facts = await generate_chat_reply(fake, chat_ai_settings)
+            # Strip [MEMORY:] from test reply
+            if "[MEMORY:" in reply:
+                reply = reply.rsplit("[MEMORY:", 1)[0].strip()
+            result = f"✅ AI 回覆：\n{reply}"
+            if new_facts:
+                result += f"\n\n🧠 記憶更新：{', '.join(new_facts)}"
+            await interaction.followup.send(result, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ AI 聊天測試失敗：{e}", ephemeral=True)
+
+    @app_commands.command(name="memory", description="查看 AI 對你的記憶")
+    async def chat_memory(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        mem = user_memories.get(user_id, {})
+        facts = mem.get("facts", [])
+        count = mem.get("interaction_count", 0)
+        if not facts:
+            await interaction.response.send_message("🧠 AI 目前對你沒有任何記憶。多聊天就會開始記住你了！", ephemeral=True)
+            return
+        lines = [f"🧠 AI 對 **{interaction.user.display_name}** 的記憶（{len(facts)} 條 / {count} 次互動）："]
+        for i, f in enumerate(facts, 1):
+            lines.append(f"{i}. {f}")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="memory_clear", description="清除 AI 對你的記憶（管理員可清除指定用戶）")
+    @app_commands.describe(user="要清除記憶的用戶（不填則清除自己的）")
+    async def chat_memory_clear(self, interaction: discord.Interaction, user: discord.Member = None):
+        target = user or interaction.user
+        if user and not is_admin(interaction):
+            await interaction.response.send_message("❌ 只有管理員能清除他人的記憶。", ephemeral=True)
+            return
+        target_id = str(target.id)
+        if target_id in user_memories:
+            old_count = len(user_memories[target_id].get("facts", []))
+            del user_memories[target_id]
+            save_user_memories()
+            await interaction.response.send_message(
+                f"✅ 已清除 AI 對 {target.mention} 的記憶（原本有 {old_count} 條）",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(f"ℹ️ {target.mention} 沒有任何記憶。", ephemeral=True)
 
     @app_commands.command(name="debug", description="診斷 AI 聊天問題（管理員限定）")
     async def chat_debug(self, interaction: discord.Interaction):
@@ -2743,7 +2868,9 @@ class ChatGroup(app_commands.Group):
         embed.add_field(name="模型", value=f"`{model}`", inline=True)
         embed.add_field(name="冷卻時間", value=f"{cooldown} 秒", inline=True)
         embed.add_field(name="頻道白名單", value=channels, inline=False)
-        embed.set_footer(text="使用 /chat toggle 開關 | /chat model 設模型 | /chat prompt 設人設")
+        mem_count = len(user_memories)
+        embed.add_field(name="用戶記憶", value=f"已記住 {mem_count} 位使用者", inline=True)
+        embed.set_footer(text="/chat toggle | /chat model | /chat memory | /chat debug")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
