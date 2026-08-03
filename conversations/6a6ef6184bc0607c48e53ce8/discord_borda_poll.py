@@ -1216,7 +1216,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
     ok = False
     data = None
     try:
-        status, body_text = await _post(payload, timeout_total=12 if use_tools else 30, timeout_read=10 if use_tools else 25)
+        status, body_text = await _post(payload, timeout_total=30, timeout_read=25)
     except (asyncio.TimeoutError, Exception) as e:
         if use_tools:
             # The endpoint HUNG on the tools param (didn't return an error,
@@ -2493,64 +2493,76 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     tools = tools if tools else None
 
     async def _run_tool_loop():
-        """Drive the tool-calling round-trip. Bounded to a few rounds so a
-        model that keeps calling tools can't loop forever; the whole thing is
-        wrapped in an overall wait_for by the caller as a hard safety net."""
+        """Drive the tool-calling round-trip — capped at EXACTLY 2 LLM calls
+        total, no matter what. Round 0 gets tools (the model can request
+        several tool_calls at once in a single response — this still lets it
+        "try a few queries", just not across multiple separate round-trips).
+        Round 1 is always forced to a plain text answer with no tools.
+        This hard cap matters because each individual call_chat_api call
+        already has its own timeout/retry safety net — but if the endpoint is
+        merely SLOW (not hung) at ~20-30s per call, allowing 3 total round-trips
+        (as the previous version did, with tools available on 2 of them) could
+        by itself exceed the outer time budget. Capping at 2 keeps worst-case
+        total latency bounded and predictable."""
+        t0 = _time.time()
         msgs = messages
-        for round_num in range(3):
-            # Force a plain text answer on the final allowed round.
-            round_tools = tools if round_num < 2 else None
-            assistant_msg = await call_chat_api(msgs, settings, tools=round_tools)
-            tool_calls = assistant_msg.get("tool_calls")
-            if not tool_calls:
-                return assistant_msg.get("content") or ""
+        assistant_msg = await call_chat_api(msgs, settings, tools=tools)
+        print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}）耗時 {_time.time()-t0:.1f}s")
+        tool_calls = assistant_msg.get("tool_calls")
+        if not tool_calls:
+            return assistant_msg.get("content") or ""
 
-            # Model wants to search — execute each requested call, then let it
-            # see the results and continue (or give its final answer).
-            msgs = msgs + [assistant_msg]
-            for tc in tool_calls:
-                fn = tc.get("function", {})
-                name = fn.get("name")
-                call_id = tc.get("id")
-                if name == "search_micropedia":
-                    try:
-                        args = json_module.loads(fn.get("arguments") or "{}")
-                    except Exception:
-                        args = {}
-                    query = (args.get("query") or "").strip()
-                    print(f"🔧 AI 呼叫 search_micropedia('{query}')")
-                    result = await _fetch_micropedia(query, max_results) if query else ""
-                    tool_content = result if result else "沒有找到相關資料，試試看換一個更短或不同的關鍵字。"
-                elif name == "search_discord":
-                    try:
-                        args = json_module.loads(fn.get("arguments") or "{}")
-                    except Exception:
-                        args = {}
-                    query = (args.get("query") or "").strip()
-                    print(f"🔧 AI 呼叫 search_discord('{query}')")
-                    if query and message.guild:
-                        result = await _search_discord_history(message.guild, query, limit=10)
-                    else:
-                        result = "無法搜尋（沒有 guild 或搜尋詞為空）"
-                    tool_content = result if result else "沒有找到相關訊息，試試看換一個不同的關鍵字。"
+        # Model wants to search — execute each requested call (possibly
+        # several at once), then let it see all results and give a final answer.
+        t1 = _time.time()
+        msgs = msgs + [assistant_msg]
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            name = fn.get("name")
+            call_id = tc.get("id")
+            if name == "search_micropedia":
+                try:
+                    args = json_module.loads(fn.get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                query = (args.get("query") or "").strip()
+                print(f"🔧 AI 呼叫 search_micropedia('{query}')")
+                result = await _fetch_micropedia(query, max_results) if query else ""
+                tool_content = result if result else "沒有找到相關資料，試試看換一個更短或不同的關鍵字。"
+            elif name == "search_discord":
+                try:
+                    args = json_module.loads(fn.get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                query = (args.get("query") or "").strip()
+                print(f"🔧 AI 呼叫 search_discord('{query}')")
+                if query and message.guild:
+                    result = await _search_discord_history(message.guild, query, limit=10)
                 else:
-                    tool_content = f"未知工具：{name}"
-                msgs = msgs + [{
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": tool_content[:3000],
-                }]
-        # Ran out of rounds without a final text answer — ask once more, no tools.
+                    result = "無法搜尋（沒有 guild 或搜尋詞為空）"
+                tool_content = result if result else "沒有找到相關訊息，試試看換一個不同的關鍵字。"
+            else:
+                tool_content = f"未知工具：{name}"
+            msgs = msgs + [{
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": tool_content[:3000],
+            }]
+        print(f"⏱️ 工具執行（{len(tool_calls)} 個）耗時 {_time.time()-t1:.1f}s")
+
+        # Final round — ALWAYS plain text, no tools. Capped at 2 calls total.
+        t2 = _time.time()
         final_msg = await call_chat_api(msgs, settings, tools=None)
+        print(f"⏱️ Round 2（最終答案，無 tools）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
     # Hard overall cap on the whole AI round-trip (covers all tool rounds),
     # so no matter how many searches happen the reply pipeline never stalls
     # indefinitely — this is the outer safety net on top of each call's own timeout.
     try:
-        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=60)
+        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=90)
     except asyncio.TimeoutError:
-        print(f"⚠️ AI 回覆流程整體逾時（>60s）")
+        print(f"⚠️ AI 回覆流程整體逾時（>90s）")
         raise
     except Exception as e:
         # Something about the tool-calling machinery itself broke (bad response
