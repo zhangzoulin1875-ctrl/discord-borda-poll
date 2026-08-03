@@ -1186,7 +1186,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
 
-    async def _post(payload, timeout_total=30, timeout_read=25):
+    async def _post(payload, timeout_total=45, timeout_read=40):
         # Use the shared, pooled session (set up in on_ready) instead of opening
         # a new connection per request. Falls back to a throwaway session only
         # if the shared one isn't ready yet (very early startup edge case).
@@ -1215,8 +1215,10 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
     # and retry without tools at the normal timeout, instead of burning 30s.
     ok = False
     data = None
+    _t0 = _time.time()
     try:
-        status, body_text = await _post(payload, timeout_total=30, timeout_read=25)
+        status, body_text = await _post(payload, timeout_total=45, timeout_read=40)
+        print(f"⏱️ call_chat_api: _post 耗時 {_time.time()-_t0:.1f}s (status={status}, tools={'yes' if use_tools else 'no'})")
     except (asyncio.TimeoutError, Exception) as e:
         if use_tools:
             # The endpoint HUNG on the tools param (didn't return an error,
@@ -1227,7 +1229,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
             save_tools_unsupported()
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
-            status, body_text = await _post(payload, timeout_total=30, timeout_read=25)
+            status, body_text = await _post(payload, timeout_total=45, timeout_read=40)
         else:
             raise
 
@@ -1236,6 +1238,9 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
             data = json_module.loads(body_text)
             if "choices" in data:
                 ok = True
+                if use_tools:
+                    _tools_supported_apis.add(api_url)
+                    save_tools_supported()
         except Exception:
             pass
 
@@ -1247,7 +1252,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         save_tools_unsupported()
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
-        status, body_text = await _post(payload, timeout_total=30, timeout_read=25)
+        status, body_text = await _post(payload, timeout_total=45, timeout_read=40)
         if status == 200:
             try:
                 data = json_module.loads(body_text)
@@ -1683,6 +1688,29 @@ _MICROPEDIA_CACHE_TTL = 600  # 10 minutes
 # network round-trip (try-with-tools, fail, retry-without-tools) on the very
 # next message, which is a major source of the reply pipeline timing out.
 _tools_unsupported_apis: set = set()
+_tools_supported_apis: set = set()
+_TOOLS_SUPPORTED_FILE = os.path.join(DATA_DIR, "tools_supported_apis.json")
+
+
+def save_tools_supported():
+    """Persist the set of API URLs known to support tool calling."""
+    try:
+        with open(_TOOLS_SUPPORTED_FILE, "w") as f:
+            json_module.dump(list(_tools_supported_apis), f)
+    except Exception as e:
+        print(f"⚠️ save_tools_supported failed: {e}")
+
+
+def load_tools_supported():
+    """Load known tool-supporting API URLs from disk."""
+    global _tools_supported_apis
+    try:
+        if os.path.exists(_TOOLS_SUPPORTED_FILE):
+            with open(_TOOLS_SUPPORTED_FILE, "r") as f:
+                _tools_supported_apis = set(json_module.load(f))
+            print(f"🔧 已載入 tools 支援白名單：{len(_tools_supported_apis)} 個端點")
+    except Exception as e:
+        print(f"⚠️ load_tools_supported failed: {e}")
 TOOLS_UNSUPPORTED_FILE = os.path.join(DATA_DIR, "tools_unsupported_apis.json")
 
 def save_tools_unsupported():
@@ -2483,13 +2511,24 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             _norm += "/chat/completions"
         else:
             _norm += "/v1/chat/completions"
-    tools_known_unsupported = _norm in _tools_unsupported_apis
+    # WHITELIST approach: only send tools if we've CONFIRMED the endpoint
+    # supports them (via startup probe or previous successful tools call).
+    # This prevents the first-message-after-restart timeout that happens when
+    # we send tools to an endpoint that can't handle them.
+    _tools_supported = getattr(globals().get('_tools_supported_apis', None), '__contains__', lambda x: False)(_norm)
+    _tools_unsup = _norm in _tools_unsupported_apis
+    tools_ok = _tools_supported and not _tools_unsup
 
     tools = []
-    if not tools_known_unsupported:
+    if tools_ok:
         if micropedia_enabled:
             tools.append(_MICROPEDIA_TOOL_SCHEMA)
         tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)
+    elif micropedia_enabled and not _tools_unsup and not _tools_supported:
+        # Endpoint not yet tested — send micropedia tool only (known to work
+        # in the past) but NOT search_discord (new, might slow things down).
+        # The probe will confirm support and unlock search_discord.
+        tools.append(_MICROPEDIA_TOOL_SCHEMA)
     tools = tools if tools else None
 
     async def _run_tool_loop():
@@ -3403,6 +3442,8 @@ async def _probe_tools_support(settings: dict, api_url: str):
             data = json_module.loads(body)
             if "choices" in data:
                 print(f"✅ AI 端點支援 tools（probe 成功）— 工具功能可用")
+                _tools_supported_apis.add(api_url)
+                save_tools_supported()
                 return
         # Failed — endpoint doesn't support tools
         print(f"⚠️ AI 端點不支援 tools（probe 失敗 status={status}）— 之後略過 tools 參數")
@@ -3484,6 +3525,7 @@ async def setup_hook():
     load_user_memories()
     load_emoji_aliases()
     load_tools_unsupported()
+    load_tools_supported()
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
     asyncio.ensure_future(auto_save_loop())
