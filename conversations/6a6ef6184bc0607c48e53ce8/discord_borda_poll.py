@@ -1284,7 +1284,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
             message["tool_calls"] = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
         body = json_module.dumps({"choices": [{"message": message, "finish_reason": finish_reason or "stop"}]})
         _elapsed = _first_chunk_time - _time.time() if _first_chunk_time else 0
-        print(f"📦 串流完成：{_chunk_count} chunks, content={len(content_parts)} chars, tool_calls={len(tool_calls_acc)}")
+        _total_chars = sum(len(p) for p in content_parts)
+        print(f"📦 串流完成：{_chunk_count} chunks, content={_total_chars} chars, tool_calls={len(tool_calls_acc)}")
         return 200, body
 
     payload = {
@@ -1461,41 +1462,30 @@ async def _get_server_context(guild, user) -> str:
     lines = []
     lines.append(f"─── 伺服器結構：{d['guild_name']}（{d['member_count']} 成員）───")
 
-    # Channels (compact, grouped by category)
-    lines.append("\n📁 頻道：")
-    current_cat = None
-    ch_names = []
-    for ch in d["channels"]:
-        if ch["category"] != current_cat:
-            if ch_names:
-                lines.append(f"  [{current_cat}] {', '.join(ch_names)}")
-                ch_names = []
-            current_cat = ch["category"]
-        ch_names.append(f"#{ch['name']}")
-    if ch_names:
-        lines.append(f"  [{current_cat}] {', '.join(ch_names)}")
+    # Channels — just names, max 30, no category grouping (saves ~2000 chars)
+    ch_names = [f"#{ch['name']}" for ch in d["channels"][:30]]
+    if len(d["channels"]) > 30:
+        ch_names.append(f"...（共 {len(d['channels'])} 個）")
+    lines.append(f"\n📁 頻道（{len(d['channels'])} 個）：{', '.join(ch_names)}")
 
     # Roles (compact)
     lines.append(f"\n🏷️ 身分組：{', '.join(r['name'] for r in d['roles'][:20])}")
 
-    # Emojis (compact — give the AI the ACTUAL Discord render syntax with semantic labels)
+    # Emojis — ONLY show ones with aliases (others are useless to AI and waste tokens)
     if d["emojis"]:
         emoji_tokens = []
-        for e in d["emojis"][:50]:  # Increased to 50 now that aliases need context
-            prefix = "a" if e.get("animated") else ""
-            token = f"<{prefix}:{e['name']}:{e['id']}>"
+        for e in d["emojis"]:
             alias = emoji_aliases.get(e["name"])
             if alias:
+                prefix = "a" if e.get("animated") else ""
+                token = f"<{prefix}:{e['name']}:{e['id']}>"
                 label = alias.get("alias", "")
                 emoji_tokens.append(f"{token}（={label}）")
-            else:
-                # No alias set — flag it so AI doesn't guess
-                emoji_tokens.append(f"{token}（名稱不明確，不確定含義時不要使用）")
-        lines.append(
-            f"\n😀 伺服器自訂 Emoji（如果要使用，必須「完整照抄」下面整串 <...> 文字，"
-            f"包含角括號和數字 ID，絕對不能只打 :名稱:）：\n"
-            f"{' '.join(emoji_tokens)}"
-        )
+        if emoji_tokens:
+            lines.append(
+                f"\n😀 伺服器自訂 Emoji（使用時必須完整照抄 <...> 文字）：\n"
+                f"{' '.join(emoji_tokens)}"
+            )
 
     # Current user's identity in this server
     user_roles = [r.name for r in user.roles if r.name != "@everyone" and not r.managed]
@@ -1506,18 +1496,15 @@ async def _get_server_context(guild, user) -> str:
     lines.append(f"  身分組：{', '.join(user_roles) if user_roles else '（無）'}")
     lines.append(f"  權限：{'管理員' if is_admin else '一般成員'}")
 
-    # Other members (compact — just names with key roles)
+    # Other members — only admins + role-bearing members, max 15
     other_members = [m for m in d["members"] if m["name"] != user.display_name]
-    if other_members:
+    notable = [m for m in other_members if m["is_admin"] or m.get("roles")]
+    if notable:
         member_summary = []
-        for m in other_members[:30]:
-            tag = ""
-            if m["is_admin"]:
-                tag = "★"
-            elif m["roles"]:
-                tag = f"({m['roles'][0]})"
+        for m in notable[:15]:
+            tag = "★" if m["is_admin"] else (f"({m['roles'][0]})" if m.get("roles") else "")
             member_summary.append(f"{m['name']}{tag}")
-        lines.append(f"\n👥 其他成員（★=管理員）：{', '.join(member_summary)}")
+        lines.append(f"\n👥 成員（★=管理員）：{', '.join(member_summary)}")
 
     return "\n".join(lines)
 
@@ -2562,7 +2549,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     micropedia_enabled = settings.get("micropedia_enabled", True)
     max_results = settings.get("micropedia_max_results", 5)
 
-    if micropedia_enabled:
+    if micropedia_enabled and len(clean_content) >= 4:
+        # Skip micropedia for very short messages (emoji-only, "好", etc.)
+        # to avoid inflating the system prompt with 2000+ chars of wiki content
+        # that the AI has to process on a slow free API
         try:
             auto_context = await asyncio.wait_for(
                 _micropedia_auto_context(clean_content, max_results), timeout=10
