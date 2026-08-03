@@ -2804,15 +2804,16 @@ async def on_ready():
             timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25),
             connector=aiohttp.TCPConnector(limit=20, limit_per_host=10)
         )
-    bot.tree.add_command(PollGroup())
-    bot.tree.add_command(MeetingGroup())
-    bot.tree.add_command(BriefingGroup())
-    bot.tree.add_command(ChatGroup())
-    bot.tree.add_command(SystemGroup())
     # Check message_content intent
     if not bot.intents.message_content:
         print("⚠️  message_content intent 未啟用！AI 聊天功能無法讀取訊息內容。")
         print("    請到 Discord Developer Portal → Bot → Privileged Gateway Intents → 開啟 MESSAGE CONTENT INTENT")
+    else:
+        print("✅ message_content intent 已啟用")
+    print(f"📋 Chat AI: enabled={chat_ai_settings.get('enabled')}, "
+          f"filter={chat_ai_settings.get('filter_strength', 'mention')}, "
+          f"key={'✅' if chat_ai_settings.get('api_key') else '❌'}, "
+          f"whitelist={len(chat_ai_settings.get('channels_whitelist', []))} ch")
     try:
         synced = await bot.tree.sync()
         print(f"✅ Bot 上線：{bot.user}（已同步 {len(synced)} 個 slash commands）")
@@ -2822,6 +2823,12 @@ async def on_ready():
 
 @bot.event
 async def setup_hook():
+    # Register slash command groups (runs once, before bot connects)
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup()]:
+        try:
+            bot.tree.add_command(grp)
+        except Exception:
+            pass
     # Load from Google Drive first (if configured), then from local
     await load_from_drive()
     # Load local files (will use Drive-downloaded data if available)
@@ -4399,7 +4406,10 @@ class ChatGroup(app_commands.Group):
                 ephemeral=True
             )
             return
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         log_ch, err = await _resolve_log_channel(interaction.guild)
         if not log_ch:
             await interaction.followup.send(f"❌ 找不到紀錄頻道：{err}", ephemeral=True)
@@ -4432,7 +4442,10 @@ class ChatGroup(app_commands.Group):
         if not chat_ai_settings.get("api_key"):
             await interaction.response.send_message("❌ 尚未設定 AI 聊天 API Key。請到 Dashboard 設定。", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.NotFound:
+            return
         try:
             # Use generate_chat_reply for full memory integration
             class FakeMsg:
