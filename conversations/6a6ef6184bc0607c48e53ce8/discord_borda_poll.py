@@ -2280,18 +2280,19 @@ def _search_forum_posts(query: str, posts: list, top_n: int = 5) -> list:
     return [p for p, _, _ in scored[:top_n]]
 
 
-async def _live_guild_message_search(guild, query: str, limit: int = 10) -> str:
+async def _live_guild_message_search(guild, query: str, limit: int = 25) -> str:
     """Search Discord guild message history (plain-text content only) via
     Discord's guild search API endpoint. No time limit — searches all of
-    history. Does NOT see embed content — that's what the forum index above
-    covers separately."""
+    history. Returns up to 25 results sorted chronologically (oldest first)
+    so the AI can see the full timeline of a topic. Does NOT see embed
+    content — that's what the forum index above covers separately."""
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token or not guild or not query.strip():
         return ""
 
     query = query.strip()
     headers = {"Authorization": f"Bot {token}"}
-    timeout = aiohttp.ClientTimeout(total=7, connect=3)
+    timeout = aiohttp.ClientTimeout(total=10, connect=3)
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -2317,14 +2318,23 @@ async def _live_guild_message_search(guild, query: str, limit: int = 10) -> str:
             if not messages:
                 return ""
 
-            lines = [f"🔍 頻道訊息搜尋「{query}」的結果（{len(messages)} 則）："]
+            # Sort by timestamp (oldest first) so AI sees the timeline
+            messages.sort(key=lambda m: m.get("timestamp", ""))
+            lines = [f"🔍 全伺服器訊息搜尋「{query}」的結果（{len(messages)} 則，按時間排列）："]
             for i, msg in enumerate(messages[:limit], 1):
                 author = msg.get("author", {}).get("username", "未知")
-                content = msg.get("content", "").strip()
+                msg_content = msg.get("content", "").strip()
                 timestamp = msg.get("timestamp", "")
-                content = re.sub(r"<@!?\d+>", "@用戶", content)[:300]
-                lines.append(f"\n[{i}] {author} ({timestamp[:10] if timestamp else '?'}): {content}")
-            return "\n".join(lines)[:2000]
+                channel_id = msg.get("channel_id", "")
+                # Try to get channel name
+                ch_name = "?"
+                if channel_id:
+                    ch = guild.get_channel(int(channel_id)) if channel_id.isdigit() else None
+                    if ch:
+                        ch_name = ch.name
+                msg_content = re.sub(r"<@!?\d+>", "@用戶", msg_content)[:400]
+                lines.append(f"\n[{i}] #{ch_name} | {author} ({timestamp[:16] if timestamp else '?'}): {msg_content}")
+            return "\n".join(lines)[:4000]
     except asyncio.TimeoutError:
         print(f"⚠️ Discord 訊息搜尋逾時 for '{query}'")
         return ""
@@ -2343,7 +2353,7 @@ async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> s
     async def _forum_part():
         try:
             posts = await _get_forum_index(guild)
-            matched = _search_forum_posts(query, posts, top_n=5)
+            matched = _search_forum_posts(query, posts, top_n=8)
             if not matched:
                 return ""
             parts = [
@@ -2397,7 +2407,7 @@ async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> s
     combined = "\n\n".join(r for r in (forum_result, live_result) if r)
     if not combined:
         return f"沒有找到包含「{query}」的訊息或論壇貼文"
-    return combined[:3500]
+    return combined[:6000]
 
 
 async def _search_discord_history(guild, query: str, limit: int = 10) -> str:
@@ -2405,9 +2415,9 @@ async def _search_discord_history(guild, query: str, limit: int = 10) -> str:
     network conditions — guarantees this tool call never meaningfully stalls
     the reply pipeline (same pattern as _fetch_micropedia)."""
     try:
-        return await asyncio.wait_for(_search_discord_history_inner(guild, query, limit), timeout=10)
+        return await asyncio.wait_for(_search_discord_history_inner(guild, query, limit), timeout=15)
     except asyncio.TimeoutError:
-        print(f"⚠️ Discord 搜尋整體逾時（>10s），放棄 for '{query}'")
+        print(f"⚠️ Discord 搜尋整體逾時（>15s），放棄 for '{query}'")
         return "搜尋逾時，換個關鍵字試試看"
 
 
@@ -2578,7 +2588,62 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     bot_id = bot.user.id
     clean_content = message.content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
 
-    full_prompt = f"{user_name}: {clean_content}"
+    # ── Discord 連結解析 ──
+    # If the user's message contains Discord jump URLs, fetch the actual
+    # message content so the AI can see what's at that link instead of
+    # saying "I can't access Discord links."
+    discord_link_context = ""
+    _discord_url_pattern = re.compile(
+        r"https?://(?:discord\.com|discordapp\.com)/channels/(\d+)/(\d+)/(\d+)"
+    )
+    _link_matches = _discord_url_pattern.findall(clean_content)
+    if _link_matches and message.guild:
+        link_parts = []
+        for _guild_id, _ch_id, _msg_id in _link_matches[:3]:  # max 3 links
+            try:
+                _ch = message.guild.get_channel(int(_ch_id)) or bot.get_channel(int(_ch_id))
+                if _ch is None:
+                    continue
+                _target_msg = await _ch.fetch_message(int(_msg_id))
+                if _target_msg is None:
+                    continue
+                _author = _target_msg.author.display_name if _target_msg.author else "未知"
+                _date = _target_msg.created_at.strftime("%Y-%m-%d")
+                _body = _target_msg.content.strip()
+                for embed in _target_msg.embeds:
+                    if embed.title:
+                        _body += "\n" + str(embed.title)
+                    if embed.description:
+                        _body += "\n" + str(embed.description)
+                    for field in embed.fields:
+                        _body += f"\n{field.name}: {field.value}"
+                _body = _body.strip()[:800]
+                link_parts.append(f"📎 連結內容（#{_ch.name}, {_author}, {_date}）：\n{_body}")
+                # If this is a forum thread, also grab a few replies
+                if hasattr(_ch, 'history') and _ch.type == discord.ChannelType.public_thread:
+                    _replies = []
+                    async for _rm in _ch.history(limit=10, after=_target_msg):
+                        _rb = _rm.content.strip()[:200]
+                        if _rm.embeds and not _rb:
+                            for _emb in _rm.embeds:
+                                if _emb.description:
+                                    _rb = str(_emb.description)[:200]
+                                    break
+                        if _rb:
+                            _rd = _rm.created_at.strftime("%Y-%m-%d")
+                            _ra = _rm.author.display_name if _rm.author else "未知"
+                            _replies.append(f"[{_rd}] {_ra}: {_rb}")
+                    if _replies:
+                        link_parts.append("📌 此貼文的回覆：\n" + "\n".join(_replies[-5:]))
+            except Exception as e:
+                print(f"⚠️ Discord 連結解析失敗：{e}")
+        if link_parts:
+            discord_link_context = "\n\n".join(link_parts)
+
+    if discord_link_context:
+        full_prompt = f"{user_name}: {clean_content}\n\n{discord_link_context}"
+    else:
+        full_prompt = f"{user_name}: {clean_content}"
 
     # ── Micropedia ──
     # Two layers, so this works regardless of whether the AI provider even
@@ -2671,7 +2736,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"- 之前的決定、投票、討論\n"
             f"- 任何「以前」、「之前」、「上次」相關的問題\n"
             f"請呼叫這個工具搜尋相關關鍵字。如果完整名稱查不到，試試看拆成更短的核心詞再查一次"
-            f"（例如「黃綠燈罷免案」查不到就試「黃綠燈」或「罷免」）。"
+            f"（例如「黃綠燈罷免案」查不到就試「黃綠燈」或「罷免」）。\n"
+            f"這個工具會搜尋整個伺服器的所有頻道訊息和論壇貼文，結果按時間排列，"
+            f"你可以從多篇訊息拼湊出完整的事件脈絡。"
+            f"如果第一次搜尋結果不夠完整，可以用不同的關鍵字再搜一次。"
             f"找到的內容會標示來源、發言者、日期和內容，"
             f"你可以據此回答使用者的問題；如果找不到，才誠實告知使用者。\n"
             f"⚠️ 極重要：論壇貼文的「原始內容」只是提案剛發起時的樣子，事情很可能早就有後續發展"
