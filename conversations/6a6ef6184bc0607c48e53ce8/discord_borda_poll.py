@@ -1051,11 +1051,15 @@ async def _get_drive_access_token():
         return None
 
 
-async def _drive_upload(filename: str, content: str) -> bool:
-    """Upload (create or update) a file on Google Drive."""
+async def _drive_upload(filename: str, content: str, return_detail: bool = False):
+    """Upload (create or update) a file on Google Drive.
+    If return_detail=True, returns (success: bool, detail: str). Otherwise returns bool."""
+    def _ret(ok, detail):
+        return (ok, detail) if return_detail else ok
+
     token = await _get_drive_access_token()
     if not token:
-        return False
+        return _ret(False, "無法取得存取權杖（見上方 auth 錯誤）")
 
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
     headers = {"Authorization": f"Bearer {token}"}
@@ -1070,8 +1074,9 @@ async def _drive_upload(filename: str, content: str) -> bool:
             async with session.get(search_url, headers=headers) as resp:
                 search_text = await resp.text()
                 if resp.status != 200:
+                    detail = f"搜尋失敗（HTTP {resp.status}）：{search_text[:400]}"
                     print(f"⚠️ Drive 搜尋 {filename} 失敗（{resp.status}）：{search_text[:400]}")
-                    return False
+                    return _ret(False, detail)
                 data = json_module.loads(search_text)
             existing = data.get("files", [])
 
@@ -1086,10 +1091,11 @@ async def _drive_upload(filename: str, content: str) -> bool:
                 ) as resp:
                     if resp.status in (200, 204):
                         print(f"✅ Drive 已更新 {filename}")
-                        return True
+                        return _ret(True, "更新成功")
                     err = await resp.text()
+                    detail = f"更新失敗（HTTP {resp.status}）：{err[:500]}"
                     print(f"⚠️ Drive 更新 {filename} 失敗（{resp.status}）：{err[:400]}")
-                    return False
+                    return _ret(False, detail)
             else:
                 # Create new file via multipart upload (RFC 2046 requires CRLF line endings)
                 import uuid as _uuid
@@ -1118,12 +1124,14 @@ async def _drive_upload(filename: str, content: str) -> bool:
                     resp_text = await resp.text()
                     if resp.status in (200, 201):
                         print(f"✅ Drive 已建立 {filename}：{resp_text[:200]}")
-                        return True
+                        return _ret(True, "建立成功")
+                    detail = f"建立失敗（HTTP {resp.status}）：{resp_text[:500]}"
                     print(f"⚠️ Drive 建立 {filename} 失敗（{resp.status}）：{resp_text[:400]}")
-                    return False
+                    return _ret(False, detail)
     except Exception as e:
+        detail = f"例外錯誤：{e}"
         print(f"⚠️ Drive upload failed ({filename}): {e}")
-        return False
+        return _ret(False, detail)
 
 
 async def _drive_download(filename: str) -> str:
@@ -2627,17 +2635,28 @@ class SystemGroup(app_commands.Group):
         lines.append("")
         lines.append(f"**4. 測試上傳**")
         test_content = f'{{"test": true, "time": "{datetime.now().isoformat()}"}}'
-        success = await _drive_upload("_connection_test.json", test_content)
+        success, detail = await _drive_upload("_connection_test.json", test_content, return_detail=True)
         if success:
             lines.append(f"  ✅ 測試檔案上傳成功！請到 Drive 資料夾確認 `_connection_test.json`")
         else:
-            lines.append(f"  ❌ 上傳失敗（詳細錯誤請看 Render logs）")
+            lines.append(f"  ❌ 上傳失敗")
+            lines.append(f"  詳細：`{detail}`")
             lines.append("")
-            lines.append("→ 常見原因：")
-            lines.append("  • 資料夾沒有共用給服務帳號 email（見上方 client_email）")
-            lines.append("  • 服務帳號權限不是「編輯者」")
-            lines.append("  • GOOGLE_DRIVE_FOLDER_ID 錯誤（不是資料夾 ID，例如貼了整個網址）")
-            lines.append("  • Drive API 沒有在 Google Cloud 專案中啟用")
+            if "storageQuotaExceeded" in detail or "quota" in detail.lower():
+                lines.append("→ 這是**服務帳號儲存配額**問題！服務帳號本身沒有 Drive 儲存空間。")
+                lines.append("  解法：把資料夾改成「共用雲端硬碟」(Shared Drive)，而非個人「我的雲端硬碟」內的資料夾。")
+                lines.append("  （注意：免費 Gmail 帳號可能無法建立共用雲端硬碟，需要 Google Workspace）")
+            elif "404" in detail or "File not found" in detail:
+                lines.append("→ 常見原因：")
+                lines.append("  • GOOGLE_DRIVE_FOLDER_ID 錯誤")
+                lines.append("  • 資料夾沒有共用給服務帳號 email")
+            elif "403" in detail:
+                lines.append("→ 常見原因：")
+                lines.append("  • 資料夾沒有共用給服務帳號 email（見上方 client_email）")
+                lines.append("  • 服務帳號權限不是「編輯者」")
+                lines.append("  • Drive API 沒有在 Google Cloud 專案中啟用")
+            else:
+                lines.append("→ 請把上面「詳細」的錯誤內容回報，才能進一步排查。")
 
         await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
 
