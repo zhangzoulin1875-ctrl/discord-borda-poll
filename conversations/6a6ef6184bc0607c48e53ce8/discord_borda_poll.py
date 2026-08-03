@@ -2221,6 +2221,8 @@ async def _refresh_channel_index(guild) -> list:
     count reasonable (~1 call/channel). Staggered with small delays to avoid
     rate limits."""
     entries = []
+    skip_reasons = {}  # channel_name -> reason string, for diagnostics
+    excluded_channels = []  # channel_names skipped as test/log
     _t0 = _time.time()
     _ch_count = 0
     _msg_count = 0
@@ -2240,15 +2242,21 @@ async def _refresh_channel_index(guild) -> list:
             name_lower = ch.name.lower()
             return any(marker.lower() in name_lower for marker in _EXCLUDE_NAME_MARKERS)
 
-        text_channels = [
+        all_candidate_channels = [
             ch for ch in guild.text_channels
             if ch.type in (discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.announcement)
-            and not _is_excluded_channel(ch)
         ]
-        print(f"📢 開始頻道訊息索引：{len(text_channels)} 個文字頻道（已排除測試/紀錄頻道）...")
+        text_channels = []
+        for ch in all_candidate_channels:
+            if _is_excluded_channel(ch):
+                excluded_channels.append(ch.name)
+            else:
+                text_channels.append(ch)
+        print(f"📢 開始頻道訊息索引：{len(text_channels)} 個文字頻道（已排除 {len(excluded_channels)} 個測試/紀錄頻道）...")
 
         for ch in text_channels:
             _ch_count += 1
+            _ch_msg_count = 0
             try:
                 async for msg in ch.history(limit=50):
                     # Extract text from BOTH plain content AND embeds
@@ -2271,6 +2279,7 @@ async def _refresh_channel_index(guild) -> list:
                         continue  # skip empty / tiny messages
 
                     _msg_count += 1
+                    _ch_msg_count += 1
                     author = msg.author.display_name if msg.author else "未知"
                     date_str = msg.created_at.strftime("%Y-%m-%d %H:%M") if msg.created_at else ""
 
@@ -2280,9 +2289,13 @@ async def _refresh_channel_index(guild) -> list:
                         "date": date_str,
                         "text": full_text[:1000],
                     })
+                if _ch_msg_count == 0:
+                    skip_reasons[ch.name] = "讀取成功但沒有符合條件的訊息（全部太短或是空的）"
             except discord.Forbidden:
-                pass
+                skip_reasons[ch.name] = "❌ 沒有權限讀取（缺少「查看頻道」或「讀取訊息歷史」權限）"
+                print(f"⚠️ 頻道索引「{ch.name}」權限不足，機器人無法讀取此頻道歷史")
             except Exception as e:
+                skip_reasons[ch.name] = f"❌ 讀取失敗：{e}"
                 print(f"⚠️ 頻道索引「{ch.name}」失敗：{e}")
 
             if _ch_count % 5 == 0:
@@ -2292,7 +2305,12 @@ async def _refresh_channel_index(guild) -> list:
     except Exception as e:
         print(f"⚠️ 頻道索引刷新失敗：{e}")
 
-    _channel_index_cache[guild.id] = {"entries": entries, "updated": _time.time()}
+    _channel_index_cache[guild.id] = {
+        "entries": entries,
+        "updated": _time.time(),
+        "skip_reasons": skip_reasons,
+        "excluded_channels": excluded_channels,
+    }
     return entries
 
 
@@ -6175,6 +6193,75 @@ class ChatGroup(app_commands.Group):
                 sample += f"\n...還有 {len(posts) - 15} 篇"
             embed.add_field(name="已索引的貼文（部分）", value=sample[:1024] or "無", inline=False)
         embed.set_footer(text="這個索引讓 AI 的 search_discord 工具能找到論壇貼文內容（含 Embed），不只是純文字訊息")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="channel_index", description="查看/刷新一般頻道訊息搜尋索引（機器人擁有者限定）")
+    @app_commands.describe(query="選填：直接測試搜尋這個關鍵字，看看會不會命中")
+    async def system_channel_index(self, interaction: discord.Interaction, query: str = ""):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            entries = await asyncio.wait_for(_refresh_channel_index(interaction.guild), timeout=60)
+        except asyncio.TimeoutError:
+            print("⚠️ /system channel_index 手動刷新超過 60s，轉為背景執行")
+            asyncio.ensure_future(_refresh_channel_index(interaction.guild))
+            await interaction.followup.send(
+                "⏳ 頻道數量較多，60 秒內沒跑完，已轉為背景繼續執行。稍後再用這個指令查看結果。",
+                ephemeral=True,
+            )
+            return
+
+        # Per-channel breakdown so we can see exactly which channels got
+        # skipped (excluded as test/log, no permission, or no qualifying
+        # messages) vs indexed, and how many messages each contributed.
+        from collections import Counter
+        ch_counts = Counter(e["channel_name"] for e in entries)
+        all_text_channels = [ch.name for ch in interaction.guild.text_channels]
+        cached = _channel_index_cache.get(interaction.guild.id, {})
+        skip_reasons = cached.get("skip_reasons", {})
+        excluded_as_test_log = cached.get("excluded_channels", [])
+
+        embed = discord.Embed(
+            title="📢 頻道訊息搜尋索引",
+            description=(
+                f"伺服器文字頻道總數：{len(all_text_channels)}\n"
+                f"已索引訊息數：{len(entries)}\n"
+                f"快取有效期：每 30 分鐘自動刷新（此指令可手動立即刷新）"
+            ),
+            color=discord.Color.blue(),
+        )
+        if ch_counts:
+            breakdown = "\n".join(f"• #{name}：{count} 則" for name, count in ch_counts.most_common(20))
+            embed.add_field(name="已索引頻道（訊息數，前20）", value=breakdown[:1024] or "無", inline=False)
+        if excluded_as_test_log:
+            embed.add_field(
+                name="🚫 被判定為測試/紀錄頻道而排除（不索引）",
+                value=", ".join(f"#{n}" for n in excluded_as_test_log)[:1024],
+                inline=False,
+            )
+        if skip_reasons:
+            reason_lines = "\n".join(f"• #{name}：{reason}" for name, reason in list(skip_reasons.items())[:15])
+            embed.add_field(
+                name="⚠️ 有讀取但沒有索引到任何訊息的頻道（含原因）",
+                value=reason_lines[:1024] or "無",
+                inline=False,
+            )
+
+        if query.strip():
+            matched = _search_channel_index(query.strip(), entries, top_n=5)
+            if matched:
+                preview = "\n".join(
+                    f"• #{m['channel_name']} | {m['author']} ({m['date']}): {m['text'][:120]}"
+                    for m in matched
+                )
+                embed.add_field(name=f"🔍 搜尋「{query}」的結果（{len(matched)} 則）", value=preview[:1024], inline=False)
+            else:
+                embed.add_field(name=f"🔍 搜尋「{query}」的結果", value="沒有命中任何已索引的訊息", inline=False)
+
+        embed.set_footer(text="這個索引讓 AI 的 search_discord 工具能搜到一般頻道的公告/訊息（含 Embed）")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
