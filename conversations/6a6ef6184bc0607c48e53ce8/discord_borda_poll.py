@@ -1007,9 +1007,9 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
     if not clean:
         return False, clean
 
-    # ── MENTION: only reply when @mentioned or replying to the bot ──
+    # ── MENTION: ONLY reply when explicitly @mentioned ──
     if strength == "mention":
-        if is_mentioned or is_reply_to_bot:
+        if is_mentioned:
             return True, clean
         return False, clean
 
@@ -2930,7 +2930,7 @@ async def on_message(message):
     # Worthiness check
     worth, clean = _is_worth_replying(
         message.content, is_mentioned, bot.user.id,
-        chat_ai_settings.get("filter_strength", "low"),
+        chat_ai_settings.get("filter_strength", "mention"),
         is_reply_to_bot=is_reply_to_bot,
     )
     if not worth:
@@ -4585,7 +4585,7 @@ class ChatGroup(app_commands.Group):
         lines.append(f"**5. 冷卻時間**")
         lines.append(f"  {chat_ai_settings.get('cooldown_seconds', 60)} 秒（@提及不受限）")
         lines.append(f"")
-        filter_str = chat_ai_settings.get("filter_strength", "low")
+        filter_str = chat_ai_settings.get("filter_strength", "mention")
         filter_descs = {
             "off": "關閉：回覆所有非空訊息",
             "low": "低：只擋打招呼/連結/emoji/極短",
@@ -4650,7 +4650,7 @@ class ChatGroup(app_commands.Group):
         embed.add_field(name="API Key", value=key_set, inline=True)
         embed.add_field(name="模型", value=f"`{model}`", inline=True)
         embed.add_field(name="冷卻時間", value=f"{cooldown} 秒", inline=True)
-        filter_str = chat_ai_settings.get("filter_strength", "low")
+        filter_str = chat_ai_settings.get("filter_strength", "mention")
         filter_names = {"off": "關閉", "low": "低", "medium": "中", "high": "高"}
         embed.add_field(name="過濾強度", value=filter_names.get(filter_str, filter_str), inline=True)
         embed.add_field(name="頻道白名單", value=channels, inline=False)
@@ -4947,6 +4947,11 @@ class QuizAnswerView(discord.ui.View):
     async def _handle_answer(self, interaction: discord.Interaction, selected_index: int):
         user_id_str = str(interaction.user.id)
 
+        # Check if this user already answered wrong before
+        if hasattr(self, '_wrong_users') and user_id_str in self._wrong_users:
+            await interaction.response.send_message("你已經答錯過了，不能再答！", ephemeral=True)
+            return
+
         # Already answered by someone
         if self.answered:
             if user_id_str == self.correct_user_id:
@@ -5020,11 +5025,41 @@ class QuizAnswerView(discord.ui.View):
                 pass
             print(f"🎉 Quiz: {interaction.user.display_name} answered correctly (+5 pts, daily={user_entry['daily_score']})")
         else:
-            # Wrong answer
-            await interaction.response.send_message(
-                "❌ 不對哦，再試試看！其他選項還有機會～",
-                ephemeral=True
-            )
+            # Wrong answer — record and block this user from answering again
+            if not hasattr(self, '_wrong_users'):
+                self._wrong_users = set()
+            self._wrong_users.add(user_id_str)
+            # Check if all 4 options have been tried by this user
+            remaining = 4 - len(self._wrong_users)
+            if remaining > 0:
+                await interaction.response.send_message(
+                    f"❌ 答錯了！不能再選已經選過的，還剩 {remaining} 個選項。",
+                    ephemeral=True
+                )
+                # Disable the button they just clicked
+                for child in self.children:
+                    if child.custom_id == interaction.data.get("custom_id"):
+                        child.disabled = True
+                        child.style = discord.ButtonStyle.danger
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception:
+                    pass
+            else:
+                # All wrong — eliminate this user
+                await interaction.response.send_message(
+                    "❌ 所有選項都錯了！本題你已無法再答。",
+                    ephemeral=True
+                )
+                # Disable all remaining buttons for this user (disable all if they were the only one trying)
+                for child in self.children:
+                    if not child.disabled:
+                        child.disabled = True
+                        child.style = discord.ButtonStyle.secondary
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception:
+                    pass
 
     async def on_timeout(self):
         """Reveal the answer when no one answers in time."""
