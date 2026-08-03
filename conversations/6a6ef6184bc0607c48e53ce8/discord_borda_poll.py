@@ -1339,18 +1339,22 @@ async def _get_server_context(guild, user) -> str:
     # Roles (compact)
     lines.append(f"\n🏷️ 身分組：{', '.join(r['name'] for r in d['roles'][:20])}")
 
-    # Emojis (compact — give the AI the ACTUAL Discord render syntax, not bare :name:)
-    # Discord custom emojis only render as images when written as <:name:id> (or
-    # <a:name:id> for animated) — plain ":name:" text (Slack-style) shows up as
-    # literal text, which is the bug this fixes.
+    # Emojis (compact — give the AI the ACTUAL Discord render syntax with semantic labels)
     if d["emojis"]:
         emoji_tokens = []
-        for e in d["emojis"][:30]:
+        for e in d["emojis"][:50]:  # Increased to 50 now that aliases need context
             prefix = "a" if e.get("animated") else ""
-            emoji_tokens.append(f"<{prefix}:{e['name']}:{e['id']}>")
+            token = f"<{prefix}:{e['name']}:{e['id']}>"
+            alias = emoji_aliases.get(e["name"])
+            if alias:
+                label = alias.get("alias", "")
+                emoji_tokens.append(f"{token}（={label}）")
+            else:
+                # No alias set — flag it so AI doesn't guess
+                emoji_tokens.append(f"{token}（名稱不明確，不確定含義時不要使用）")
         lines.append(
-            f"\n😀 伺服器自訂 Emoji（如果要使用，必須「完整照抄」下面整串文字，"
-            f"包含角括號和數字 ID，絕對不能只打 :名稱: ，那樣不會顯示成圖案）：\n"
+            f"\n😀 伺服器自訂 Emoji（如果要使用，必須「完整照抄」下面整串 <...> 文字，"
+            f"包含角括號和數字 ID，絕對不能只打 :名稱:）：\n"
             f"{' '.join(emoji_tokens)}"
         )
 
@@ -1961,15 +1965,27 @@ _MICROPEDIA_TOOL_SCHEMA = {
 def _fix_emoji_shortcodes(text: str, guild) -> str:
     """Safety net: convert any bare ':name:' shortcode in the AI's reply into
     the actual Discord custom-emoji render syntax '<:name:id>' (or
-    '<a:name:id>' for animated), for any name that matches a real emoji in
-    this guild. LLMs habitually write emoji as Slack/plain-text shortcodes
-    even when told the real syntax, so this guarantees correct rendering
-    regardless of what the model actually output."""
+    '<a:name:id>' for animated). Checks three sources in order:
+    1. Direct match against real emoji names in the guild
+    2. Match against alias names (e.g. AI writes ':偉廷微笑:' → becomes the
+       real emoji <:emoji7:123456789012345678>)
+    3. If no match, leave as-is (could be a normal word or time like 10:30)"""
     if not text or not guild or not guild.emojis:
         return text
 
     emoji_by_name = {e.name: e for e in guild.emojis}
-    if not emoji_by_name:
+    # Also build a lookup by alias name → emoji object
+    emoji_by_alias = {}
+    for orig_name, alias_data in emoji_aliases.items():
+        alias_label = alias_data.get("alias", "")
+        if alias_label:
+            eid = alias_data.get("emoji_id", "")
+            for e in guild.emojis:
+                if str(e.id) == eid:
+                    emoji_by_alias[alias_label] = e
+                    break
+
+    if not emoji_by_name and not emoji_by_alias:
         return text
 
     # Skip anything that's already a proper Discord emoji tag: <:name:id> or <a:name:id>
@@ -1979,14 +1995,15 @@ def _fix_emoji_shortcodes(text: str, guild) -> str:
 
     def _replace(m):
         start, end = m.span()
-        # Don't touch matches that are already inside a full <:name:id> tag
         for s, e in already_tagged_spans:
             if s <= start and end <= e:
                 return m.group(0)
         name = m.group(1)
         emoji = emoji_by_name.get(name)
         if not emoji:
-            return m.group(0)  # not a known custom emoji — leave as-is (could be a normal word between colons)
+            emoji = emoji_by_alias.get(name)
+        if not emoji:
+            return m.group(0)
         prefix = "a" if emoji.animated else ""
         return f"<{prefix}:{emoji.name}:{emoji.id}>"
 
@@ -3034,6 +3051,7 @@ async def setup_hook():
     load_token_usage()
     save_token_usage()  # Create file if not exists
     load_user_memories()
+    load_emoji_aliases()
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
     asyncio.ensure_future(auto_save_loop())
@@ -4893,6 +4911,88 @@ class ChatGroup(app_commands.Group):
             await interaction.followup.send(f"📚 搜尋「{query}」的結果：\n\n{display}", ephemeral=True)
 
 
+    @app_commands.command(name="emoji_alias", description="設定表情符號的別名，讓 AI 看懂含義（機器人擁有者限定）")
+    @app_commands.describe(
+        emoji="要設定別名的表情符號（直接貼上表情或輸入名稱）",
+        alias="人類可讀的別名（例如：偉廷微笑）。留空則清除該表情的別名",
+    )
+    async def system_emoji_alias(self, interaction: discord.Interaction, emoji: str, alias: str = ""):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+
+        # Parse emoji: user may type the raw <:name:id> or just the name
+        m = re.match(r"<a?:(\w+):(\d+)>", emoji)
+        if m:
+            emoji_name = m.group(1)
+            emoji_id = m.group(2)
+        else:
+            emoji_name = emoji.strip().strip(":")
+            emoji_id = None
+            for e in interaction.guild.emojis:
+                if e.name == emoji_name:
+                    emoji_id = str(e.id)
+                    break
+            if not emoji_id:
+                await interaction.response.send_message(
+                    f"❌ 找不到名為「{emoji}」的表情符號。\n請直接從 Discord 表情選擇器貼上完整的表情，或輸入表情名稱。",
+                    ephemeral=True
+                )
+                return
+
+        emoji_obj = None
+        for e in interaction.guild.emojis:
+            if str(e.id) == emoji_id:
+                emoji_obj = e
+                break
+
+        if not alias:
+            if emoji_name in emoji_aliases:
+                del emoji_aliases[emoji_name]
+                save_emoji_aliases()
+                await interaction.response.send_message(f"✅ 已清除表情 `{emoji_name}` 的別名。", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"ℹ️ 表情 `{emoji_name}` 本來就沒有設定別名。", ephemeral=True)
+        else:
+            emoji_aliases[emoji_name] = {
+                "alias": alias,
+                "emoji_id": emoji_id,
+                "animated": bool(emoji_obj and emoji_obj.animated),
+            }
+            save_emoji_aliases()
+            prefix = "a" if emoji_obj and emoji_obj.animated else ""
+            await interaction.response.send_message(
+                f"✅ 表情別名已設定：\n"
+                f"  表情：<{prefix}:{emoji_name}:{emoji_id}>\n"
+                f"  別名：{alias}\n"
+                f"  AI 現在會知道這個表情代表「{alias}」，並在合適的時機使用。\n"
+                f"  （AI 也可以用 `:{alias}:` 來表示，系統會自動轉換）",
+                ephemeral=True
+            )
+
+    @app_commands.command(name="emoji_list", description="查看所有已設定別名的表情符號")
+    async def system_emoji_list(self, interaction: discord.Interaction):
+        if not emoji_aliases:
+            await interaction.response.send_message(
+                "ℹ️ 目前沒有設定任何表情別名。\n"
+                "用 `/system emoji_alias` 來設定，讓 AI 看懂自訂表情的含義。",
+                ephemeral=True
+            )
+            return
+
+        lines = ["🧩 已設定的表情別名："]
+        for name, data in emoji_aliases.items():
+            prefix = "a" if data.get("animated") else ""
+            eid = data.get("emoji_id", "")
+            alias_label = data.get("alias", "")
+            lines.append(f"<{prefix}:{name}:{eid}> = {alias_label}")
+
+        text = "\n".join(lines)
+        if len(text) > 1900:
+            text = text[:1900] + "\n..."
+        await interaction.response.send_message(text, ephemeral=True)
+
+
 # ──────────────────────────────────────────────
 # Token Log 定期公告（每 30 分鐘）
 # ──────────────────────────────────────────────
@@ -4977,6 +5077,28 @@ QUIZ_SETTINGS_FILE = os.path.join(DATA_DIR, "quiz_settings.json")
 QUIZ_SCORES_FILE = os.path.join(DATA_DIR, "quiz_scores.json")
 QUIZ_CHAMPIONS_FILE = os.path.join(DATA_DIR, "quiz_champions.json")
 QUIZ_STATE_FILE = os.path.join(DATA_DIR, "quiz_state.json")
+
+# ── Emoji aliases: map cryptic emoji names to human-readable descriptions ──
+EMOJI_ALIASES_FILE = os.path.join(DATA_DIR, "emoji_aliases.json")
+emoji_aliases = {}  # {original_name: {"alias": "人類可讀名", "emoji_id": "...", "animated": false}}
+
+def save_emoji_aliases():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        with open(EMOJI_ALIASES_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(emoji_aliases, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ Emoji aliases save failed: {e}")
+
+def load_emoji_aliases():
+    global emoji_aliases
+    try:
+        if os.path.exists(EMOJI_ALIASES_FILE):
+            with open(EMOJI_ALIASES_FILE, "r", encoding="utf-8") as f:
+                emoji_aliases = json_module.load(f)
+            print(f"✅ 表情別名載入：{len(emoji_aliases)} 個別名")
+    except Exception as e:
+        print(f"⚠️ Emoji aliases load failed: {e}")
 
 # ── 記憶體狀態 ──
 quiz_settings = {
