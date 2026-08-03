@@ -2138,10 +2138,15 @@ _FORUM_INDEX_TTL = 900  # 15 分鐘快取
 
 async def _refresh_forum_index(guild) -> list:
     """Scan every Forum channel in the guild and build a searchable index of
-    every post (thread): title + tags + OP text content + OP embed text.
-    Embeds are critical — many proposal/policy forums are submitted via a
-    bot/webhook that posts a pure embed with EMPTY message content, so
-    without reading embeds these posts are invisible to any text search."""
+    every post (thread): title + tags + OP text/embed content, PLUS the
+    thread's REPLY messages (up to 50 most recent). This matters a lot:
+    status updates like "案子已撤回" / "新秘書長已選出" are almost always
+    posted as REPLIES within the discussion thread, not edits to the
+    original post. Without reading replies, the AI only ever sees the
+    proposal as it looked at creation time and thinks it's still ongoing
+    long after it was resolved/withdrawn. Embeds are also critical — many
+    proposal/policy forums are submitted via a bot/webhook that posts a
+    pure embed with EMPTY message content."""
     posts = []
     try:
         for forum in guild.forums:
@@ -2176,14 +2181,51 @@ async def _refresh_forum_index(guild) -> list:
                             for field in embed.fields:
                                 text_parts.append(f"{field.name} {field.value}")
 
+                    # Fetch reply messages — this is what captures status
+                    # updates (withdrawals, resolutions, follow-ups) that
+                    # happen AFTER the original post.
+                    reply_lines = []
+                    try:
+                        async for msg in thread.history(limit=50, oldest_first=True):
+                            if starter and msg.id == starter.id:
+                                continue
+                            body = msg.content.strip()
+                            if not body:
+                                for embed in msg.embeds:
+                                    if embed.title:
+                                        body += str(embed.title) + " "
+                                    if embed.description:
+                                        body += str(embed.description) + " "
+                                body = body.strip()
+                            if not body:
+                                continue
+                            date_str = msg.created_at.strftime("%Y-%m-%d") if msg.created_at else "?"
+                            author = msg.author.display_name if msg.author else "未知"
+                            reply_lines.append(f"[{date_str}] {author}: {body[:200]}")
+                    except Exception:
+                        pass
+
+                    if reply_lines:
+                        text_parts.append("─── 討論串回覆（含後續進展/狀態更新）───")
+                        text_parts.extend(reply_lines)
+
+                    last_activity = thread.created_at
+                    if reply_lines:
+                        try:
+                            last_activity = [m async for m in thread.history(limit=1)][0].created_at
+                        except Exception:
+                            pass
+
                     posts.append({
                         "title": thread.name,
                         "tags": tags,
                         "channel_name": forum.name,
                         "text": "\n".join(str(p) for p in text_parts if p),
+                        "reply_lines": reply_lines,  # kept separate so we can always surface the LATEST update
                         "url": thread.jump_url,
                         "author": (starter.author.display_name if starter and starter.author else "未知"),
                         "created_at": thread.created_at.strftime("%Y-%m-%d") if thread.created_at else "",
+                        "last_activity": last_activity.strftime("%Y-%m-%d") if last_activity else "",
                     })
                 except Exception as e:
                     print(f"⚠️ 索引貼文失敗（{getattr(thread, 'name', '?')}）：{e}")
@@ -2193,7 +2235,8 @@ async def _refresh_forum_index(guild) -> list:
 
     _forum_index_cache[guild.id] = {"posts": posts, "updated": _time.time()}
     forum_count = len(list(guild.forums)) if hasattr(guild, "forums") else 0
-    print(f"🗂️ Forum 索引已更新：{guild.name} — {len(posts)} 篇貼文（{forum_count} 個論壇頻道）")
+    total_replies = sum(len(p.get("reply_lines", [])) for p in posts)
+    print(f"🗂️ Forum 索引已更新：{guild.name} — {len(posts)} 篇貼文（{forum_count} 個論壇頻道，共索引 {total_replies} 則回覆）")
     return posts
 
 
@@ -2303,14 +2346,36 @@ async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> s
             matched = _search_forum_posts(query, posts, top_n=5)
             if not matched:
                 return ""
-            parts = [f"📋 論壇貼文搜尋「{query}」的結果（{len(matched)} 篇）："]
+            parts = [
+                f"📋 論壇貼文搜尋「{query}」的結果（{len(matched)} 篇）：\n"
+                f"⚠️ 重要：每篇貼文下面若有「最新進展」，那才是目前的真實狀態"
+                f"（可能已撤案/已通過/已否決/已有後續結果），絕對不要只看原始貼文內容就下結論，"
+                f"原始提案內容可能早就過時了。"
+            ]
             for p in matched:
-                snippet = p["text"][:500]
+                # OP snippet stays short — the important part is the LATEST
+                # updates, which are shown in full below regardless of match
+                # score (a naive text[:500] truncation would show only the
+                # stale original post and cut off exactly the status update
+                # that matters).
+                op_text = p["text"].split("─── 討論串回覆", 1)[0]
+                snippet = op_text[:350]
                 tag_str = f"［{'/'.join(p['tags'])}］" if p["tags"] else ""
-                parts.append(
+                block = (
                     f"\n【{p['channel_name']}】{tag_str}《{p['title']}》"
-                    f"— {p['author']}, {p['created_at']}\n{snippet}\n連結：{p['url']}"
+                    f"— {p['author']}, 發起於 {p['created_at']}\n原始內容：{snippet}"
                 )
+                reply_lines = p.get("reply_lines") or []
+                if reply_lines:
+                    last_activity = p.get("last_activity", "")
+                    recent = reply_lines[-5:]  # last 5 replies = latest status
+                    block += (
+                        f"\n📌 最新進展（最後活動：{last_activity}）：\n" + "\n".join(recent)
+                    )
+                else:
+                    block += "\n（此貼文下沒有任何回覆，狀態可能從未更新過）"
+                block += f"\n連結：{p['url']}"
+                parts.append(block)
             return "\n".join(parts)
         except Exception as e:
             print(f"⚠️ Forum 索引搜尋失敗：{e}")
@@ -2605,7 +2670,11 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"請呼叫這個工具搜尋相關關鍵字。如果完整名稱查不到，試試看拆成更短的核心詞再查一次"
             f"（例如「黃綠燈罷免案」查不到就試「黃綠燈」或「罷免」）。"
             f"找到的內容會標示來源、發言者、日期和內容，"
-            f"你可以據此回答使用者的問題；如果找不到，才誠實告知使用者。"
+            f"你可以據此回答使用者的問題；如果找不到，才誠實告知使用者。\n"
+            f"⚠️ 極重要：論壇貼文的「原始內容」只是提案剛發起時的樣子，事情很可能早就有後續發展"
+            f"（撤案、通過、否決、換人等）。一定要看「最新進展」欄位裡最後幾則回覆的日期和內容，"
+            f"那才是目前真正的狀態。如果最新進展顯示案子已經結束/撤回/有結果，"
+            f"就不要再用原始提案的角度回答，要以最新狀態為準。"
         )
 
     messages = [
