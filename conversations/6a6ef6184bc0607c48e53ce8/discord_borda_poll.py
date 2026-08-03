@@ -1334,10 +1334,15 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
         print("⚠️ 對話紀錄：訊息沒有 guild（私訊？），略過")
         return
 
-    log_ch, err = await _resolve_log_channel(message.guild)
+    try:
+        log_ch, err = await _resolve_log_channel(message.guild)
+    except Exception as e:
+        print(f"⚠️ 對話紀錄發送失敗（_resolve_log_channel 例外）：{e}")
+        return
     if not log_ch:
         print(f"⚠️ 對話紀錄發送失敗：{err}")
         return
+    print(f"📝 已解析紀錄頻道：#{getattr(log_ch, 'name', '?')} ({log_ch.id})")
 
     try:
         author = message.author
@@ -1806,7 +1811,7 @@ async def _drive_download(filename: str) -> str:
 
 async def sync_to_drive():
     """Sync all local data files to Google Drive."""
-    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"):
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") and not os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"):
         return
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     ok_count = 0
@@ -1831,7 +1836,7 @@ async def sync_to_drive():
 
 async def load_from_drive():
     """Load all data files from Google Drive on startup (overwrites local)."""
-    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"):
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") and not os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"):
         return
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
@@ -2384,7 +2389,12 @@ async def on_message(message):
                 _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
                 print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
             # Log conversation to log channel if configured
-            await _send_chat_log(message, clean_content, reply)
+            log_cfg = chat_ai_settings.get("log_channel_id")
+            print(f"   📝 準備寫入對話紀錄：log_channel_id={log_cfg!r} (type={type(log_cfg).__name__})")
+            try:
+                await _send_chat_log(message, clean_content, reply)
+            except Exception as log_exc:
+                print(f"   ⚠️ _send_chat_log 拋出例外（不影響回覆）：{log_exc}")
         # ── Abuse detection: AI path (after AI call) ──
         if mod_action and chat_ai_settings.get("abuse_detection_enabled", False):
             duration = min(mod_action, 86400)
