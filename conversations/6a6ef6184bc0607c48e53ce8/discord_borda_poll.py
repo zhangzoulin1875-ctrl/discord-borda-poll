@@ -3036,6 +3036,17 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             )
             print(f"🔍 search_discord: 已自動注入 {len(_discord_auto)} chars 到 AI 上下文")
 
+    # ── 黑名單提示（讓 AI 知道哪些用戶被封禁，避免引用其言論） ──
+    bl_users = _blacklist.get("users", [])
+    if bl_users:
+        bl_names = [u.get("user_name", "") for u in bl_users if u.get("user_name")]
+        if bl_names:
+            system_prompt += (
+                "\n\n─── 封禁用戶提醒 ───\n"
+                f"以下用戶已被管理員封禁，請忽略其言論，不要引用或回應他們說過的話："
+                f"{', '.join(bl_names[:10])}"
+            )
+
     # ── 修正資料自動注入 ──
     # If validated user corrections exist that match the current question,
     # inject them as ground-truth so the AI learns from past mistakes.
@@ -4186,6 +4197,13 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                     print(f"❌ 恢復暱稱失敗：{e}")
 
 
+def _global_interaction_check(interaction: discord.Interaction) -> bool:
+    """Global check: reject all interactions from blacklisted users."""
+    if interaction.user and is_blacklisted(interaction.user.id):
+        return False
+    return True
+
+
 @bot.event
 async def setup_hook():
     # Register slash command groups (runs once, before bot connects)
@@ -4194,10 +4212,27 @@ async def setup_hook():
             bot.tree.add_command(grp)
         except Exception:
             pass
+
+    # Global interaction check: block blacklisted users from ALL commands
+    async def _tree_interaction_check(interaction: discord.Interaction) -> bool:
+        if interaction.user and is_blacklisted(interaction.user.id):
+            try:
+                await interaction.response.send_message(
+                    "🚫 你已被列入黑名單，無法使用此機器人的任何功能。",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+            print(f"🚫 黑名單用戶 {interaction.user.display_name} ({interaction.user.id}) 嘗試使用指令已攔截")
+            return False
+        return True
+
+    bot.tree.interaction_check = _tree_interaction_check
     # Load from Google Drive first (if configured), then from local
     await load_from_drive()
     load_knowledge_base()
     load_corrections()
+    load_blacklist()
     # Load local files (will use Drive-downloaded data if available)
     load_polls_from_disk()
     save_polls_to_disk()  # Create file if not exists
@@ -4233,6 +4268,11 @@ async def on_message(message):
     global _last_global_reply
     # Ignore bot messages
     if message.author.bot:
+        return
+
+    # ── Blacklist check: block ALL messages from blacklisted users ──
+    if is_blacklisted(message.author.id):
+        print(f"🚫 黑名單用戶 {message.author.display_name} ({message.author.id}) 訊息已屏蔽")
         return
 
     # Ignore slash commands (but allow messages starting with "!" which could be normal text)
@@ -5520,6 +5560,88 @@ class SystemGroup(app_commands.Group):
                     )
                     return
             await interaction.followup.send(f"❌ 找不到 ID 為 {entry_id} 的修正。", ephemeral=True)
+
+    @app_commands.command(name="blacklist", description="管理用戶黑名單（機器人擁有者限定）")
+    @app_commands.describe(
+        action="add=加入黑名單, remove=移除, list=查看名單",
+        user="要加入/移除的用戶",
+        reason="加入黑名單的原因（可選）",
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="加入黑名單", value="add"),
+        app_commands.Choice(name="移除", value="remove"),
+        app_commands.Choice(name="查看名單", value="list"),
+    ])
+    async def system_blacklist(
+        self, interaction: discord.Interaction,
+        action: app_commands.Choice[str],
+        user: discord.User = None,
+        reason: str = "",
+    ):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+
+        if action.value == "list":
+            users = _blacklist.get("users", [])
+            if not users:
+                await interaction.response.send_message("📋 黑名單目前是空的。", ephemeral=True)
+                return
+            lines = []
+            for u in users:
+                lines.append(
+                    f"• **{u.get('user_name', '?')}** (ID: {u.get('user_id', '?')})\n"
+                    f"  原因：{u.get('reason', '未指定')} | 日期：{u.get('date', '?')}"
+                )
+            await interaction.response.send_message(
+                f"📋 **黑名單（{len(users)} 人）**\n\n" + "\n\n".join(lines),
+                ephemeral=True,
+            )
+
+        elif action.value == "add":
+            if not user:
+                await interaction.response.send_message("❌ 請指定要加入黑名單的用戶。", ephemeral=True)
+                return
+            if user.id == BOT_OWNER_ID:
+                await interaction.response.send_message("❌ 不能將機器人擁有者加入黑名單。", ephemeral=True)
+                return
+            if is_blacklisted(user.id):
+                await interaction.response.send_message(
+                    f"⚠️ {user.display_name} 已經在黑名單中了。", ephemeral=True,
+                )
+                return
+            entry = {
+                "user_id": str(user.id),
+                "user_name": user.display_name,
+                "reason": reason or "未指定",
+                "date": _time.strftime("%Y-%m-%d %H:%M"),
+                "added_by": interaction.user.display_name,
+            }
+            _blacklist.setdefault("users", []).append(entry)
+            save_blacklist()
+            await interaction.response.send_message(
+                f"🚫 已將 **{user.display_name}** 加入黑名單。\n"
+                f"原因：{reason or '未指定'}\n"
+                f"該用戶將無法使用機器人任何功能，AI 也會自動屏蔽其所有訊息。",
+                ephemeral=True,
+            )
+
+        elif action.value == "remove":
+            if not user:
+                await interaction.response.send_message("❌ 請指定要移除的用戶。", ephemeral=True)
+                return
+            users = _blacklist.get("users", [])
+            original_len = len(users)
+            _blacklist["users"] = [u for u in users if str(u.get("user_id")) != str(user.id)]
+            if len(_blacklist["users"]) == original_len:
+                await interaction.response.send_message(
+                    f"⚠️ {user.display_name} 不在黑名單中。", ephemeral=True,
+                )
+                return
+            save_blacklist()
+            await interaction.response.send_message(
+                f"✅ 已將 **{user.display_name}** 從黑名單移除。", ephemeral=True,
+            )
 
     @app_commands.command(name="forum_index", description="查看/刷新論壇貼文搜尋索引（機器人擁有者限定）")
     async def system_forum_index(self, interaction: discord.Interaction):
@@ -7702,6 +7824,13 @@ class NationGroup(app_commands.Group):
 
 KNOWLEDGE_BASE_FILE = os.path.join(DATA_DIR, "knowledge_base.json")
 CORRECTIONS_FILE = os.path.join(DATA_DIR, "corrections.json")
+BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
+
+# Blacklisted users are completely blocked from using the bot:
+# - on_message returns immediately (AI never sees their messages)
+# - all slash commands are rejected (interaction_check)
+# - AI system prompt explicitly instructs ignoring their messages
+_blacklist = {"users": []}  # list of {id, user_id, user_name, reason, date, added_by}
 
 # User-submitted corrections to AI answers. Each entry:
 #   {id, date, user_id, user_name, question, original_answer,
@@ -7758,6 +7887,35 @@ def save_corrections():
             f.write(json_module.dumps(_corrections, ensure_ascii=False, indent=2))
     except Exception as e:
         print(f"⚠️ 修正資料儲存失敗：{e}")
+
+
+def load_blacklist():
+    """Load blacklist from local file (synced from Drive)."""
+    global _blacklist
+    try:
+        if os.path.exists(BLACKLIST_FILE):
+            with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+                _blacklist = json_module.loads(f.read())
+            print(f"🚫 黑名單已載入：{len(_blacklist.get('users', []))} 人")
+    except Exception as e:
+        print(f"⚠️ 黑名單載入失敗：{e}")
+        _blacklist = {"users": []}
+
+
+def save_blacklist():
+    """Save blacklist to local file (auto-synced to Drive)."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
+            f.write(json_module.dumps(_blacklist, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"⚠️ 黑名單儲存失敗：{e}")
+
+
+def is_blacklisted(user_id) -> bool:
+    """Check if a user ID is blacklisted."""
+    uid = str(user_id)
+    return any(str(u.get("user_id")) == uid for u in _blacklist.get("users", []))
 
 
 def _search_corrections(query: str, top_n: int = 3) -> list:
