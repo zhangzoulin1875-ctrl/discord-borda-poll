@@ -1539,7 +1539,7 @@ async def forum_index_refresh_loop():
         await asyncio.sleep(_FORUM_INDEX_TTL)
 
 
-async def channel_embed_refresh_loop():
+async def channel_index_refresh_loop():
     """Background task: refresh the channel-embed index every 30 minutes.
     Scans all text channels for messages containing embeds (announcements,
     official notices, etc.) that Discord's search API can't find because
@@ -1549,11 +1549,11 @@ async def channel_embed_refresh_loop():
     while True:
         try:
             for guild in bot.guilds:
-                await _refresh_channel_embed_index(guild)
+                await _refresh_channel_index(guild)
                 await asyncio.sleep(2)  # stagger between guilds
         except Exception as e:
             print(f"⚠️ 頻道 Embed 索引背景更新失敗：{e}")
-        await asyncio.sleep(_CHANNEL_EMBED_TTL)
+        await asyncio.sleep(_CHANNEL_INDEX_TTL)
 
 
 # ──────────────────────────────────────────────
@@ -2157,88 +2157,81 @@ _FORUM_INDEX_TTL = 900  # 15 分鐘快取
 # （人事任命、選舉結果、出入許可等）是純 embed 訊息（content 為空），
 # 所以 search_discord 永遠找不到。這個索引掃描所有文字頻道，把有 embed
 # 的訊息內容抓出來建索引，讓搜尋能找到這些公告。
-_channel_embed_cache: dict = {}  # {guild_id: {"entries": [...], "updated": ts}}
-_CHANNEL_EMBED_TTL = 1800  # 30 分鐘快取
+_channel_index_cache: dict = {}  # {guild_id: {"entries": [...], "updated": ts}}
+_CHANNEL_INDEX_TTL = 1800  # 30 分鐘快取
 
 
-async def _refresh_channel_embed_index(guild) -> list:
-    """Scan all text channels (non-forum) for recent messages that contain
-    embeds, and index their text content. Forum channels are already covered
-    by _refresh_forum_index so we skip them here. Only fetches the last 50
-    messages per channel to keep API call count reasonable (~1 call/channel).
-    Staggered with small delays to avoid rate limits."""
+async def _refresh_channel_index(guild) -> list:
+    """Scan all text channels (non-forum) for recent messages and index their
+    content — BOTH plain text AND embeds. Discord's search API doesn't index
+    embed content, and its full-text search is unreliable for CJK, so we
+    maintain our own bigram-searchable index of recent channel messages.
+    Forum channels are already covered by _refresh_forum_index so we skip
+    them here. Only fetches the last 50 messages per channel to keep API call
+    count reasonable (~1 call/channel). Staggered with small delays to avoid
+    rate limits."""
     entries = []
     _t0 = _time.time()
     _ch_count = 0
-    _embed_count = 0
+    _msg_count = 0
     try:
-        # Only scan text channels and announcement channels, NOT forum/voice/stage
         text_channels = [
             ch for ch in guild.text_channels
             if ch.type in (discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.announcement)
         ]
-        print(f"📢 開始頻道 Embed 索引：{len(text_channels)} 個文字頻道...")
+        print(f"📢 開始頻道訊息索引：{len(text_channels)} 個文字頻道...")
 
         for ch in text_channels:
             _ch_count += 1
             try:
                 async for msg in ch.history(limit=50):
-                    # Skip messages with no embeds
-                    if not msg.embeds:
-                        continue
-                    # Extract all embed text
-                    embed_parts = []
+                    # Extract text from BOTH plain content AND embeds
+                    text_parts = []
+                    if msg.content and msg.content.strip():
+                        text_parts.append(msg.content.strip())
                     for emb in msg.embeds:
                         if emb.title:
-                            embed_parts.append(str(emb.title))
+                            text_parts.append(str(emb.title))
                         if emb.description:
-                            embed_parts.append(str(emb.description))
+                            text_parts.append(str(emb.description))
                         for field in emb.fields:
-                            embed_parts.append(f"{field.name}: {field.value}")
+                            text_parts.append(f"{field.name}: {field.value}")
                         if emb.footer and emb.footer.text:
-                            embed_parts.append(str(emb.footer.text))
+                            text_parts.append(str(emb.footer.text))
                         if emb.author and emb.author.name:
-                            embed_parts.append(str(emb.author.name))
-                    embed_text = "\n".join(p for p in embed_parts if p).strip()
-                    if not embed_text:
-                        continue
+                            text_parts.append(str(emb.author.name))
+                    full_text = "\n".join(p for p in text_parts if p).strip()
+                    if not full_text or len(full_text) < 5:
+                        continue  # skip empty / tiny messages
 
-                    _embed_count += 1
+                    _msg_count += 1
                     author = msg.author.display_name if msg.author else "未知"
-                    date_str = msg.created_at.strftime("%Y-%m-%d") if msg.created_at else ""
-                    # Also include any plain text content alongside embeds
-                    full_text = msg.content.strip()
-                    if full_text:
-                        full_text += "\n"
-                    full_text += embed_text
+                    date_str = msg.created_at.strftime("%Y-%m-%d %H:%M") if msg.created_at else ""
 
                     entries.append({
                         "channel_name": ch.name,
                         "author": author,
                         "date": date_str,
                         "text": full_text[:1000],
-                        "content_short": embed_text[:300],
                     })
             except discord.Forbidden:
-                pass  # No read permission in this channel
+                pass
             except Exception as e:
-                print(f"⚠️ 頻道 Embed 索引「{ch.name}」失敗：{e}")
+                print(f"⚠️ 頻道索引「{ch.name}」失敗：{e}")
 
-            # Stagger to avoid rate limits (every 5 channels, sleep 0.5s)
             if _ch_count % 5 == 0:
                 await asyncio.sleep(0.5)
 
-        print(f"📢 頻道 Embed 索引完成：{_ch_count} 頻道，{_embed_count} 則 embed 訊息，耗時 {_time.time() - _t0:.1f}s")
+        print(f"📢 頻道訊息索引完成：{_ch_count} 頻道，{_msg_count} 則訊息，耗時 {_time.time() - _t0:.1f}s")
     except Exception as e:
-        print(f"⚠️ 頻道 Embed 索引刷新失敗：{e}")
+        print(f"⚠️ 頻道索引刷新失敗：{e}")
 
-    _channel_embed_cache[guild.id] = {"entries": entries, "updated": _time.time()}
+    _channel_index_cache[guild.id] = {"entries": entries, "updated": _time.time()}
     return entries
 
 
-def _search_channel_embeds(query: str, entries: list, top_n: int = 5) -> list:
-    """Search the channel embed index using bigram matching (same algorithm
-    as _search_forum_posts). Returns matched entries sorted by relevance."""
+def _search_channel_index(query: str, entries: list, top_n: int = 5) -> list:
+    """Search the channel message index using bigram matching."""
     query = query.strip()
     query_bg = _bigrams(query)
     if not query_bg or not entries:
@@ -2523,30 +2516,49 @@ async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> s
             return ""
 
     async def _embed_part():
-        """Search the channel embed index for embed-only announcements
+        """Search the channel message index for recent messages
         (人事任命、選舉結果、出入許可 etc.) that Discord's search API
         can't find because it doesn't index embed content."""
         try:
-            cached = _channel_embed_cache.get(guild.id)
+            cached = _channel_index_cache.get(guild.id)
             entries = cached["entries"] if cached else []
             if not entries:
                 return ""
-            matched = _search_channel_embeds(query, entries, top_n=5)
+            matched = _search_channel_index(query, entries, top_n=5)
             if not matched:
                 return ""
-            parts = [f"📢 公告 Embed 搜尋「{query}」的結果（{len(matched)} 則）："]
+            parts = [f"📢 頻道訊息搜尋「{query}」的結果（{len(matched)} 則）："]
             for e in matched:
                 parts.append(
                     f"\n#{e['channel_name']} | {e['author']} ({e['date']})\n{e['text'][:400]}"
                 )
             return "\n".join(parts)
         except Exception as e:
-            print(f"⚠️ 頻道 Embed 搜尋失敗：{e}")
+            print(f"⚠️ 頻道訊息搜尋失敗：{e}")
             return ""
 
-    forum_result, embed_result, live_result = await asyncio.gather(
+    async def _kb_part():
+        """Search the permanent knowledge base (daily AI summaries stored
+        on Google Drive) for historical context that may not be in recent
+        channel messages or forum posts."""
+        try:
+            matched = _search_knowledge_base(query, top_n=3)
+            if not matched:
+                return ""
+            parts = [f"📚 永久知識庫搜尋「{query}」的結果（{len(matched)} 篇每日摘要）："]
+            for s in matched:
+                parts.append(
+                    f"\n📅 {s['date']}\n{s['summary'][:800]}"
+                )
+            return "\n".join(parts)
+        except Exception as e:
+            print(f"⚠️ 知識庫搜尋失敗：{e}")
+            return ""
+
+    forum_result, embed_result, kb_result, live_result = await asyncio.gather(
         asyncio.wait_for(_forum_part(), timeout=3),
         asyncio.wait_for(_embed_part(), timeout=3),  # in-memory bigram match — instant
+        asyncio.wait_for(_kb_part(), timeout=3),  # in-memory bigram match — instant
         asyncio.wait_for(_live_guild_message_search(guild, query, limit), timeout=10),
         return_exceptions=True,
     )
@@ -2554,10 +2566,12 @@ async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> s
         forum_result = ""
     if isinstance(embed_result, Exception):
         embed_result = ""
+    if isinstance(kb_result, Exception):
+        kb_result = ""
     if isinstance(live_result, Exception):
         live_result = ""
 
-    combined = "\n\n".join(r for r in (forum_result, embed_result, live_result) if r)
+    combined = "\n\n".join(r for r in (forum_result, embed_result, kb_result, live_result) if r)
     if not combined:
         return f"沒有找到包含「{query}」的訊息或論壇貼文"
     return combined[:6000]
@@ -3923,6 +3937,7 @@ async def setup_hook():
             pass
     # Load from Google Drive first (if configured), then from local
     await load_from_drive()
+    load_knowledge_base()
     # Load local files (will use Drive-downloaded data if available)
     load_polls_from_disk()
     save_polls_to_disk()  # Create file if not exists
@@ -3946,7 +3961,8 @@ async def setup_hook():
     asyncio.ensure_future(drive_sync_loop())
     asyncio.ensure_future(server_context_refresh_loop())
     asyncio.ensure_future(forum_index_refresh_loop())
-    asyncio.ensure_future(channel_embed_refresh_loop())
+    asyncio.ensure_future(channel_index_refresh_loop())
+    asyncio.ensure_future(daily_summary_loop())
     asyncio.ensure_future(quiz_question_loop())
     asyncio.ensure_future(quiz_settlement_loop())
     asyncio.ensure_future(token_log_loop())
@@ -7043,6 +7059,207 @@ class NationGroup(app_commands.Group):
 
 
 # ──────────────────────────────────────────────
+# 永久知識庫（每日凌晨三點 AI 整理重點）
+# ──────────────────────────────────────────────
+
+KNOWLEDGE_BASE_FILE = os.path.join(DATA_DIR, "knowledge_base.json")
+_knowledge_base = {"summaries": []}
+
+
+def load_knowledge_base():
+    """Load the permanent knowledge base from local file (synced from Drive)."""
+    global _knowledge_base
+    try:
+        if os.path.exists(KNOWLEDGE_BASE_FILE):
+            with open(KNOWLEDGE_BASE_FILE, "r", encoding="utf-8") as f:
+                _knowledge_base = json_module.loads(f.read())
+            print(f"📚 知識庫已載入：{len(_knowledge_base.get('summaries', []))} 篇每日摘要")
+    except Exception as e:
+        print(f"⚠️ 知識庫載入失敗：{e}")
+        _knowledge_base = {"summaries": []}
+
+
+def save_knowledge_base():
+    """Save the knowledge base to local file (auto-synced to Drive)."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(KNOWLEDGE_BASE_FILE, "w", encoding="utf-8") as f:
+            f.write(json_module.dumps(_knowledge_base, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"⚠️ 知識庫儲存失敗：{e}")
+
+
+def _search_knowledge_base(query: str, top_n: int = 3) -> list:
+    """Search the permanent knowledge base using bigram matching."""
+    query = query.strip()
+    query_bg = _bigrams(query)
+    if not query_bg:
+        return []
+    summaries = _knowledge_base.get("summaries", [])
+    if not summaries:
+        return []
+    scored = []
+    for s in summaries:
+        text = s.get("summary", "") + " " + s.get("date", "")
+        text_bg = _bigrams(text)
+        if not text_bg:
+            continue
+        overlap = query_bg & text_bg
+        substring_hit = bool(query) and query in text
+        if not overlap and not substring_hit:
+            continue
+        containment = len(overlap) / len(query_bg) if query_bg else 0
+        if not substring_hit and containment < 0.2:
+            continue
+        scored.append((s, containment, substring_hit))
+    scored.sort(key=lambda x: (-x[2], -x[1]))
+    return [s for s, _, _ in scored[:top_n]]
+
+
+async def _collect_daily_messages(guild, hours=24) -> str:
+    """Collect all messages from the past `hours` across all text channels.
+    Returns a condensed text dump grouped by channel for AI summarization.
+    Skips very short messages (< 10 chars), bot commands, and empty content.
+    Staggered to respect Discord rate limits."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    _t0 = _time.time()
+    _ch_count = 0
+    _msg_count = 0
+    channel_chunks = []
+
+    text_channels = [
+        ch for ch in guild.text_channels
+        if ch.type in (discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.announcement)
+    ]
+
+    for ch in text_channels:
+        _ch_count += 1
+        ch_lines = []
+        try:
+            async for msg in ch.history(limit=200, after=cutoff):
+                # Skip empty / very short / command messages
+                text = msg.content.strip()
+                if not text or len(text) < 10:
+                    # Still check embeds
+                    embed_parts = []
+                    for emb in msg.embeds:
+                        if emb.title:
+                            embed_parts.append(str(emb.title))
+                        if emb.description:
+                            embed_parts.append(str(emb.description))
+                        for field in emb.fields:
+                            embed_parts.append(f"{field.name}: {field.value}")
+                    text = "\n".join(embed_parts).strip()
+                    if not text or len(text) < 5:
+                        continue
+                if text.startswith("/") or text.startswith("!"):
+                    continue  # skip slash/prefix commands
+                author = msg.author.display_name if msg.author else "未知"
+                time_str = msg.created_at.strftime("%H:%M") if msg.created_at else "??:??"
+                ch_lines.append(f"[{time_str}] {author}: {text[:200]}")
+                _msg_count += 1
+        except discord.Forbidden:
+            pass
+        except Exception as e:
+            print(f"⚠️ 每日收集「{ch.name}」失敗：{e}")
+
+        if ch_lines:
+            channel_chunks.append(f"\n── #{ch.name} ──\n" + "\n".join(ch_lines[-50:]))
+
+        # Stagger every 5 channels
+        if _ch_count % 5 == 0:
+            await asyncio.sleep(0.5)
+
+    print(f"📚 每日訊息收集：{_ch_count} 頻道，{_msg_count} 則訊息，耗時 {_time.time() - _t0:.1f}s")
+    return "\n".join(channel_chunks)
+
+
+async def _generate_daily_summary(messages_text: str, date_str: str) -> str:
+    """Send collected messages to AI and get a structured daily summary."""
+    if not messages_text or len(messages_text.strip()) < 50:
+        return "本日無顯著活動。"
+
+    prompt = (
+        f"以下是某微國家組織 Discord 伺服器在 {date_str} 的全天訊息記錄。\n"
+        f"請整理成一份結構化的每日重點摘要，格式如下：\n\n"
+        f"## {date_str} 伺服器日報\n\n"
+        f"### 重要公告與人事變動\n（選舉結果、任命、罷免、政策發布等，列出人名和具體事件）\n\n"
+        f"### 重要討論與決議\n（論壇提案進展、投票結果、會議結論等）\n\n"
+        f"### 其他值得記錄的事\n（活動、事件、爭議、值得注意的互動等）\n\n"
+        f"要求：\n"
+        f"- 只記錄有事實根據的內容，不要編造\n"
+        f"- 每個條目盡量包含人名和具體事件\n"
+        f"- 如果某個分類沒有內容就寫「無」\n"
+        f"- 用繁體中文\n"
+        f"- 總字數控制在 500-1500 字\n\n"
+        f"訊息記錄：\n{messages_text[:12000]}"
+    )
+
+    messages = [
+        {"role": "system", "content": "你是微國家社群的歷史記錄員，負責整理每日重點。用繁體中文，語氣客觀簡潔。"},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        result = await call_chat_api(
+            messages,
+            {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
+        )
+        text = ""
+        if isinstance(result, dict):
+            choices = result.get("choices", [])
+            if choices:
+                text = choices[0].get("message", {}).get("content", "")
+        return text.strip() if text else "AI 整理失敗（空回應）。"
+    except Exception as e:
+        return f"AI 整理失敗：{e}"
+
+
+async def daily_summary_loop():
+    """Background task: every day at 3 AM Taipei time (UTC+8), collect all
+    messages from the past 24 hours, send to AI for summarization, and
+    store the result in the permanent knowledge base on Google Drive."""
+    from datetime import datetime, timezone, timedelta
+    taipei_tz = timezone(timedelta(hours=8))
+
+    while True:
+        try:
+            now_taipei = datetime.now(taipei_tz)
+            # Calculate next 3 AM Taipei time
+            next_run = now_taipei.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now_taipei >= next_run:
+                next_run += timedelta(days=1)
+            wait_seconds = (next_run - now_taipei).total_seconds()
+            print(f"📚 每日摘要排程：下次執行 {next_run.strftime('%Y-%m-%d %H:%M')} Taipei（等待 {wait_seconds/3600:.1f} 小時）")
+            await asyncio.sleep(wait_seconds)
+
+            # Collect messages from the past 24 hours
+            for guild in bot.guilds:
+                print(f"📚 開始每日摘要：{guild.name}")
+                messages_text = await _collect_daily_messages(guild, hours=24)
+                date_str = (datetime.now(taipei_tz) - timedelta(hours=24)).strftime("%Y-%m-%d")
+
+                # Generate AI summary
+                summary = await _generate_daily_summary(messages_text, date_str)
+
+                # Save to knowledge base
+                _knowledge_base.setdefault("summaries", []).append({
+                    "date": date_str,
+                    "summary": summary,
+                    "guild": guild.name,
+                    "message_count": messages_text.count("\n") + 1,
+                })
+                save_knowledge_base()
+                print(f"📚 每日摘要已儲存：{date_str}（知識庫共 {len(_knowledge_base['summaries'])} 篇）")
+
+                await asyncio.sleep(5)  # stagger between guilds
+        except Exception as e:
+            print(f"⚠️ 每日摘要排程失敗：{e}")
+            await asyncio.sleep(3600)  # retry in 1 hour on error
+
+
+# ──────────────────────────────────────────────
 # 啟動
 # ──────────────────────────────────────────────
 
@@ -7058,6 +7275,7 @@ async def _graceful_shutdown_save():
         save_briefing_settings()
         save_chat_ai_settings()
         save_user_memories()
+        save_knowledge_base()
         await sync_to_drive()
         print("✅ 關機前資料已全部同步到 Google Drive")
     except Exception as e:
