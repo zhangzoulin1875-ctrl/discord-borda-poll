@@ -1078,8 +1078,146 @@ async def call_chat_api(messages: list, settings: dict) -> str:
             return data["choices"][0]["message"]["content"]
 
 
+# ──────────────────────────────────────────────
+# 伺服器結構感知（Server Context Cache）
+# ──────────────────────────────────────────────
+
+# {guild_id: {"data": {...}, "updated": timestamp}}
+_server_context_cache: dict = {}
+_SERVER_CONTEXT_TTL = 600  # 10 分鐘快取
+
+
+async def _refresh_server_context(guild):
+    """Fetch and cache server structure: channels, roles, emojis, members."""
+    try:
+        # Channels
+        channels = []
+        for ch in guild.text_channels:
+            cat = ch.category.name if ch.category else "無分類"
+            channels.append({"name": ch.name, "category": cat, "topic": (ch.topic or "")[:80]})
+        channels.sort(key=lambda c: (c["category"], c["name"]))
+
+        # Roles (exclude @everyone and managed/integration roles)
+        roles = []
+        for r in sorted(guild.roles, key=lambda x: -x.position):
+            if r.name == "@everyone" or r.managed:
+                continue
+            roles.append({"name": r.name, "color": str(r.color), "member_count": len(r.members)})
+
+        # Custom emojis
+        emojis = []
+        for e in guild.emojis:
+            emojis.append({"name": e.name, "animated": e.animated, "id": str(e.id)})
+        # Limit to 50 to save tokens
+        emojis = emojis[:50]
+
+        # Members (only those with roles or online, max 80)
+        members = []
+        for m in guild.members:
+            if m.bot:
+                continue
+            member_roles = [r.name for r in m.roles if r.name != "@everyone" and not r.managed]
+            members.append({
+                "name": m.display_name,
+                "roles": member_roles[:5],  # top 5 roles
+                "nick": m.nick or "",
+                "is_admin": m.guild_permissions.administrator or m.guild_permissions.manage_guild,
+            })
+        members.sort(key=lambda m: (-m["is_admin"], m["name"]))
+        members = members[:80]
+
+        _server_context_cache[guild.id] = {
+            "data": {
+                "guild_name": guild.name,
+                "member_count": guild.member_count,
+                "channels": channels,
+                "roles": roles,
+                "emojis": emojis,
+                "members": members,
+            },
+            "updated": _time.time(),
+        }
+        print(f"🔄 伺服器結構已更新：{guild.name}（{len(channels)} 頻道, {len(roles)} 身分組, {len(emojis)} emoji, {len(members)} 成員）")
+    except Exception as e:
+        print(f"⚠️ 伺服器結構更新失敗（{guild.name}）：{e}")
+
+
+async def _get_server_context(guild, user) -> str:
+    """Get compact server context string for the AI prompt."""
+    # Refresh if stale or not cached
+    cached = _server_context_cache.get(guild.id)
+    if not cached or (_time.time() - cached["updated"] > _SERVER_CONTEXT_TTL):
+        await _refresh_server_context(guild)
+        cached = _server_context_cache.get(guild.id)
+
+    if not cached:
+        return ""
+
+    d = cached["data"]
+    lines = []
+    lines.append(f"─── 伺服器結構：{d['guild_name']}（{d['member_count']} 成員）───")
+
+    # Channels (compact, grouped by category)
+    lines.append("\n📁 頻道：")
+    current_cat = None
+    ch_names = []
+    for ch in d["channels"]:
+        if ch["category"] != current_cat:
+            if ch_names:
+                lines.append(f"  [{current_cat}] {', '.join(ch_names)}")
+                ch_names = []
+            current_cat = ch["category"]
+        ch_names.append(f"#{ch['name']}")
+    if ch_names:
+        lines.append(f"  [{current_cat}] {', '.join(ch_names)}")
+
+    # Roles (compact)
+    lines.append(f"\n🏷️ 身分組：{', '.join(r['name'] for r in d['roles'][:20])}")
+
+    # Emojis (compact — just names, tell AI how to use them)
+    if d["emojis"]:
+        emoji_names = [f":{e['name']}:" for e in d["emojis"][:30]]
+        lines.append(f"\n😀 伺服器 Emoji（名稱列出，可在回覆中提及）：{' '.join(emoji_names)}")
+
+    # Current user's identity in this server
+    user_roles = [r.name for r in user.roles if r.name != "@everyone" and not r.managed]
+    is_admin = user.guild_permissions.administrator or user.guild_permissions.manage_guild
+    lines.append(f"\n👤 當前使用者：「{user.display_name}」")
+    if user.nick:
+        lines.append(f"  暱稱：{user.nick}")
+    lines.append(f"  身分組：{', '.join(user_roles) if user_roles else '（無）'}")
+    lines.append(f"  權限：{'管理員' if is_admin else '一般成員'}")
+
+    # Other members (compact — just names with key roles)
+    other_members = [m for m in d["members"] if m["name"] != user.display_name]
+    if other_members:
+        member_summary = []
+        for m in other_members[:30]:
+            tag = ""
+            if m["is_admin"]:
+                tag = "★"
+            elif m["roles"]:
+                tag = f"({m['roles'][0]})"
+            member_summary.append(f"{m['name']}{tag}")
+        lines.append(f"\n👥 其他成員（★=管理員）：{', '.join(member_summary)}")
+
+    return "\n".join(lines)
+
+
+async def server_context_refresh_loop():
+    """Background task: refresh server context every 10 minutes for all guilds."""
+    await asyncio.sleep(60)  # Wait for bot to be ready
+    while True:
+        try:
+            for guild in bot.guilds:
+                await _refresh_server_context(guild)
+        except Exception as e:
+            print(f"⚠️ 伺服器結構背景更新失敗：{e}")
+        await asyncio.sleep(_SERVER_CONTEXT_TTL)
+
+
 async def generate_chat_reply(message, settings: dict) -> tuple:
-    """Generate a reply for a chat message with brief context and per-user memory.
+    """Generate a reply for a chat message with brief context, server awareness, and per-user memory.
     Returns (reply_text, new_facts_or_None)."""
     user_id = str(message.author.id)
     user_name = message.author.display_name
@@ -1090,6 +1228,16 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
 
     # Build system prompt with memory — STRICTLY scoped to current user
     system_prompt = settings["system_prompt"]
+
+    # Inject server context (channels, roles, emojis, members, current user identity)
+    if message.guild:
+        try:
+            server_ctx = await _get_server_context(message.guild, message.author)
+            if server_ctx:
+                system_prompt += f"\n\n{server_ctx}"
+        except Exception as e:
+            print(f"⚠️ 伺服器結構取得失敗：{e}")
+
     system_prompt += f"\n\n─── 重要：使用者識別 ───\n你現在正在和「{user_name}」對話。"
     system_prompt += f"\n只有「{user_name}」現在說的話，才是關於這位使用者的資訊。"
     system_prompt += "\n近期對話中其他人的發言，只是上下文參考，絕對不能把它們當作{user_name}的資訊。"
@@ -1120,8 +1268,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             if msg.author.id == bot.user.id:
                 context_lines.insert(0, f"AI: {msg.content[:150]}")
             else:
-                # Clearly mark that this is someone else speaking, not the current user
-                context_lines.insert(0, f"[其他人] {name}: {msg.content[:150]}")
+                # Include speaker's role context so AI knows who's talking
+                speaker_roles = [r.name for r in msg.author.roles if r.name != "@everyone" and not r.managed][:3]
+                role_tag = f"[{','.join(speaker_roles)}]" if speaker_roles else ""
+                context_lines.insert(0, f"[其他人]{role_tag} {name}: {msg.content[:150]}")
     except Exception:
         pass
 
@@ -1827,6 +1977,7 @@ def mode_name(mode: str) -> str:
 
 intents = discord.Intents.default()
 intents.message_content = True  # Needed to read message content from channel history
+intents.members = True  # Needed for server structure awareness (member list, roles)
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -1866,6 +2017,7 @@ async def setup_hook():
     asyncio.ensure_future(daily_briefing_scheduler())
     asyncio.ensure_future(weekly_briefing_scheduler())
     asyncio.ensure_future(drive_sync_loop())
+    asyncio.ensure_future(server_context_refresh_loop())
 
 
 @bot.event
@@ -3199,6 +3351,47 @@ class ChatGroup(app_commands.Group):
             ephemeral=True
         )
 
+    @app_commands.command(name="server_info", description="查看/更新伺服器結構快取（管理員限定）")
+    async def chat_server_info(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        # Force refresh
+        await _refresh_server_context(interaction.guild)
+        cached = _server_context_cache.get(interaction.guild.id, {})
+        d = cached.get("data", {})
+        if not d:
+            await interaction.followup.send("❌ 無法取得伺服器結構。", ephemeral=True)
+            return
+
+        embed = discord.Embed(title=f"🏗️ 伺服器結構：{d['guild_name']}", color=discord.Color.blue())
+
+        ch_list = []
+        current_cat = None
+        ch_names = []
+        for ch in d["channels"]:
+            if ch["category"] != current_cat:
+                if ch_names:
+                    ch_list.append(f"[{current_cat}] {' '.join(ch_names)}")
+                    ch_names = []
+                current_cat = ch["category"]
+            ch_names.append(f"#{ch['name']}")
+        if ch_names:
+            ch_list.append(f"[{current_cat}] {' '.join(ch_names)}")
+        embed.add_field(name=f"📁 頻道（{len(d['channels'])}）", value="\n".join(ch_list)[:1024] or "無", inline=False)
+
+        roles_str = ", ".join(f"{r['name']}({r['member_count']})" for r in d["roles"][:20])
+        embed.add_field(name=f"🏷️ 身分組（{len(d['roles'])}）", value=roles_str[:1024] or "無", inline=False)
+
+        emoji_str = " ".join(f":{e['name']}:" for e in d["emojis"][:30])
+        embed.add_field(name=f"😀 Emoji（{len(d['emojis'])}）", value=emoji_str[:1024] or "無", inline=False)
+
+        embed.add_field(name="👥 成員", value=f"快取 {len(d['members'])} / {d['member_count']} 總成員", inline=True)
+        embed.add_field(name="最後更新", value=f"<t:{int(cached.get('updated', 0))}:R>", inline=True)
+        embed.set_footer(text="每 10 分鐘自動更新。此指令可手動刷新。")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     @app_commands.command(name="test", description="測試 AI 聊天回覆（管理員限定）")
     @app_commands.describe(message="要測試的訊息")
     async def chat_test(self, interaction: discord.Interaction, message: str):
@@ -3305,6 +3498,16 @@ class ChatGroup(app_commands.Group):
         lines.append(f"**6. 過濾強度**")
         lines.append(f"  目前：{filter_str} — {filter_descs.get(filter_str, '')}")
         lines.append(f"  → 用 `/chat filter` 調整")
+        lines.append(f"")
+        lines.append(f"**7. 伺服器結構感知**")
+        if _server_context_cache:
+            for gid, cache in _server_context_cache.items():
+                d = cache.get("data", {})
+                age = int(_time.time() - cache.get("updated", 0))
+                lines.append(f"  Guild {gid}: {d.get('guild_name', '?')} — {len(d.get('channels', []))} 頻道, {len(d.get('members', []))} 成員快取 ({age}s ago)")
+        else:
+            lines.append(f"  ❌ 尚未建立快取")
+        lines.append(f"  → 用 `/chat server_info` 手動刷新")
         lines.append(f"")
         lines.append(f"**7. 測試**")
         lines.append(f"  請在這個頻道發一則 >15 字的訊息，然後查看 Render logs")
