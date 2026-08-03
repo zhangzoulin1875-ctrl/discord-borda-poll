@@ -987,24 +987,35 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
 _drive_token_cache = {"token": None, "expires": 0.0}
 
 
-def _get_drive_access_token():
+async def _get_drive_access_token():
     """Get Google API access token from service account JWT (cached 50 min)."""
     if not pyjwt:
+        print("⚠️ Drive: PyJWT 未安裝，無法產生存取權杖。")
         return None
     if _drive_token_cache["token"] and _time.time() < _drive_token_cache["expires"]:
         return _drive_token_cache["token"]
 
     creds_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
     if not creds_b64:
+        print("⚠️ Drive: GOOGLE_SERVICE_ACCOUNT_B64 環境變數未設定。")
         return None
 
     try:
         creds_info = json_module.loads(base64.b64decode(creds_b64).decode())
-        now = int(_time.time())
+    except Exception as e:
+        print(f"⚠️ Drive auth 失敗：GOOGLE_SERVICE_ACCOUNT_B64 解碼/解析錯誤：{e}")
+        return None
 
+    if creds_info.get("type") != "service_account" or "private_key" not in creds_info:
+        print(f"⚠️ Drive auth 失敗：JSON 不是服務帳號金鑰（缺少 type=service_account 或 private_key）。"
+              f" 目前的 keys: {list(creds_info.keys())}")
+        return None
+
+    try:
+        now = int(_time.time())
         payload = {
             "iss": creds_info["client_email"],
-            "scope": "https://www.googleapis.com/auth/drive.file",
+            "scope": "https://www.googleapis.com/auth/drive",
             "aud": "https://oauth2.googleapis.com/token",
             "iat": now,
             "exp": now + 3600,
@@ -1014,18 +1025,22 @@ def _get_drive_access_token():
         if isinstance(token, bytes):
             token = token.decode()
 
-        data = urllib.parse.urlencode({
+        form_data = {
             "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
             "assertion": token,
-        }).encode()
+        }
 
-        req = urllib.request.Request(
-            "https://oauth2.googleapis.com/token",
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        resp = urllib.request.urlopen(req, timeout=10)
-        result = json_module.loads(resp.read())
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://oauth2.googleapis.com/token",
+                data=form_data,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    print(f"⚠️ Drive auth 失敗：token 端點回傳 {resp.status}：{text[:400]}")
+                    return None
+                result = json_module.loads(text)
 
         _drive_token_cache["token"] = result["access_token"]
         _drive_token_cache["expires"] = _time.time() + 3000
@@ -1037,7 +1052,7 @@ def _get_drive_access_token():
 
 async def _drive_upload(filename: str, content: str) -> bool:
     """Upload (create or update) a file on Google Drive."""
-    token = _get_drive_access_token()
+    token = await _get_drive_access_token()
     if not token:
         return False
 
@@ -1052,7 +1067,11 @@ async def _drive_upload(filename: str, content: str) -> bool:
                 query += f" and '{folder_id}' in parents"
             search_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
             async with session.get(search_url, headers=headers) as resp:
-                data = await resp.json()
+                search_text = await resp.text()
+                if resp.status != 200:
+                    print(f"⚠️ Drive 搜尋 {filename} 失敗（{resp.status}）：{search_text[:400]}")
+                    return False
+                data = json_module.loads(search_text)
             existing = data.get("files", [])
 
             if existing:
@@ -1064,9 +1083,14 @@ async def _drive_upload(filename: str, content: str) -> bool:
                     headers={**headers, "Content-Type": "application/json"},
                     data=content.encode("utf-8"),
                 ) as resp:
-                    return resp.status in (200, 204)
+                    if resp.status in (200, 204):
+                        print(f"✅ Drive 已更新 {filename}")
+                        return True
+                    err = await resp.text()
+                    print(f"⚠️ Drive 更新 {filename} 失敗（{resp.status}）：{err[:400]}")
+                    return False
             else:
-                # Create new file via multipart upload
+                # Create new file via multipart upload (RFC 2046 requires CRLF line endings)
                 import uuid as _uuid
                 boundary = _uuid.uuid4().hex
 
@@ -1075,22 +1099,27 @@ async def _drive_upload(filename: str, content: str) -> bool:
                     metadata["parents"] = [folder_id]
 
                 body = (
-                    f"--{boundary}\n"
-                    f"Content-Type: application/json; charset=UTF-8\n\n"
-                    f"{json_module.dumps(metadata)}\n"
-                    f"--{boundary}\n"
-                    f"Content-Type: application/json\n\n"
-                    f"{content}\n"
+                    f"--{boundary}\r\n"
+                    f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                    f"{json_module.dumps(metadata)}\r\n"
+                    f"--{boundary}\r\n"
+                    f"Content-Type: application/json\r\n\r\n"
+                    f"{content}\r\n"
                     f"--{boundary}--"
                 ).encode("utf-8")
 
-                upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+                upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,parents"
                 async with session.post(
                     upload_url,
                     headers={**headers, "Content-Type": f"multipart/related; boundary={boundary}"},
                     data=body,
                 ) as resp:
-                    return resp.status in (200, 201)
+                    resp_text = await resp.text()
+                    if resp.status in (200, 201):
+                        print(f"✅ Drive 已建立 {filename}：{resp_text[:200]}")
+                        return True
+                    print(f"⚠️ Drive 建立 {filename} 失敗（{resp.status}）：{resp_text[:400]}")
+                    return False
     except Exception as e:
         print(f"⚠️ Drive upload failed ({filename}): {e}")
         return False
@@ -1098,7 +1127,7 @@ async def _drive_upload(filename: str, content: str) -> bool:
 
 async def _drive_download(filename: str) -> str:
     """Download a file from Google Drive. Returns content or None."""
-    token = _get_drive_access_token()
+    token = await _get_drive_access_token()
     if not token:
         return None
 
@@ -1112,7 +1141,11 @@ async def _drive_download(filename: str) -> str:
                 query += f" and '{folder_id}' in parents"
             search_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
             async with session.get(search_url, headers=headers) as resp:
-                data = await resp.json()
+                search_text = await resp.text()
+                if resp.status != 200:
+                    print(f"⚠️ Drive 搜尋 {filename} 失敗（{resp.status}）：{search_text[:400]}")
+                    return None
+                data = json_module.loads(search_text)
             files = data.get("files", [])
             if not files:
                 return None
@@ -1120,6 +1153,10 @@ async def _drive_download(filename: str) -> str:
             file_id = files[0]["id"]
             download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
             async with session.get(download_url, headers=headers) as resp:
+                if resp.status != 200:
+                    err = await resp.text()
+                    print(f"⚠️ Drive 下載 {filename} 失敗（{resp.status}）：{err[:400]}")
+                    return None
                 return await resp.text()
     except Exception as e:
         print(f"⚠️ Drive download failed ({filename}): {e}")
@@ -1131,15 +1168,24 @@ async def sync_to_drive():
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"):
         return
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    ok_count = 0
+    fail_count = 0
     for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json"]:
         filepath = os.path.join(data_dir, filename)
         if os.path.exists(filepath):
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     content = f.read()
-                await _drive_upload(filename, content)
+                success = await _drive_upload(filename, content)
+                if success:
+                    ok_count += 1
+                else:
+                    fail_count += 1
             except Exception as e:
+                fail_count += 1
                 print(f"⚠️ Sync {filename} failed: {e}")
+    if fail_count > 0:
+        print(f"⚠️ Drive 同步：{ok_count} 成功，{fail_count} 失敗（見上方詳細錯誤）")
 
 
 async def load_from_drive():
@@ -1564,6 +1610,7 @@ async def on_ready():
     bot.tree.add_command(MeetingGroup())
     bot.tree.add_command(BriefingGroup())
     bot.tree.add_command(ChatGroup())
+    bot.tree.add_command(SystemGroup())
     # Check message_content intent
     if not bot.intents.message_content:
         print("⚠️  message_content intent 未啟用！AI 聊天功能無法讀取訊息內容。")
@@ -2510,6 +2557,88 @@ class PollGroup(app_commands.Group):
         view = ManagePanelView(interaction.guild.id)
         embed = view._guild_overview_embed()
         await interaction.response.send_message(embed=embed, view=view)
+
+
+# ──────────────────────────────────────────────
+# 系統診斷指令群組
+# ──────────────────────────────────────────────
+
+class SystemGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="system", description="系統診斷工具")
+
+    @app_commands.command(name="drive_test", description="測試 Google Drive 連線並顯示詳細錯誤（管理員限定）")
+    async def drive_test(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        lines = ["**🔍 Google Drive 診斷**", ""]
+
+        # 1. Check env vars
+        creds_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64", "")
+        folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+        lines.append(f"**1. 環境變數**")
+        lines.append(f"  GOOGLE_SERVICE_ACCOUNT_B64: {'✅ 已設定 (' + str(len(creds_b64)) + ' 字元)' if creds_b64 else '❌ 未設定'}")
+        lines.append(f"  GOOGLE_DRIVE_FOLDER_ID: {'✅ `' + folder_id + '`' if folder_id else '❌ 未設定'}")
+
+        if not creds_b64:
+            lines.append("")
+            lines.append("→ 請在 Render 設定 GOOGLE_SERVICE_ACCOUNT_B64")
+            await interaction.followup.send("\n".join(lines), ephemeral=True)
+            return
+
+        # 2. Decode and validate JSON
+        lines.append("")
+        lines.append(f"**2. 服務帳號金鑰解析**")
+        try:
+            creds_info = json_module.loads(base64.b64decode(creds_b64).decode())
+            lines.append(f"  ✅ Base64 + JSON 解析成功")
+            lines.append(f"  type: `{creds_info.get('type', '(缺少)')}`")
+            lines.append(f"  client_email: `{creds_info.get('client_email', '(缺少)')}`")
+            has_key = "private_key" in creds_info
+            lines.append(f"  private_key: {'✅ 存在' if has_key else '❌ 缺少'}")
+            if creds_info.get("type") != "service_account":
+                lines.append(f"  ⚠️ type 不是 service_account！你可能上傳了錯誤的金鑰類型（例如 OAuth 用戶端）")
+        except Exception as e:
+            lines.append(f"  ❌ 解析失敗：{e}")
+            lines.append("")
+            lines.append("→ GOOGLE_SERVICE_ACCOUNT_B64 內容有誤，請重新 base64 編碼服務帳號 JSON")
+            await interaction.followup.send("\n".join(lines), ephemeral=True)
+            return
+
+        # 3. Get access token
+        lines.append("")
+        lines.append(f"**3. 取得存取權杖**")
+        _drive_token_cache["token"] = None  # force fresh token for test
+        token = await _get_drive_access_token()
+        if token:
+            lines.append(f"  ✅ 成功取得 token")
+        else:
+            lines.append(f"  ❌ 取得 token 失敗（詳細錯誤請看 Render logs）")
+            lines.append("")
+            lines.append("→ 常見原因：JSON 錯誤、Drive API 未啟用、服務帳號被刪除")
+            await interaction.followup.send("\n".join(lines), ephemeral=True)
+            return
+
+        # 4. Try uploading a test file
+        lines.append("")
+        lines.append(f"**4. 測試上傳**")
+        test_content = f'{{"test": true, "time": "{datetime.now().isoformat()}"}}'
+        success = await _drive_upload("_connection_test.json", test_content)
+        if success:
+            lines.append(f"  ✅ 測試檔案上傳成功！請到 Drive 資料夾確認 `_connection_test.json`")
+        else:
+            lines.append(f"  ❌ 上傳失敗（詳細錯誤請看 Render logs）")
+            lines.append("")
+            lines.append("→ 常見原因：")
+            lines.append("  • 資料夾沒有共用給服務帳號 email（見上方 client_email）")
+            lines.append("  • 服務帳號權限不是「編輯者」")
+            lines.append("  • GOOGLE_DRIVE_FOLDER_ID 錯誤（不是資料夾 ID，例如貼了整個網址）")
+            lines.append("  • Drive API 沒有在 Google Cloud 專案中啟用")
+
+        await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
 
 
 # ──────────────────────────────────────────────
