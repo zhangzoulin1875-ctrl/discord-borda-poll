@@ -1207,23 +1207,17 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
 
-    async def _post(payload, timeout_total=120, timeout_read=60):
+    async def _post(payload, timeout_total=300, timeout_read=120):
         """Streaming-aware POST: always uses stream=True to keep the
-        connection alive on slow endpoints. Accumulates content AND
-        tool_calls from SSE chunks, then returns a synthetic non-stream
-        response body (JSON with choices[0].message) so the caller code
-        doesn't need to change. The sock_read timeout only applies BETWEEN
-        chunks — once the first chunk arrives, the timer resets, so even
-        a slow free API that takes 60s to generate won't time out as long
-        as it sends chunks along the way."""
+        connection alive on slow endpoints. Creates a FRESH session per
+        call (like the briefing function does) to avoid any session-level
+        timeout interference from _shared_session. The sock_read timeout
+        only applies BETWEEN chunks — once the first chunk arrives, the
+        timer resets."""
         payload = {**payload, "stream": True}
-        t = aiohttp.ClientTimeout(total=timeout_total, connect=10, sock_read=timeout_read)
-        session = _shared_session
-        if session is None or session.closed:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
-                    return await _read_stream(resp)
-        else:
+        t = aiohttp.ClientTimeout(total=timeout_total, connect=15, sock_read=timeout_read)
+        # Always create a fresh session — no session-level timeout to interfere
+        async with aiohttp.ClientSession() as session:
             async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
                 return await _read_stream(resp)
 
@@ -1232,13 +1226,20 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         is a synthetic non-stream response containing the accumulated message."""
         if resp.status != 200:
             error_text = await resp.text()
+            print(f"⚠️ API returned status {resp.status}: {error_text[:200]}")
             return resp.status, error_text
 
         content_parts = []
         tool_calls_acc = {}  # index -> {id, name, arguments}
         finish_reason = None
+        _first_chunk_time = None
+        _chunk_count = 0
 
         async for raw_line in resp.content:
+            _chunk_count += 1
+            if _first_chunk_time is None:
+                _first_chunk_time = _time.time()
+                print(f"📦 第一個 chunk 到達")
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line or not line.startswith("data:"):
                 continue
@@ -1282,6 +1283,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         if tool_calls_acc:
             message["tool_calls"] = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
         body = json_module.dumps({"choices": [{"message": message, "finish_reason": finish_reason or "stop"}]})
+        _elapsed = _first_chunk_time - _time.time() if _first_chunk_time else 0
+        print(f"📦 串流完成：{_chunk_count} chunks, content={len(content_parts)} chars, tool_calls={len(tool_calls_acc)}")
         return 200, body
 
     payload = {
@@ -1301,7 +1304,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
     data = None
     _t0 = _time.time()
     try:
-        status, body_text = await _post(payload, timeout_total=45, timeout_read=40)
+        status, body_text = await _post(payload)
         print(f"⏱️ call_chat_api: _post 耗時 {_time.time()-_t0:.1f}s (status={status}, tools={'yes' if use_tools else 'no'})")
     except (asyncio.TimeoutError, Exception) as e:
         if use_tools:
@@ -1313,7 +1316,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
             save_tools_unsupported()
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
-            status, body_text = await _post(payload, timeout_total=45, timeout_read=40)
+            status, body_text = await _post(payload)
         else:
             raise
 
@@ -1321,12 +1324,39 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         try:
             data = json_module.loads(body_text)
             if "choices" in data:
-                ok = True
-                if use_tools:
-                    _tools_supported_apis.add(api_url)
-                    save_tools_supported()
-        except Exception:
-            pass
+                # Check if streaming returned empty content — API may not
+                # support streaming and returned a regular JSON response that
+                # _read_stream couldn't parse as SSE chunks.
+                _msg = data["choices"][0].get("message", {})
+                _content = _msg.get("content", "")
+                _tc = _msg.get("tool_calls")
+                if not _content and not _tc:
+                    print(f"⚠️ 串流回應為空（API 可能不支援 streaming），回退為非串流模式重試...")
+                    payload_ns = {k: v for k, v in payload.items() if k != "stream"}
+                    # Actually we need to rebuild without stream=True
+                    payload_ns = dict(payload)
+                    payload_ns.pop("stream", None)
+                    t2 = aiohttp.ClientTimeout(total=300, connect=15, sock_read=120)
+                    async with aiohttp.ClientSession() as sess:
+                        async with sess.post(api_url, json=payload_ns, headers=headers, timeout=t2) as resp2:
+                            if resp2.status == 200:
+                                body_text = await resp2.text()
+                                data = json_module.loads(body_text)
+                                if "choices" in data:
+                                    ok = True
+                                    if use_tools:
+                                        _tools_supported_apis.add(api_url)
+                                        save_tools_supported()
+                                    print(f"✅ 非串流回退成功")
+                            else:
+                                print(f"⚠️ 非串流回退也失敗：status={resp2.status}")
+                else:
+                    ok = True
+                    if use_tools:
+                        _tools_supported_apis.add(api_url)
+                        save_tools_supported()
+        except Exception as e:
+            print(f"⚠️ 解析回應失敗：{e}")
 
     if not ok and use_tools:
         # Endpoint returned a non-200 or malformed response WITH tools —
@@ -1336,7 +1366,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         save_tools_unsupported()
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
-        status, body_text = await _post(payload, timeout_total=45, timeout_read=40)
+        status, body_text = await _post(payload)
         if status == 200:
             try:
                 data = json_module.loads(body_text)
