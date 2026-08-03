@@ -1539,6 +1539,23 @@ async def forum_index_refresh_loop():
         await asyncio.sleep(_FORUM_INDEX_TTL)
 
 
+async def channel_embed_refresh_loop():
+    """Background task: refresh the channel-embed index every 30 minutes.
+    Scans all text channels for messages containing embeds (announcements,
+    official notices, etc.) that Discord's search API can't find because
+    it doesn't index embed content. Staggered across channels to avoid
+    rate limits."""
+    await asyncio.sleep(120)  # Wait a bit longer than forum index
+    while True:
+        try:
+            for guild in bot.guilds:
+                await _refresh_channel_embed_index(guild)
+                await asyncio.sleep(2)  # stagger between guilds
+        except Exception as e:
+            print(f"⚠️ 頻道 Embed 索引背景更新失敗：{e}")
+        await asyncio.sleep(_CHANNEL_EMBED_TTL)
+
+
 # ──────────────────────────────────────────────
 # 濫用偵測系統（Abuse Detection）
 # ──────────────────────────────────────────────
@@ -2135,6 +2152,116 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
 _forum_index_cache: dict = {}  # {guild_id: {"posts": [...], "updated": ts}}
 _FORUM_INDEX_TTL = 900  # 15 分鐘快取
 
+# ── 頻道 Embed 索引 ──
+# Discord 的訊息搜尋 API 只索引純文字，不索引 embed 內容。很多官方公告
+# （人事任命、選舉結果、出入許可等）是純 embed 訊息（content 為空），
+# 所以 search_discord 永遠找不到。這個索引掃描所有文字頻道，把有 embed
+# 的訊息內容抓出來建索引，讓搜尋能找到這些公告。
+_channel_embed_cache: dict = {}  # {guild_id: {"entries": [...], "updated": ts}}
+_CHANNEL_EMBED_TTL = 1800  # 30 分鐘快取
+
+
+async def _refresh_channel_embed_index(guild) -> list:
+    """Scan all text channels (non-forum) for recent messages that contain
+    embeds, and index their text content. Forum channels are already covered
+    by _refresh_forum_index so we skip them here. Only fetches the last 50
+    messages per channel to keep API call count reasonable (~1 call/channel).
+    Staggered with small delays to avoid rate limits."""
+    entries = []
+    _t0 = _time.time()
+    _ch_count = 0
+    _embed_count = 0
+    try:
+        # Only scan text channels and announcement channels, NOT forum/voice/stage
+        text_channels = [
+            ch for ch in guild.text_channels
+            if ch.type in (discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.announcement)
+        ]
+        print(f"📢 開始頻道 Embed 索引：{len(text_channels)} 個文字頻道...")
+
+        for ch in text_channels:
+            _ch_count += 1
+            try:
+                async for msg in ch.history(limit=50):
+                    # Skip messages with no embeds
+                    if not msg.embeds:
+                        continue
+                    # Extract all embed text
+                    embed_parts = []
+                    for emb in msg.embeds:
+                        if emb.title:
+                            embed_parts.append(str(emb.title))
+                        if emb.description:
+                            embed_parts.append(str(emb.description))
+                        for field in emb.fields:
+                            embed_parts.append(f"{field.name}: {field.value}")
+                        if emb.footer and emb.footer.text:
+                            embed_parts.append(str(emb.footer.text))
+                        if emb.author and emb.author.name:
+                            embed_parts.append(str(emb.author.name))
+                    embed_text = "\n".join(p for p in embed_parts if p).strip()
+                    if not embed_text:
+                        continue
+
+                    _embed_count += 1
+                    author = msg.author.display_name if msg.author else "未知"
+                    date_str = msg.created_at.strftime("%Y-%m-%d") if msg.created_at else ""
+                    # Also include any plain text content alongside embeds
+                    full_text = msg.content.strip()
+                    if full_text:
+                        full_text += "\n"
+                    full_text += embed_text
+
+                    entries.append({
+                        "channel_name": ch.name,
+                        "author": author,
+                        "date": date_str,
+                        "text": full_text[:1000],
+                        "content_short": embed_text[:300],
+                    })
+            except discord.Forbidden:
+                pass  # No read permission in this channel
+            except Exception as e:
+                print(f"⚠️ 頻道 Embed 索引「{ch.name}」失敗：{e}")
+
+            # Stagger to avoid rate limits (every 5 channels, sleep 0.5s)
+            if _ch_count % 5 == 0:
+                await asyncio.sleep(0.5)
+
+        print(f"📢 頻道 Embed 索引完成：{_ch_count} 頻道，{_embed_count} 則 embed 訊息，耗時 {_time.time() - _t0:.1f}s")
+    except Exception as e:
+        print(f"⚠️ 頻道 Embed 索引刷新失敗：{e}")
+
+    _channel_embed_cache[guild.id] = {"entries": entries, "updated": _time.time()}
+    return entries
+
+
+def _search_channel_embeds(query: str, entries: list, top_n: int = 5) -> list:
+    """Search the channel embed index using bigram matching (same algorithm
+    as _search_forum_posts). Returns matched entries sorted by relevance."""
+    query = query.strip()
+    query_bg = _bigrams(query)
+    if not query_bg or not entries:
+        return []
+    scored = []
+    for e in entries:
+        text = e["text"]
+        text_bg = _bigrams(text)
+        if not text_bg:
+            continue
+        overlap = query_bg & text_bg
+        substring_hit = bool(query) and query in text
+        if not overlap and not substring_hit:
+            continue
+        containment = len(overlap) / len(query_bg) if query_bg else 0
+        if not substring_hit and containment < 0.3:
+            continue
+        scored.append((e, containment, substring_hit))
+    scored.sort(key=lambda x: (-x[2], -x[1]))
+    return [e for e, _, _ in scored[:top_n]]
+
+
+
 
 async def _refresh_forum_index(guild) -> list:
     """Scan every Forum channel in the guild and build a searchable index of
@@ -2354,8 +2481,8 @@ async def _live_guild_message_search(guild, query: str, limit: int = 25) -> str:
 
 
 async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> str:
-    """Runs the forum-index search and the live message search CONCURRENTLY
-    and merges both into one result string for the AI."""
+    """Runs the forum-index search, channel-embed search, AND live message
+    search CONCURRENTLY and merges all three into one result string for the AI."""
     if not guild or not query.strip():
         return "搜尋條件不足"
     query = query.strip()
@@ -2373,11 +2500,6 @@ async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> s
                 f"原始提案內容可能早就過時了。"
             ]
             for p in matched:
-                # OP snippet stays short — the important part is the LATEST
-                # updates, which are shown in full below regardless of match
-                # score (a naive text[:500] truncation would show only the
-                # stale original post and cut off exactly the status update
-                # that matters).
                 op_text = p["text"].split("─── 討論串回覆", 1)[0]
                 snippet = op_text[:350]
                 tag_str = f"［{'/'.join(p['tags'])}］" if p["tags"] else ""
@@ -2394,27 +2516,48 @@ async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> s
                     )
                 else:
                     block += "\n（此貼文下沒有任何回覆，狀態可能從未更新過）"
-                # Deliberately NOT including the raw jump_url here — some
-                # weak models see a URL and hallucinate a refusal like "I
-                # can't access Discord links directly", even when nothing
-                # in the user's message was a link at all.
                 parts.append(block)
             return "\n".join(parts)
         except Exception as e:
             print(f"⚠️ Forum 索引搜尋失敗：{e}")
             return ""
 
-    forum_result, live_result = await asyncio.gather(
-        asyncio.wait_for(_forum_part(), timeout=3),  # cache read + in-memory bigram match — should be instant
-        asyncio.wait_for(_live_guild_message_search(guild, query, limit), timeout=8),
+    async def _embed_part():
+        """Search the channel embed index for embed-only announcements
+        (人事任命、選舉結果、出入許可 etc.) that Discord's search API
+        can't find because it doesn't index embed content."""
+        try:
+            cached = _channel_embed_cache.get(guild.id)
+            entries = cached["entries"] if cached else []
+            if not entries:
+                return ""
+            matched = _search_channel_embeds(query, entries, top_n=5)
+            if not matched:
+                return ""
+            parts = [f"📢 公告 Embed 搜尋「{query}」的結果（{len(matched)} 則）："]
+            for e in matched:
+                parts.append(
+                    f"\n#{e['channel_name']} | {e['author']} ({e['date']})\n{e['text'][:400]}"
+                )
+            return "\n".join(parts)
+        except Exception as e:
+            print(f"⚠️ 頻道 Embed 搜尋失敗：{e}")
+            return ""
+
+    forum_result, embed_result, live_result = await asyncio.gather(
+        asyncio.wait_for(_forum_part(), timeout=3),
+        asyncio.wait_for(_embed_part(), timeout=3),  # in-memory bigram match — instant
+        asyncio.wait_for(_live_guild_message_search(guild, query, limit), timeout=10),
         return_exceptions=True,
     )
     if isinstance(forum_result, Exception):
         forum_result = ""
+    if isinstance(embed_result, Exception):
+        embed_result = ""
     if isinstance(live_result, Exception):
         live_result = ""
 
-    combined = "\n\n".join(r for r in (forum_result, live_result) if r)
+    combined = "\n\n".join(r for r in (forum_result, embed_result, live_result) if r)
     if not combined:
         return f"沒有找到包含「{query}」的訊息或論壇貼文"
     return combined[:6000]
@@ -3803,6 +3946,7 @@ async def setup_hook():
     asyncio.ensure_future(drive_sync_loop())
     asyncio.ensure_future(server_context_refresh_loop())
     asyncio.ensure_future(forum_index_refresh_loop())
+    asyncio.ensure_future(channel_embed_refresh_loop())
     asyncio.ensure_future(quiz_question_loop())
     asyncio.ensure_future(quiz_settlement_loop())
     asyncio.ensure_future(token_log_loop())
