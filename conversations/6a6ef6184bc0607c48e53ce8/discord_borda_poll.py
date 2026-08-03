@@ -4137,7 +4137,6 @@ intents.members = True  # Needed for server structure awareness (member list, ro
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-@bot.event
 async def _probe_tools_support(settings: dict, api_url: str):
     """Quick startup probe: send a tiny request WITH tools attached to check
     if the chat AI endpoint supports function calling. If it fails, record
@@ -4188,6 +4187,7 @@ async def _probe_tools_support(settings: dict, api_url: str):
         print(f"⚠️ AI tools probe 錯誤（{e}）— 暫時不判定，等第一則訊息再測試")
 
 
+@bot.event
 async def on_ready():
     global _chat_semaphore, _shared_session
     if _chat_semaphore is None:
@@ -4295,7 +4295,6 @@ def _global_interaction_check(interaction: discord.Interaction) -> bool:
     return True
 
 
-@bot.event
 async def setup_hook():
     # Register slash command groups (runs once, before bot connects)
     for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup()]:
@@ -9326,6 +9325,10 @@ def main():
         asyncio.run(runner())
     except (KeyboardInterrupt, SystemExit):
         pass
+
+
+# Register setup_hook so discord.py calls it before connecting
+bot.setup_hook = setup_hook
 
 
 if __name__ == "__main__":
