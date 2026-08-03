@@ -4325,6 +4325,8 @@ async def setup_hook():
     load_corrections()
     load_blacklist()
     load_feedback()
+    load_proposal_settings()
+    load_proposals()
     # Load local files (will use Drive-downloaded data if available)
     load_polls_from_disk()
     save_polls_to_disk()  # Create file if not exists
@@ -4356,8 +4358,48 @@ async def setup_hook():
 
 
 @bot.event
+async def on_thread_create(thread):
+    """Detect new forum threads in proposal channels and auto-analyze."""
+    if not proposal_settings.get("enabled"):
+        return
+    proposal_channels = proposal_settings.get("proposal_channels", [])
+    parent_id = thread.parent_id if hasattr(thread, 'parent_id') else None
+    if parent_id and parent_id in proposal_channels:
+        # Forum thread created in a proposal channel
+        try:
+            # Wait a moment for the starter message to be available
+            await asyncio.sleep(2)
+            starter = await thread.fetch_message(thread.id) if hasattr(thread, 'id') else None
+            if starter:
+                # Skip bot messages
+                if starter.author.bot:
+                    return
+                # Create a synthetic message-like call
+                await _process_new_proposal(starter, thread.parent)
+                print(f"📋 論壇貼文提案已處理：#{thread.name}")
+        except Exception as e:
+            print(f"⚠️ 論壇貼文提案處理失敗：{e}")
+
+
 async def on_message(message):
     global _last_global_reply
+
+    # ── 提案區偵測（在所有其他檢查之前）──
+    # If this message is in a proposal channel, trigger auto-analysis
+    # regardless of chat AI settings. This runs BEFORE the bot-message
+    # check so forum thread starter messages (which are from the author)
+    # are also caught here.
+    if proposal_settings.get("enabled") and message.guild:
+        proposal_channels = proposal_settings.get("proposal_channels", [])
+        ch_id = message.channel.id
+        parent_id = getattr(message.channel, 'parent_id', None)
+        if ch_id in proposal_channels or (parent_id and parent_id in proposal_channels):
+            if not message.author.bot:
+                try:
+                    await _process_new_proposal(message, message.channel)
+                except Exception as e:
+                    print(f"⚠️ 提案處理錯誤：{e}")
+
     # Ignore bot messages
     if message.author.bot:
         return
@@ -5908,6 +5950,96 @@ class SystemGroup(app_commands.Group):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+    # ── 提案系統指令 ──
+    @app_commands.command(name="proposal_toggle", description="開啟/關閉提案區 AI 自動受理系統（機器人擁有者限定）")
+    async def proposal_toggle(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        proposal_settings["enabled"] = not proposal_settings.get("enabled", False)
+        save_proposal_settings()
+        status = "啟用" if proposal_settings["enabled"] else "停用"
+        await interaction.response.send_message(f"📋 提案系統已{status}。", ephemeral=True)
+
+    @app_commands.command(name="proposal_channel", description="新增/移除提案區頻道（機器人擁有者限定）")
+    @app_commands.describe(action="add=新增頻道, remove=移除頻道, list=列出所有頻道", channel="要新增/移除的頻道")
+    async def proposal_channel(self, interaction: discord.Interaction,
+                               action: str, channel: discord.TextChannel = None):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        if action == "list":
+            channels = proposal_settings.get("proposal_channels", [])
+            if not channels:
+                await interaction.response.send_message("📋 目前沒有設定任何提案區頻道。", ephemeral=True)
+                return
+            lines = [f"• <#{cid}> (`{cid}`)" for cid in channels]
+            await interaction.response.send_message(f"📋 **提案區頻道列表（{len(channels)} 個）**\n" + "\n".join(lines), ephemeral=True)
+            return
+        if not channel:
+            await interaction.response.send_message("❌ 請指定一個頻道。", ephemeral=True)
+            return
+        channels = proposal_settings.get("proposal_channels", [])
+        if action == "add":
+            if channel.id not in channels:
+                channels.append(channel.id)
+                proposal_settings["proposal_channels"] = channels
+                save_proposal_settings()
+                await interaction.response.send_message(f"✅ 已新增 #{channel.name} 為提案區頻道。", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ #{channel.name} 已經是提案區頻道。", ephemeral=True)
+        elif action == "remove":
+            if channel.id in channels:
+                channels.remove(channel.id)
+                proposal_settings["proposal_channels"] = channels
+                save_proposal_settings()
+                await interaction.response.send_message(f"✅ 已移除 #{channel.name} 的提案區頻道設定。", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ #{channel.name} 不在提案區頻道列表中。", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ action 只能是 add、remove 或 list。", ephemeral=True)
+
+    @app_commands.command(name="proposal_secretariat", description="設定秘書處通知頻道（機器人擁有者限定）")
+    @app_commands.describe(channel="秘書處頻道（AI 會在此發送提案通知供管理員受理/駁回）")
+    async def proposal_secretariat(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        proposal_settings["secretariat_channel"] = channel.id
+        save_proposal_settings()
+        await interaction.response.send_message(f"✅ 秘書處通知頻道已設為 #{channel.name}。", ephemeral=True)
+
+    @app_commands.command(name="proposal_list", description="查看提案記錄（機器人擁有者限定）")
+    @app_commands.describe(status="篩選狀態：pending=待審, accepted=已受理, rejected=已駁回, all=全部")
+    async def proposal_list(self, interaction: discord.Interaction, status: str = "all"):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        entries = _proposals.get("entries", [])
+        if status != "all":
+            entries = [e for e in entries if e.get("status") == status]
+        if not entries:
+            await interaction.followup.send("📋 沒有符合條件的提案記錄。", ephemeral=True)
+            return
+        recent = sorted(entries, key=lambda e: e.get("_ts", 0), reverse=True)[:15]
+        lines = []
+        for e in recent:
+            emoji = {"pending": "⏳", "accepted": "✅", "rejected": "❌"}.get(e.get("status", ""), "?")
+            line = (
+                f"{emoji} **{e.get('proposal_type', '?')}** | {e.get('proposer_name', '?')} | {e.get('date', '?')}\n"
+                f"  摘要：{e.get('summary', '')[:80]}\n"
+                f"  狀態：{e.get('status', '?')} | ID: `{e.get('id', '')}`"
+            )
+            if e.get("reject_reason"):
+                line += f"\n  駁回原因：{e['reject_reason'][:80]}"
+            lines.append(line)
+        await interaction.followup.send(
+            f"📋 **提案記錄（{len(recent)}/{len(entries)} 筆）**\n\n" + "\n\n".join(lines),
+            ephemeral=True,
+        )
+
+
 # ──────────────────────────────────────────────
 # AI 聊天指令
 # ──────────────────────────────────────────────
@@ -7138,6 +7270,343 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
             pass
 
 
+# ════════════════════════════════════════════════════════════
+# 提案區 AI 自動受理系統
+# ════════════════════════════════════════════════════════════
+
+async def _analyze_proposal(content: str, channel_name: str) -> dict:
+    """Use AI to analyze a proposal: identify type and generate summary.
+    Falls back to a heuristic if AI is unavailable."""
+    # Determine which AI settings to use
+    ps_ai = proposal_settings.get("ai_settings", {})
+    ai_url = ps_ai.get("api_url") or chat_ai_settings.get("api_url", "")
+    ai_key = ps_ai.get("api_key") or chat_ai_settings.get("api_key", "")
+    ai_model = ps_ai.get("model") or chat_ai_settings.get("model", "gpt-4o-mini")
+
+    if not ai_url or not ai_key:
+        # Fallback: heuristic analysis
+        return _heuristic_proposal_analysis(content, channel_name)
+
+    prompt = (
+        "你是微國家組織的提案分析助手。請分析以下提案內容，判斷提案種類並給出摘要。\n\n"
+        "提案種類包括但不限於：\n"
+        "- 法律提案（制定或修改法律）\n"
+        "- 罷免案（罷免特定官員）\n"
+        "- 政策提案（提出新政策或修改現有政策）\n"
+        "- 任命案（提名或任命官員）\n"
+        "- 預算提案（撥款或預算相關）\n"
+        "- 其他提案\n\n"
+        "請以以下 JSON 格式回覆（不要加 markdown code block）：\n"
+        '{"type": "提案種類", "summary": "一句話摘要（50字以內）"}\n\n'
+        f"頻道名稱：{channel_name}\n"
+        f"提案內容：\n{content[:2000]}"
+    )
+
+    settings = {"api_url": ai_url, "api_key": ai_key, "model": ai_model,
+                "system_prompt": "你是提案分析助手，請精確簡潔地分析。"}
+
+    try:
+        result = await call_ai_api(prompt, settings)
+        result = result.strip()
+        # Strip markdown code block if present
+        if result.startswith("```"):
+            result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = json_module.loads(result)
+        return {
+            "type": parsed.get("type", "未知提案")[:30],
+            "summary": parsed.get("summary", "")[:100],
+        }
+    except Exception as e:
+        print(f"⚠️ 提案 AI 分析失敗，使用啟發式分析：{e}")
+        return _heuristic_proposal_analysis(content, channel_name)
+
+
+def _heuristic_proposal_analysis(content: str, channel_name: str) -> dict:
+    """Fallback heuristic when AI is unavailable."""
+    text = content.lower()
+    if "罷免" in text:
+        ptype = "罷免案"
+    elif "任命" in text or "提名" in text:
+        ptype = "任命案"
+    elif "預算" in text or "撥款" in text:
+        ptype = "預算提案"
+    elif "法律" in text or "法案" in text or "修正" in text:
+        ptype = "法律提案"
+    elif "政策" in text:
+        ptype = "政策提案"
+    else:
+        ptype = "一般提案"
+    summary = content[:50].replace("\n", " ").strip()
+    if len(content) > 50:
+        summary += "..."
+    return {"type": ptype, "summary": summary}
+
+
+async def _process_new_proposal(message: discord.Message, channel: discord.TextChannel):
+    """Analyze a new proposal, store it, and send notification to secretariat."""
+    if not proposal_settings.get("enabled"):
+        return
+    proposal_channels = proposal_settings.get("proposal_channels", [])
+    if channel.id not in proposal_channels:
+        return
+
+    # Avoid re-processing the same message
+    msg_id = str(message.id)
+    existing = [p for p in _proposals.get("entries", []) if p.get("message_id") == msg_id]
+    if existing:
+        return
+
+    print(f"📋 偵測到新提案：#{channel.name} by {message.author.display_name}")
+
+    # Analyze
+    analysis = await _analyze_proposal(message.content, channel.name)
+
+    # Create proposal record
+    now = _time.time()
+    proposal_id = str(int(now * 1000))
+    entry = {
+        "id": proposal_id,
+        "date": _time.strftime("%Y-%m-%d %H:%M"),
+        "_ts": now,
+        "guild_id": message.guild.id if message.guild else 0,
+        "proposer_id": str(message.author.id),
+        "proposer_name": message.author.display_name,
+        "channel_id": channel.id,
+        "channel_name": channel.name,
+        "thread_id": message.id if hasattr(message, 'thread') and message.thread else None,
+        "message_id": msg_id,
+        "message_url": str(message.jump_url) if hasattr(message, 'jump_url') else "",
+        "raw_content": message.content[:2000],
+        "proposal_type": analysis["type"],
+        "summary": analysis["summary"],
+        "status": "pending",
+        "reviewed_by": "",
+        "review_date": "",
+        "reject_reason": "",
+    }
+    _proposals.setdefault("entries", []).append(entry)
+    save_proposals()
+
+    # Send notification to secretariat channel
+    sec_ch_id = proposal_settings.get("secretariat_channel")
+    if not sec_ch_id:
+        print("⚠️ 提案系統：未設定秘書處頻道，無法發送通知")
+        return
+
+    sec_ch = None
+    for guild in bot.guilds:
+        ch = guild.get_channel(int(sec_ch_id))
+        if ch:
+            sec_ch = ch
+            break
+
+    if not sec_ch:
+        print(f"⚠️ 提案系統：找不到秘書處頻道 {sec_ch_id}")
+        return
+
+    embed = discord.Embed(
+        title=f"📋 新提案通知：{analysis['type']}",
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="提案人", value=message.author.display_name, inline=True)
+    embed.add_field(name="提案頻道", value=f"#{channel.name}", inline=True)
+    embed.add_field(name="提案時間", value=entry["date"], inline=True)
+    embed.add_field(name="摘要", value=analysis["summary"][:1024], inline=False)
+    embed.add_field(
+        name="原文連結",
+        value=message.jump_url if hasattr(message, 'jump_url') else "(無)",
+        inline=False,
+    )
+    embed.add_field(name="提案 ID", value=proposal_id, inline=False)
+    embed.set_footer(text="請管理員點擊下方按鈕受理或駁回此提案")
+
+    view = ProposalReviewView(proposal_id)
+    try:
+        await sec_ch.send(embed=embed, view=view)
+        print(f"✅ 提案通知已發送至秘書處 #{sec_ch.name}")
+    except Exception as e:
+        print(f"❌ 提案通知發送失敗：{e}")
+
+
+class ProposalRejectModal(discord.ui.Modal, title="駁回提案原因"):
+    reason_input = discord.ui.TextInput(
+        label="請說明駁回原因",
+        style=discord.TextStyle.paragraph,
+        placeholder="例：提案格式不符/內容不完整/不符合規定...",
+        required=True,
+        max_length=300,
+    )
+
+    def __init__(self, proposal_id: str):
+        super().__init__(timeout=300)
+        self.proposal_id = proposal_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _handle_proposal_decision(interaction, self.proposal_id, "rejected", self.reason_input.value.strip())
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        print(f"⚠️ 駁回 Modal 錯誤：{error}")
+        try:
+            await interaction.response.send_message("⚠️ 提交駁回原因時發生錯誤。", ephemeral=True)
+        except Exception:
+            pass
+
+
+class ProposalReviewView(discord.ui.View):
+    """受理/駁回 buttons attached to proposal notifications in the secretariat channel."""
+
+    def __init__(self, proposal_id: str):
+        super().__init__(timeout=None)  # no timeout — admin might take days
+        self.proposal_id = proposal_id
+
+    @discord.ui.button(label="受理", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+            return
+        await _handle_proposal_decision(interaction, self.proposal_id, "accepted", "")
+
+    @discord.ui.button(label="駁回", style=discord.ButtonStyle.danger, emoji="❌")
+    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+            return
+        modal = ProposalRejectModal(self.proposal_id)
+        await interaction.response.send_modal(modal)
+
+
+async def _handle_proposal_decision(interaction: discord.Interaction, proposal_id: str,
+                                      decision: str, reject_reason: str):
+    """Process accept/reject and notify the original proposer."""
+    # Find the proposal
+    entry = None
+    for p in _proposals.get("entries", []):
+        if p.get("id") == proposal_id:
+            entry = p
+            break
+
+    if not entry:
+        try:
+            await interaction.response.send_message("❌ 找不到此提案記錄（可能已被清除）。", ephemeral=True)
+        except Exception:
+            pass
+        return
+
+    if entry["status"] != "pending":
+        try:
+            await interaction.response.send_message(f"⚠️ 此提案已被{'受理' if entry['status']=='accepted' else '駁回'}過了。", ephemeral=True)
+        except Exception:
+            pass
+        return
+
+    # Update proposal record
+    entry["status"] = decision
+    entry["reviewed_by"] = interaction.user.display_name
+    entry["review_date"] = _time.strftime("%Y-%m-%d %H:%M")
+    entry["reject_reason"] = reject_reason
+    save_proposals()
+
+    # Disable buttons on the notification message
+    try:
+        for child in self.children if hasattr(self, 'children') else []:
+            child.disabled = True
+    except Exception:
+        pass
+
+    # Update the secretariat notification
+    status_emoji = "✅" if decision == "accepted" else "❌"
+    status_text = "已受理" if decision == "accepted" else "已駁回"
+    embed = interaction.message.embeds[0] if interaction.message.embeds else None
+    if embed:
+        embed.color = discord.Color.green() if decision == "accepted" else discord.Color.red()
+        embed.add_field(
+            name=f"{status_emoji} 審核結果",
+            value=f"{status_text} by {interaction.user.display_name} ({entry['review_date']})"
+                  + (f"\n原因：{reject_reason}" if reject_reason else ""),
+            inline=False,
+        )
+        embed.set_footer(text=f"提案已{status_text}")
+        try:
+            await interaction.response.edit_message(embed=embed, view=None)
+        except Exception:
+            pass
+    else:
+        try:
+            await interaction.response.send_message(f"{status_emoji} 提案已{status_text}。", ephemeral=True)
+        except Exception:
+            pass
+
+    # ── Notify the original proposer in the original channel ──
+    orig_ch_id = entry.get("channel_id")
+    guild_id = entry.get("guild_id", 0)
+    orig_ch = None
+    for guild in bot.guilds:
+        if guild.id == guild_id:
+            orig_ch = guild.get_channel(int(orig_ch_id)) if orig_ch_id else None
+            break
+
+    if not orig_ch:
+        print(f"⚠️ 找不到原始提案頻道 {orig_ch_id}，無法通知提案人")
+        return
+
+    proposer_mention = f"<@{entry.get('proposer_id')}>"
+    if decision == "accepted":
+        notify_embed = discord.Embed(
+            title="✅ 提案已受理",
+            description=(
+                f"{proposer_mention} 你的提案已被管理員受理！\n\n"
+                f"**提案種類：** {entry.get('proposal_type', '?')}\n"
+                f"**摘要：** {entry.get('summary', '')}\n"
+                f"**審核人：** {interaction.user.display_name}\n"
+                f"**審核時間：** {entry['review_date']}"
+            ),
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow(),
+        )
+    else:
+        notify_embed = discord.Embed(
+            title="❌ 提案已駁回",
+            description=(
+                f"{proposer_mention} 你的提案已被駁回。\n\n"
+                f"**提案種類：** {entry.get('proposal_type', '?')}\n"
+                f"**摘要：** {entry.get('summary', '')}\n"
+                f"**駁回原因：** {reject_reason or '未提供'}\n"
+                f"**審核人：** {interaction.user.display_name}\n"
+                f"**審核時間：** {entry['review_date']}"
+            ),
+            color=discord.Color.red(),
+            timestamp=discord.utils.utcnow(),
+        )
+
+    try:
+        # If the original proposal was in a thread, reply in that thread
+        thread_id = entry.get("thread_id")
+        if thread_id:
+            try:
+                thread = await orig_ch.fetch_thread(int(thread_id))
+                await thread.send(embed=notify_embed)
+                print(f"✅ 提案結果已發送至貼文 #{thread.name}")
+                return
+            except Exception:
+                pass
+        # Otherwise reply to the original message
+        msg_id = entry.get("message_id")
+        if msg_id:
+            try:
+                orig_msg = await orig_ch.fetch_message(int(msg_id))
+                await orig_msg.reply(embed=notify_embed, mention_author=True)
+                print(f"✅ 提案結果已回覆至 #{orig_ch.name}")
+                return
+            except Exception:
+                pass
+        # Fallback: just send in the channel
+        await orig_ch.send(embed=notify_embed)
+        print(f"✅ 提案結果已發送至 #{orig_ch.name}")
+    except Exception as e:
+        print(f"❌ 通知提案人失敗：{e}")
+
+
 def _create_feedback_entry(rating: str, reason: str, custom_text: str, question: str,
                             ai_answer: str, user_id: str, user_name: str,
                             guild_id: int, channel_id: int) -> dict:
@@ -8314,6 +8783,31 @@ KNOWLEDGE_BASE_FILE = os.path.join(DATA_DIR, "knowledge_base.json")
 CORRECTIONS_FILE = os.path.join(DATA_DIR, "corrections.json")
 BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
 
+PROPOSAL_SETTINGS_FILE = os.path.join(DATA_DIR, "proposal_settings.json")
+PROPOSALS_FILE = os.path.join(DATA_DIR, "proposals.json")
+
+# 提案區 AI 自動受理系統
+# When a new thread/message appears in a designated proposal channel, the AI
+# auto-analyzes it (type + summary) and sends a notification to the secretariat
+# channel with 受理/駁回 buttons. Admin decision is relayed back to the original
+# proposal channel/thread so the proposer knows the outcome.
+proposal_settings = {
+    "enabled": False,
+    "proposal_channels": [],     # list of channel IDs to monitor for proposals
+    "secretariat_channel": None, # channel ID where admin gets notifications
+    "ai_settings": {             # separate AI config for proposal analysis (falls back to chat AI)
+        "api_url": "",
+        "api_key": "",
+        "model": "",
+    },
+}
+
+# Pending/reviewed proposals. Each entry:
+#   {id, date, guild_id, proposer_id, proposer_name, channel_id, thread_id,
+#    message_id, raw_content, proposal_type, summary, status: "pending"/"accepted"/"rejected",
+#    reviewed_by, review_date, reject_reason}
+_proposals = {"entries": []}
+
 # Blacklisted users are completely blocked from using the bot:
 # - on_message returns immediately (AI never sees their messages)
 # - all slash commands are rejected (interaction_check)
@@ -8408,6 +8902,49 @@ def save_feedback():
             f.write(json_module.dumps(_feedback, ensure_ascii=False, indent=2))
     except Exception as e:
         print(f"⚠️ 評價資料儲存失敗：{e}")
+
+
+def load_proposal_settings():
+    """Load proposal system settings from local file (synced from Drive)."""
+    global proposal_settings
+    try:
+        if os.path.exists(PROPOSAL_SETTINGS_FILE):
+            with open(PROPOSAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.loads(f.read())
+            proposal_settings.update(loaded)
+            print(f"📋 提案系統設定已載入：{'啟用' if proposal_settings.get('enabled') else '停用'}，監控 {len(proposal_settings.get('proposal_channels', []))} 個頻道")
+    except Exception as e:
+        print(f"⚠️ 提案系統設定載入失敗：{e}")
+
+
+def save_proposal_settings():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(PROPOSAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            f.write(json_module.dumps(proposal_settings, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"⚠️ 提案系統設定儲存失敗：{e}")
+
+
+def load_proposals():
+    global _proposals
+    try:
+        if os.path.exists(PROPOSALS_FILE):
+            with open(PROPOSALS_FILE, "r", encoding="utf-8") as f:
+                _proposals = json_module.loads(f.read())
+            print(f"📋 提案記錄已載入：{len(_proposals.get('entries', []))} 筆")
+    except Exception as e:
+        print(f"⚠️ 提案記錄載入失敗：{e}")
+        _proposals = {"entries": []}
+
+
+def save_proposals():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(PROPOSALS_FILE, "w", encoding="utf-8") as f:
+            f.write(json_module.dumps(_proposals, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"⚠️ 提案記錄儲存失敗：{e}")
 
 
 def load_blacklist():
