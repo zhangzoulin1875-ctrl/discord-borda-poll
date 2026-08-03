@@ -2468,9 +2468,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         except Exception as e:
             print(f"⚠️ 伺服器結構取得失敗：{e}")
 
-    system_prompt += f"\n\n─── 重要：使用者識別 ───\n你現在正在和「{user_name}」對話。"
-    system_prompt += f"\n只有「{user_name}」現在說的話，才是關於這位使用者的資訊。"
-    system_prompt += f"\n近期對話中其他人的發言，只是上下文參考，絕對不能把它們當作{user_name}的資訊。"
+    system_prompt += f"\n\n你現在正在和「{user_name}」對話，請直接針對這句話回答。"
 
     if facts:
         memory_text = "\n".join(f"- {f}" for f in facts)
@@ -2482,11 +2480,8 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         f"\n\n─── 記憶提取規則 ───\n"
         f"回覆最後加一行 [MEMORY: ...]，只記住「{user_name}」本人說的關於自己的資訊。"
         f"\n- 只記 {user_name} 親口說的事（身分、偏好、近況等）"
-        f"\n- 近期對話中其他人說的話，絕對不要記到 {user_name} 的記憶裡"
         f"\n- 如果 {user_name} 沒有提到關於自己的新資訊，寫 [MEMORY: none]"
         f"\n- 這行不會顯示給用戶看"
-        f"\n- ⚠️ 絕對不要把「其他人」說的內容當作 {user_name} 說的"
-        f"\n- ⚠️ 回答問題時，不要混淆不同人的資訊"
     )
 
     # Add abuse detection instruction if enabled
@@ -2507,34 +2502,15 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"⚠️ 請謹慎使用，只在真正濫用時才建議禁言。"
         )
 
-    # Collect brief context (last 5 messages before this one)
-    # Clearly label each message with the speaker's name
-    context_lines = []
-    try:
-        async for msg in message.channel.history(limit=5, before=message):
-            if not msg.content.strip():
-                continue
-            name = msg.author.display_name
-            if msg.author.id == bot.user.id:
-                context_lines.insert(0, f"AI: {msg.content[:150]}")
-            else:
-                # Include speaker's role context so AI knows who's talking
-                speaker_roles = [r.name for r in msg.author.roles if r.name != "@everyone" and not r.managed][:3]
-                role_tag = f"[{','.join(speaker_roles)}]" if speaker_roles else ""
-                context_lines.insert(0, f"[其他人]{role_tag} {name}: {msg.content[:150]}")
-    except Exception:
-        pass
-
-    context = "\n".join(context_lines[-3:])  # Keep last 3 for context
-
+    # NOTE: deliberately NOT including other users' recent messages as
+    # "context" anymore — this was causing the AI to answer a completely
+    # different topic that other people happened to be chatting about,
+    # instead of the actual question being asked. Only the current user's
+    # own message is sent now. Also reduces prompt size (helps latency).
     bot_id = bot.user.id
     clean_content = message.content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
 
-    # Build the user prompt — clearly separate context from current user's message
-    if context:
-        full_prompt = f"以下是近期頻道對話（其他人說的，僅供參考）：\n{context}\n\n─── 當前訊息 ───\n{user_name}: {clean_content}"
-    else:
-        full_prompt = f"─── 當前訊息 ───\n{user_name}: {clean_content}"
+    full_prompt = f"{user_name}: {clean_content}"
 
     # ── Micropedia ──
     # Two layers, so this works regardless of whether the AI provider even
