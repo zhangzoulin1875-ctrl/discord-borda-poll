@@ -6009,6 +6009,35 @@ class SystemGroup(app_commands.Group):
         save_proposal_settings()
         await interaction.response.send_message(f"✅ 秘書處通知頻道已設為 #{channel.name}。", ephemeral=True)
 
+    @app_commands.command(name="proposal_status", description="查看提案系統目前設定狀態（機器人擁有者限定）")
+    async def proposal_status(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        enabled = proposal_settings.get("enabled", False)
+        channels = proposal_settings.get("proposal_channels", [])
+        sec_id = proposal_settings.get("secretariat_channel")
+        ai_settings = proposal_settings.get("ai_settings", {})
+        has_own_ai = bool(ai_settings.get("api_url") and ai_settings.get("api_key"))
+
+        lines = [f"📋 **提案系統狀態**", ""]
+        lines.append(f"啟用狀態：{'✅ 已啟用' if enabled else '❌ 已停用（用 /system proposal_toggle 開啟）'}")
+        if channels:
+            ch_list = "\n".join(f"  • <#{cid}> (`{cid}`)" for cid in channels)
+            lines.append(f"提案區頻道（{len(channels)} 個）：\n{ch_list}")
+        else:
+            lines.append("提案區頻道：❌ 尚未設定任何頻道")
+        if sec_id:
+            lines.append(f"秘書處通知頻道：<#{sec_id}> (`{sec_id}`)")
+        else:
+            lines.append("秘書處通知頻道：❌ 尚未設定（用 /system proposal_secretariat 設定）")
+        lines.append(f"AI 分析設定：{'使用專屬設定' if has_own_ai else '沿用 /chat 的 AI 設定'} "
+                     f"（{'✅ 已就緒' if (has_own_ai or (chat_ai_settings.get('api_url') and chat_ai_settings.get('api_key'))) else '⚠️ 未設定 API，將使用關鍵字啟發式分析'}）")
+        lines.append("")
+        lines.append(f"已收錄提案總數：{len(_proposals.get('entries', []))} 筆")
+
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
     @app_commands.command(name="proposal_list", description="查看提案記錄（機器人擁有者限定）")
     @app_commands.describe(status="篩選狀態：pending=待審, accepted=已受理, rejected=已駁回, all=全部")
     async def proposal_list(self, interaction: discord.Interaction, status: str = "all"):
@@ -7342,12 +7371,14 @@ def _heuristic_proposal_analysis(content: str, channel_name: str) -> dict:
     return {"type": ptype, "summary": summary}
 
 
-async def _process_new_proposal(message: discord.Message, channel: discord.TextChannel):
+async def _process_new_proposal(message: discord.Message, channel):
     """Analyze a new proposal, store it, and send notification to secretariat."""
     if not proposal_settings.get("enabled"):
+        print(f"📋 提案偵測略過：系統未啟用（訊息來自 #{getattr(channel, 'name', '?')}）")
         return
     proposal_channels = proposal_settings.get("proposal_channels", [])
     if channel.id not in proposal_channels:
+        print(f"📋 提案偵測略過：#{getattr(channel, 'name', '?')} ({channel.id}) 不在提案區清單 {proposal_channels}")
         return
 
     # Avoid re-processing the same message
@@ -7386,6 +7417,20 @@ async def _process_new_proposal(message: discord.Message, channel: discord.TextC
     }
     _proposals.setdefault("entries", []).append(entry)
     save_proposals()
+
+    # ── 立即在原提案處回覆確認訊息（不論秘書處頻道是否設定成功都會顯示）──
+    try:
+        ack_embed = discord.Embed(
+            description=(
+                f"✅ 已收到提案，AI 判定為「**{analysis['type']}**」\n"
+                f"摘要：{analysis['summary']}\n\n"
+                f"提案已送交秘書處審核，請耐心等候。"
+            ),
+            color=discord.Color.blue(),
+        )
+        await message.reply(embed=ack_embed, mention_author=False)
+    except Exception as e:
+        print(f"⚠️ 提案確認訊息發送失敗（不影響審核流程）：{e}")
 
     # Send notification to secretariat channel
     sec_ch_id = proposal_settings.get("secretariat_channel")
