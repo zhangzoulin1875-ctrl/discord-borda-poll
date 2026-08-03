@@ -348,13 +348,13 @@ async def oauth_drive_callback(request):
             content_type="text/html", status=400
         )
 
-    client_id = os.getenv("GOOGLE_CLIENT_ID", "")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "") or os.getenv("OAUTH_CLIENT_SECRET", "")
     redirect_uri = _drive_oauth_redirect_uri()
 
     if not client_id or not client_secret:
         return web.Response(
-            text="<h2>❌ 伺服器未設定 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET</h2>",
+            text="<h2>❌ 伺服器未設定 OAuth Client ID / Secret（GOOGLE_CLIENT_ID 或 OAUTH_CLIENT_ID）</h2>",
             content_type="text/html", status=500
         )
 
@@ -396,7 +396,7 @@ async def oauth_drive_callback(request):
     <p><b>GOOGLE_DRIVE_REFRESH_TOKEN</b> = </p>
     <textarea readonly style="width:100%; height:80px; font-family: monospace; padding:8px;">{refresh_token}</textarea>
     <p>⚠️ 這是敏感資訊，請勿分享給他人。設定完成後 Render 會自動重新部署，之後可以關閉這個分頁。</p>
-    <p>設定完後，記得也要確認 GOOGLE_CLIENT_ID 和 GOOGLE_CLIENT_SECRET 這兩個變數也已經加到 Render。</p>
+    <p>設定完後，記得也要確認 OAUTH_CLIENT_ID 和 OAUTH_CLIENT_SECRET（或 GOOGLE_CLIENT_ID 和 GOOGLE_CLIENT_SECRET）這兩個變數也已經加到 Render。</p>
     </body></html>
     """
     return web.Response(text=html, content_type="text/html")
@@ -1598,8 +1598,10 @@ async def _get_drive_access_token():
 
     # ── Method 1: OAuth refresh token (personal account, has real storage quota) ──
     refresh_token = os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN", "")
-    client_id = os.getenv("GOOGLE_CLIENT_ID", "")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    # Use GOOGLE_CLIENT_ID if set, otherwise fall back to OAUTH_CLIENT_ID (Discord OAuth)
+    # since users often only have one set of OAuth credentials
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "") or os.getenv("OAUTH_CLIENT_SECRET", "")
 
     if refresh_token and client_id and client_secret:
         try:
@@ -1813,6 +1815,11 @@ async def sync_to_drive():
     """Sync all local data files to Google Drive."""
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") and not os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"):
         return
+    # Log which auth method is being used
+    has_oauth = bool(os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"))
+    has_sa = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"))
+    cid = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
+    print(f"🔄 Drive 同步開始：OAuth={'✅' if has_oauth else '❌'} SA={'✅' if has_sa else '❌'} client_id={'✅' if cid else '❌'}")
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     ok_count = 0
     fail_count = 0
@@ -1837,7 +1844,12 @@ async def sync_to_drive():
 async def load_from_drive():
     """Load all data files from Google Drive on startup (overwrites local)."""
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") and not os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"):
+        print("ℹ️ Drive 未設定，略過載入")
         return
+    has_oauth = bool(os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"))
+    has_sa = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"))
+    cid = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
+    print(f"🔄 Drive 載入開始：OAuth={'✅' if has_oauth else '❌'} SA={'✅' if has_sa else '❌'} client_id={'✅' if cid else '❌'}")
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
     for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json"]:
@@ -3268,11 +3280,11 @@ class SystemGroup(app_commands.Group):
             await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
 
-        client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+        client_id = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
         if not client_id:
             await interaction.response.send_message(
-                "❌ 尚未設定 `GOOGLE_CLIENT_ID` 環境變數。\n"
-                "請先到 Render Environment 新增 `GOOGLE_CLIENT_ID` 和 `GOOGLE_CLIENT_SECRET`（來自你的 Google Cloud OAuth 用戶端）。",
+                "❌ 尚未設定 OAuth Client ID 環境變數。\n"
+                "請先到 Render Environment 新增 `GOOGLE_CLIENT_ID` 和 `GOOGLE_CLIENT_SECRET`（或 `OAUTH_CLIENT_ID` 和 `OAUTH_CLIENT_SECRET`），來自你的 Google Cloud OAuth 用戶端。",
                 ephemeral=True
             )
             return
@@ -3328,8 +3340,8 @@ class SystemGroup(app_commands.Group):
         creds_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64", "")
         folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
         refresh_token = os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN", "")
-        g_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
-        g_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+        g_client_id = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
+        g_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "") or os.getenv("OAUTH_CLIENT_SECRET", "")
 
         lines.append(f"**1. 環境變數**")
         lines.append(f"  認證方式：{'🟢 OAuth 個人帳號（推薦）' if refresh_token else ('🟡 服務帳號（需 Shared Drive）' if creds_b64 else '❌ 未設定任何認證')}")
