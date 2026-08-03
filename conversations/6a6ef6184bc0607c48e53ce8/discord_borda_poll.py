@@ -5336,24 +5336,23 @@ class QuizAnswerView(discord.ui.View):
     async def _handle_answer(self, interaction: discord.Interaction, selected_index: int):
         user_id_str = str(interaction.user.id)
 
-        # Check if this user has already exhausted all wrong guesses (per-user, not shared)
-        if not hasattr(self, '_user_wrong_indices'):
-            self._user_wrong_indices = {}  # {user_id_str: set(indices tried wrong)}
-        user_tried = self._user_wrong_indices.get(user_id_str, set())
-        if selected_index in user_tried:
-            await interaction.response.send_message("你已經試過這個選項了，換一個吧！", ephemeral=True)
-            return
-        if len(user_tried) >= 3:
-            await interaction.response.send_message("你已經答錯 3 次了，這題你沒有機會了！", ephemeral=True)
-            return
-
-        # Already answered by someone
-        if self.answered:
+        # Each user gets exactly ONE attempt per question
+        if not hasattr(self, '_user_attempted'):
+            self._user_attempted = set()
+        if user_id_str in self._user_attempted:
             if user_id_str == self.correct_user_id:
                 await interaction.response.send_message("你已經答對了！🎉", ephemeral=True)
             else:
-                await interaction.response.send_message("已經有人搶答成功了！⚡", ephemeral=True)
+                await interaction.response.send_message("你已經答過了，這題沒有機會了！", ephemeral=True)
             return
+
+        # Already answered correctly by someone
+        if self.answered:
+            await interaction.response.send_message("已經有人搶答成功了！⚡", ephemeral=True)
+            return
+
+        # Mark this user as having used their one attempt
+        self._user_attempted.add(user_id_str)
 
         correct_index = self.question_data["correct_index"]
 
@@ -5420,22 +5419,11 @@ class QuizAnswerView(discord.ui.View):
                 pass
             print(f"🎉 Quiz: {interaction.user.display_name} answered correctly (+5 pts, daily={user_entry['daily_score']})")
         else:
-            # Wrong answer — track per-user only. The message/buttons are SHARED
-            # by everyone in the channel, so we must NOT edit them here (that
-            # would make this one user's wrong guess appear red for everyone).
-            user_tried.add(selected_index)
-            self._user_wrong_indices[user_id_str] = user_tried
-            remaining = 3 - len(user_tried)
-            if remaining > 0:
-                await interaction.response.send_message(
-                    f"❌ 答錯了！再試試其他選項，你還有 {remaining} 次機會。",
-                    ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    "❌ 答錯 3 次了，這題你沒有機會了，等下一題吧！",
-                    ephemeral=True
-                )
+            # Wrong answer — one strike and you're out
+            await interaction.response.send_message(
+                "❌ 答錯了！這題你已經沒有機會了，等下一題吧！",
+                ephemeral=True
+            )
 
     async def on_timeout(self):
         """Reveal the answer when no one answers in time."""
