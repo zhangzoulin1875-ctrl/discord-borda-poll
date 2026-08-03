@@ -1066,19 +1066,16 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
     return True, clean
 
 
-async def call_chat_api(messages: list, settings: dict) -> str:
-    """Call the chat AI API (non-streaming, short replies)."""
+async def call_chat_api(messages: list, settings: dict, tools: list = None) -> dict:
+    """Call the chat AI API (non-streaming, short replies).
+    Returns the raw assistant message dict (content + possible tool_calls),
+    so the caller can drive a tool-calling loop when `tools` is provided.
+    Automatically degrades to a plain (no-tools) call if this endpoint has
+    already been observed to reject the `tools` field."""
     headers = {
         "Authorization": f"Bearer {settings['api_key']}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": settings.get("model", "gpt-4o-mini"),
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 300,
-    }
-    # Auto-append /chat/completions if only base URL is provided
     api_url = settings["api_url"].rstrip("/")
     if not api_url.endswith("/chat/completions"):
         if api_url.endswith("/v1"):
@@ -1087,14 +1084,40 @@ async def call_chat_api(messages: list, settings: dict) -> str:
             api_url += "/chat/completions"
         else:
             api_url += "/v1/chat/completions"
+
+    use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
+
+    payload = {
+        "model": settings.get("model", "gpt-4o-mini"),
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 300,
+    }
+    if use_tools:
+        payload["tools"] = use_tools
+        payload["tool_choice"] = "auto"
+
     timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
     async with aiohttp.ClientSession() as session:
         async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
+                # If the endpoint doesn't understand `tools`, remember that and
+                # retry once without it — never pay this cost again for this API.
+                if use_tools and resp.status in (400, 422):
+                    print(f"⚠️ Chat AI 端點似乎不支援 tools 參數，之後略過：{error_text[:200]}")
+                    _tools_unsupported_apis.add(api_url)
+                    payload.pop("tools", None)
+                    payload.pop("tool_choice", None)
+                    async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp2:
+                        if resp2.status != 200:
+                            error_text2 = await resp2.text()
+                            raise Exception(f"Chat AI API returned {resp2.status}: {error_text2[:300]}")
+                        data = await resp2.json()
+                        return data["choices"][0]["message"]
                 raise Exception(f"Chat AI API returned {resp.status}: {error_text[:300]}")
             data = await resp.json()
-            return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]
 
 
 # ──────────────────────────────────────────────
@@ -1463,20 +1486,28 @@ async def _execute_mute(message, duration: int, reason: str):
 
 
 # ──────────────────────────────────────────────
-# 微國家百科 (micropedia.site) 整合
+# 微國家百科 (micropedia.site) 整合 — AI 工具呼叫 (function calling)
+#
+# 設計：不再由我們自己猜測「該不該查」、「查什麼字」。改成把搜尋能力包成一個
+# 工具（search_micropedia）交給 AI，讓 AI 自己決定何時查、查什麼關鍵字，
+# 查不到還能自己換關鍵字重試 —— 這比我們寫死的關鍵字/去除問句語尾的heuristic
+# 準確得多（micropedia.site 用的是陽春 MySQL 全文搜尋，不支援中文斷詞，所以
+# 「山海事件」查不到「山海密謀事件」，但「山海」可以 —— 這種細節只有 AI
+# 自己嘗試不同關鍵字才能摸索出來）。
+# 同時直接呼叫 MediaWiki 官方 API（action=query&list=search / prop=revisions），
+# 全部是正式 JSON API，不是抓取渲染後的 HTML 頁面。
 # ──────────────────────────────────────────────
 
 _micropedia_cache: dict = {}  # query -> (timestamp, content)
 _MICROPEDIA_CACHE_TTL = 600  # 10 minutes
 
-# Keywords that suggest a question might be about micronations
-_MICROPEDIA_TRIGGER_KEYWORDS = [
-    "微國家", "micronation", "百科", "微國", "micropedia",
-    "微國家百科", "獨立", "建國", "主權", "國號",
-    "共和", "帝國", "王國", "公國", "聯邦", "條約",
-    "君主", "元首", "政權", "國際組織", "架空國",
-    "建國者", "獨立宣言", "建國史",
-]
+# Per api_url: whether the endpoint has confirmed to reject the "tools" field.
+# Once we learn a given endpoint doesn't support function calling, we stop
+# paying the cost of trying (and failing) on every single message.
+_tools_unsupported_apis: set = set()
+
+_MICROPEDIA_SKIP_PREFIXES = ("特殊:", "File:", "Category:", "Template:", "Help:",
+                             "Special:", "MediaWiki:", "User:", "Talk:", "Project:", "分類:")
 
 
 def _clean_wikitext(text: str) -> str:
@@ -1504,127 +1535,81 @@ def _clean_wikitext(text: str) -> str:
     return text
 
 
-def _should_search_micropedia(content: str) -> bool:
-    """Almost always worth attempting a lookup — by the time we're here, the AI has
-    already decided this message deserves a reply, so we just need a non-trivial
-    amount of text to search for. The search itself is cheap (HTTP + cache) and
-    quietly returns nothing when there's no match, so we err on the permissive side
-    rather than trying to keyword-gate every possible topic/proper-noun."""
-    if not content:
-        return False
-    stripped = content.strip()
-    # Skip empty/near-empty content (single emoji, punctuation-only, etc.)
-    import re as _re2
-    meaningful = _re2.sub(r"[\s\W_]+", "", stripped)
-    return len(meaningful) >= 2
-
-
-# Question particles/suffixes stripped from the raw message to isolate the actual
-# search subject. Order matters: longer/more specific phrases first.
-_MICROPEDIA_STOPWORDS = [
-    "請問一下", "請問", "你知道嗎", "你知道", "什麼是", "是什麼意思", "是什麼",
-    "叫什麼名字", "叫什麼", "是誰啊", "是誰", "是什麼樣的", "的身份", "的資料",
-    "有什麼資料", "有哪些資料", "有哪些", "有什麼", "在哪裡", "在哪", "怎麼樣",
-    "怎麼回事", "為什麼", "為何", "如何", "怎麼", "嗎？", "嗎", "呢？", "呢",
-    "吧？", "吧", "啊？", "啊", "？", "?", "告訴我", "介紹一下", "介紹",
-    "說一下", "查一下", "搜尋一下", "搜尋", "查詢", "幫我查", "幫我", "可以嗎",
-    "可以", "麻煩", "請", "你覺得", "你", "喔", "欸", "誒", "哦",
-]
-
-
-def _extract_search_query(content: str, bot_id: int) -> str:
-    """Extract a search query from the message content."""
-    import re as _re2
-    query = content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
-    for word in _MICROPEDIA_STOPWORDS:
-        query = query.replace(word, "")
-    # Strip leftover punctuation
-    query = _re2.sub(r"[!！,，。.、~～\s]+$", "", query).strip()
-    query = query.strip()
-    if len(query) > 50:
-        query = query[:50]
-    return query
-
-
-async def _search_micropedia_titles(session, query: str, max_results: int, skip_prefixes: tuple) -> list:
-    """Run one search attempt against micropedia.site and return a list of article
-    titles (empty list if nothing matched). Handles both MediaWiki behaviors:
-    exact-title redirect straight to the article, or a real results list page."""
+async def _micropedia_search_api(session, query: str, max_results: int) -> list:
+    """Search micropedia.site via the official MediaWiki Search API (JSON,
+    action=query&list=search) — NOT html scraping. Returns a list of matching
+    article titles (empty if no hits)."""
     import urllib.parse as _up
-    import re as _re
-
-    timeout = aiohttp.ClientTimeout(total=5, connect=3)
-    search_url = f"https://www.micropedia.site/wiki/{_up.quote('特殊:搜尋')}?search={_up.quote(query)}"
-
+    timeout = aiohttp.ClientTimeout(total=6, connect=3)
+    url = (
+        f"https://www.micropedia.site/api.php?action=query&list=search"
+        f"&srsearch={_up.quote(query)}&format=json&srlimit={max_results}&utf8=1"
+    )
     async with session.get(
-        search_url,
-        headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"},
-        timeout=timeout,
+        url, headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"}, timeout=timeout
     ) as resp:
         if resp.status != 200:
-            print(f"📚 Micropedia: 搜尋頁回傳 {resp.status}")
+            print(f"📚 Micropedia: 搜尋 API 回傳 {resp.status}")
             return []
-        html = await resp.text()
-        final_url = str(resp.url)
-
-    redirected_to_article = "特殊:搜尋" not in _up.unquote(final_url) and "Special:Search" not in final_url
-
-    article_titles = []
-    if redirected_to_article and "mw-search-results" not in html:
-        # Exact-title match, we landed directly on the article.
-        m = _re.search(r'<h1[^>]*id="firstHeading"[^>]*>(?:<span[^>]*>)?([^<]+)', html)
-        if m:
-            article_titles = [m.group(1).strip()]
-        else:
-            path = _up.unquote(final_url).rsplit("/wiki/", 1)[-1]
-            if path and not any(path.startswith(p) for p in skip_prefixes):
-                article_titles = [path]
-    else:
-        # Real search-result list markup.
-        raw_links = _re.findall(
-            r'<div class="mw-search-result-heading"><a href="([^"]*)" title="([^"]*)"',
-            html,
-        )
-        seen = set()
-        for href, title in raw_links:
-            title = _up.unquote(title)
-            if any(title.startswith(p) for p in skip_prefixes):
-                continue
-            if title in seen or not title:
-                continue
-            seen.add(title)
-            article_titles.append(title)
-            if len(article_titles) >= max_results:
-                break
-
-    return article_titles
+        data = await resp.json()
+    hits = data.get("query", {}).get("search", [])
+    titles = []
+    for h in hits:
+        title = h.get("title", "")
+        if title and not any(title.startswith(p) for p in _MICROPEDIA_SKIP_PREFIXES):
+            titles.append(title)
+    return titles
 
 
-def _micropedia_backoff_queries(query: str) -> list:
-    """Generate progressively shorter variants of a query for retrying a failed
-    search. MediaWiki's default search ANDs all terms together, so leftover
-    question-particle noise (that our stopword stripping missed) can make an
-    otherwise-good query return zero hits. Trimming from the end tends to shed
-    that noise while keeping the actual subject (which usually comes first in
-    Chinese phrasing, e.g. '琉璃是誰' -> '琉璃')."""
-    import re as _re
-    variants = []
-    # Trim trailing characters progressively, keeping at least 2 chars.
-    for cut in range(1, min(6, len(query) - 1)):
-        candidate = query[:-cut].strip()
-        candidate = _re.sub(r"[!！,，。.、~～\s]+$", "", candidate).strip()
-        if len(candidate) >= 2 and candidate not in variants:
-            variants.append(candidate)
-    return variants[:2]  # cap attempts — each one is a full network round trip
+async def _micropedia_fetch_content(session, titles: list) -> str:
+    """Fetch article content for the given titles via the MediaWiki content API
+    (action=query&prop=revisions&rvprop=content) — JSON API, not scraping."""
+    import urllib.parse as _up
+    if not titles:
+        return ""
+    timeout = aiohttp.ClientTimeout(total=6, connect=3)
+    titles_param = "|".join(_up.quote(t) for t in titles)
+    api_url = (
+        f"https://www.micropedia.site/api.php?action=query"
+        f"&titles={titles_param}"
+        f"&prop=revisions&rvprop=content&format=json&redirects=1"
+    )
+    async with session.get(
+        api_url, headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"}, timeout=timeout
+    ) as resp:
+        if resp.status != 200:
+            print(f"📚 Micropedia: 內容 API 回傳 {resp.status}")
+            return ""
+        data = await resp.json()
+
+    content_parts = []
+    pages = data.get("query", {}).get("pages", {})
+    for pid, page in pages.items():
+        if pid == "-1" or "missing" in page:
+            continue
+        revs = page.get("revisions", [])
+        if not revs:
+            continue
+        wikitext = revs[0].get("*", "")
+        if not wikitext or len(wikitext) < 10:
+            continue
+        clean = _clean_wikitext(wikitext)
+        if clean and len(clean) > 10:
+            title = page.get("title", "?")
+            if len(clean) > 2000:
+                clean = clean[:2000] + "..."
+            content_parts.append(f"【{title}】\n{clean}")
+
+    return "\n\n".join(content_parts)
 
 
 async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
-    """Search micropedia.site and return relevant article content.
-    Returns formatted text with article content, or empty string if no results."""
+    """Single search + content-fetch attempt (one query, no internal retries —
+    the AI itself decides whether/how to retry with a different query via the
+    search_micropedia tool). Returns formatted article content, or empty string."""
     if not query:
         return ""
 
-    # Check cache
     cache_key = query.lower()
     if cache_key in _micropedia_cache:
         cached_time, cached_content = _micropedia_cache[cache_key]
@@ -1632,73 +1617,19 @@ async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
             print(f"📚 Micropedia: 使用快取結果 for '{query}'")
             return cached_content
 
-    import urllib.parse as _up
-
-    skip_prefixes = ("特殊:", "File:", "Category:", "Template:", "Help:",
-                     "Special:", "MediaWiki:", "User:", "Talk:", "Project:", "分類:")
-
     try:
         async with aiohttp.ClientSession() as session:
             print(f"📚 Micropedia: 搜尋 '{query}'")
-            article_titles = await _search_micropedia_titles(session, query, max_results, skip_prefixes)
-
-            # ── Backoff: if the full query missed, retry with trimmed variants ──
-            if not article_titles:
-                for variant in _micropedia_backoff_queries(query):
-                    print(f"📚 Micropedia: 原始查詢無結果，改試 '{variant}'")
-                    article_titles = await _search_micropedia_titles(session, variant, max_results, skip_prefixes)
-                    if article_titles:
-                        break
-
-            if not article_titles:
-                print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果（含退避重試）")
+            titles = await _micropedia_search_api(session, query, max_results)
+            if not titles:
+                print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果")
                 _micropedia_cache[cache_key] = (_time.time(), "")
                 return ""
-
-            print(f"📚 Micropedia: 找到 {len(article_titles)} 篇相關文章: {article_titles[:5]}")
-
-            # ── Fetch content for each article via the MediaWiki API ──
-            timeout = aiohttp.ClientTimeout(total=5, connect=3)
-            titles_param = "|".join(_up.quote(t) for t in article_titles)
-            api_url = (
-                f"https://www.micropedia.site/api.php?action=query"
-                f"&titles={titles_param}"
-                f"&prop=revisions&rvprop=content&format=json&redirects=1"
-            )
-
-            async with session.get(
-                api_url,
-                headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"},
-                timeout=timeout,
-            ) as resp:
-                if resp.status != 200:
-                    print(f"📚 Micropedia: API 回傳 {resp.status}")
-                    return ""
-                data = await resp.json()
-
-            content_parts = []
-            pages = data.get("query", {}).get("pages", {})
-            for pid, page in pages.items():
-                if pid == "-1" or "missing" in page:
-                    continue
-                revs = page.get("revisions", [])
-                if not revs:
-                    continue
-                wikitext = revs[0].get("*", "")
-                if not wikitext or len(wikitext) < 10:
-                    continue
-                clean = _clean_wikitext(wikitext)
-                if clean and len(clean) > 10:
-                    title = page.get("title", "?")
-                    if len(clean) > 2000:
-                        clean = clean[:2000] + "..."
-                    content_parts.append(f"【{title}】\n{clean}")
-
-            result = "\n\n".join(content_parts)
+            print(f"📚 Micropedia: 找到 {len(titles)} 篇相關文章: {titles[:5]}")
+            result = await _micropedia_fetch_content(session, titles)
             _micropedia_cache[cache_key] = (_time.time(), result)
-            print(f"📚 Micropedia: 取得 {len(content_parts)} 篇文章內容 ({len(result)} chars)")
+            print(f"📚 Micropedia: 取得內容 ({len(result)} chars)")
             return result
-
     except asyncio.TimeoutError:
         print(f"📚 Micropedia: 搜尋逾時 for '{query}'")
         return ""
@@ -1708,16 +1639,44 @@ async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
 
 
 async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
-    """Thin wrapper enforcing a hard overall time budget on the micropedia lookup
-    (search + backoff retries + content fetch combined). Individual HTTP requests
-    already have their own short timeouts, but backoff retries can still stack up —
-    this guarantees the whole lookup never meaningfully delays the chat reply,
-    no matter how many retries happen underneath."""
+    """Thin wrapper enforcing a hard overall time budget (8s) on a single
+    micropedia lookup, regardless of network conditions — guarantees a tool
+    call the AI makes never meaningfully stalls the reply pipeline."""
     try:
-        return await asyncio.wait_for(_fetch_micropedia_inner(query, max_results), timeout=10)
+        return await asyncio.wait_for(_fetch_micropedia_inner(query, max_results), timeout=8)
     except asyncio.TimeoutError:
-        print(f"📚 Micropedia: 整體查詢逾時（>10s），放棄 for '{query}'")
+        print(f"📚 Micropedia: 整體查詢逾時（>8s），放棄 for '{query}'")
         return ""
+
+
+# Tool schema exposed to the AI so it can search micropedia.site itself,
+# instead of us guessing the query with regex heuristics.
+_MICROPEDIA_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_micropedia",
+        "description": (
+            "搜尋微國家百科 (micropedia.site)，取得關於微國家歷史、人物、事件、組織、"
+            "條約等的正式資料。當使用者問到任何你不確定、可能是組織內部術語或專有名詞的"
+            "人事時地物時，呼叫這個工具查證，不要憑印象亂猜或編造。"
+            "這個 wiki 的搜尋是陽春的全文比對，不支援中文斷詞——如果完整片語查不到，"
+            "試試看拆成更短的核心詞（例如「山海事件」查不到就試「山海」）。"
+            "可以呼叫多次嘗試不同關鍵字。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜尋關鍵字，建議用簡短的核心詞（人名、事件核心詞、國名等），不要整句問句"
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
 
 
 async def generate_chat_reply(message, settings: dict) -> tuple:
@@ -1810,31 +1769,76 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     else:
         full_prompt = f"─── 當前訊息 ───\n{user_name}: {clean_content}"
 
-    # ── Micropedia lookup ──
-    micropedia_context = ""
-    if settings.get("micropedia_enabled", True):
-        bot_id = bot.user.id
-        if _should_search_micropedia(clean_content):
-            search_query = _extract_search_query(message.content, bot_id)
-            if search_query:
-                max_results = settings.get("micropedia_max_results", 5)
-                micropedia_context = await _fetch_micropedia(search_query, max_results)
-
-    if micropedia_context:
+    # ── Micropedia: let the AI search it itself via a tool, instead of us
+    # guessing the query with regex. Tell it the tool exists (if enabled).
+    micropedia_enabled = settings.get("micropedia_enabled", True)
+    if micropedia_enabled:
         system_prompt += (
-            f"\n\n─── 微國家百科資料 ───\n"
-            f"以下是從微國家百科 (micropedia.site) 查詢到的相關資料。"
-            f"請優先參考這些資料來回答關於微國家的問題。"
-            f"如果資料中沒有答案，可以根據你自己的知識補充，但要標明哪些來自百科、哪些是你的推測。\n"
-            f"{micropedia_context}"
+            f"\n\n─── 微國家百科 (search_micropedia 工具) ───\n"
+            f"你有一個 search_micropedia 工具，可以查詢微國家百科 (micropedia.site) 的正式資料。"
+            f"當使用者問到任何組織內部的人事時地物、事件、專有名詞，而你不確定或沒印象時，"
+            f"呼叫這個工具查證，不要憑印象亂猜或編造內容。"
+            f"如果第一次查詢的關鍵字找不到結果，試試看換成更短的核心詞再查一次"
+            f"（這個 wiki 的搜尋不支援中文斷詞，完整片語常常查不到，但拆開的核心詞可以）。"
+            f"查到資料就優先採用；如果嘗試過仍然查不到，才誠實告知使用者你沒有找到相關資料。"
         )
-        print(f"📚 Micropedia: 已將百科資料加入 AI 上下文 ({len(micropedia_context)} chars)")
 
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": full_prompt},
     ]
-    raw_reply = await call_chat_api(messages, settings)
+
+    max_results = settings.get("micropedia_max_results", 5)
+    tools = [_MICROPEDIA_TOOL_SCHEMA] if micropedia_enabled else None
+
+    async def _run_tool_loop():
+        """Drive the tool-calling round-trip. Bounded to a few rounds so a
+        model that keeps calling tools can't loop forever; the whole thing is
+        wrapped in an overall wait_for by the caller as a hard safety net."""
+        msgs = messages
+        for round_num in range(3):
+            # Force a plain text answer on the final allowed round.
+            round_tools = tools if round_num < 2 else None
+            assistant_msg = await call_chat_api(msgs, settings, tools=round_tools)
+            tool_calls = assistant_msg.get("tool_calls")
+            if not tool_calls:
+                return assistant_msg.get("content") or ""
+
+            # Model wants to search — execute each requested call, then let it
+            # see the results and continue (or give its final answer).
+            msgs = msgs + [assistant_msg]
+            for tc in tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name")
+                call_id = tc.get("id")
+                if name == "search_micropedia":
+                    try:
+                        args = json_module.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        args = {}
+                    query = (args.get("query") or "").strip()
+                    print(f"🔧 AI 呼叫 search_micropedia('{query}')")
+                    result = await _fetch_micropedia(query, max_results) if query else ""
+                    tool_content = result if result else "沒有找到相關資料，試試看換一個更短或不同的關鍵字。"
+                else:
+                    tool_content = f"未知工具：{name}"
+                msgs = msgs + [{
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": tool_content[:3000],
+                }]
+        # Ran out of rounds without a final text answer — ask once more, no tools.
+        final_msg = await call_chat_api(msgs, settings, tools=None)
+        return final_msg.get("content") or ""
+
+    # Hard overall cap on the whole AI round-trip (covers all tool rounds),
+    # so no matter how many searches happen the reply pipeline never stalls
+    # indefinitely — this is the outer safety net on top of each call's own timeout.
+    try:
+        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=45)
+    except asyncio.TimeoutError:
+        print(f"⚠️ AI 回覆流程整體逾時（>45s）")
+        raise
 
     # Parse [MEMORY:] and [MOD:] tags from reply
     actual_reply = raw_reply
