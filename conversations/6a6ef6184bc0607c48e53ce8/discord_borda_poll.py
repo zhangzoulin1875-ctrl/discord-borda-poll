@@ -3940,6 +3940,62 @@ async def on_ready():
         if _norm not in _tools_unsupported_apis:
             asyncio.ensure_future(_probe_tools_support(chat_ai_settings, _norm))
 
+    # ── 啟動時檢查所有伺服器的暱稱 ──
+    for guild in bot.guilds:
+        await _check_and_fix_nickname(guild)
+
+
+# ── 暱稱保護系統 ──
+# 機器人偵測到自己的暱稱被改成非預期名稱時，自動改回來。
+EXPECTED_NICKNAME = "ICEA official"
+
+async def _check_and_fix_nickname(guild):
+    """Check bot's nickname in a guild; if it's not the expected name,
+    automatically change it back."""
+    try:
+        me = guild.get_member(bot.user.id)
+        if me is None:
+            me = await guild.fetch_member(bot.user.id)
+        current_nick = me.nick
+        # If nick is None, the bot is using its global username.
+        # Only fix if a nick is set AND it's wrong.
+        if current_nick is not None and current_nick != EXPECTED_NICKNAME:
+            print(f"🔧 暱稱被改成了「{current_nick}」，自動改回「{EXPECTED_NICKNAME}」")
+            try:
+                await me.edit(nick=EXPECTED_NICKNAME)
+                print(f"✅ 暱稱已恢復為「{EXPECTED_NICKNAME}」")
+            except discord.Forbidden:
+                print(f"❌ 無法修改暱稱：缺少權限（需要在 #{guild.name} 有「變更暱稱」權限）")
+            except Exception as e:
+                print(f"❌ 修改暱稱失敗：{e}")
+    except Exception as e:
+        print(f"⚠️ 檢查暱稱失敗（{guild.name}）：{e}")
+
+
+@bot.event
+async def on_guild_update(before: discord.Guild, after: discord.Guild):
+    """Triggered when a guild is updated. Not directly useful for nickname
+    changes, but kept for completeness."""
+    pass
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Triggered when a member is updated. If the bot's own nickname changed,
+    automatically revert it."""
+    if after.id == bot.user.id:
+        # Check if nickname changed
+        if before.nick != after.nick:
+            if after.nick is not None and after.nick != EXPECTED_NICKNAME:
+                print(f"🔧 偵測到暱稱被改為「{after.nick}」，正在恢復...")
+                try:
+                    await after.edit(nick=EXPECTED_NICKNAME)
+                    print(f"✅ 暱稱已自動恢復為「{EXPECTED_NICKNAME}」")
+                except discord.Forbidden:
+                    print(f"❌ 無法恢復暱稱：缺少權限")
+                except Exception as e:
+                    print(f"❌ 恢復暱稱失敗：{e}")
+
 
 @bot.event
 async def setup_hook():
