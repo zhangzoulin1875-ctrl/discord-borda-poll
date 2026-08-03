@@ -669,7 +669,8 @@ briefing_settings = {
     "weekly_channel_id": None,
 }
 
-BRIEFING_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "briefing_settings.json")
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+BRIEFING_DATA_FILE = os.path.join(DATA_DIR, "briefing_settings.json")
 
 
 def save_briefing_settings():
@@ -2344,7 +2345,7 @@ async def sync_to_drive():
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     ok_count = 0
     fail_count = 0
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json"]:
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json"]:
         filepath = os.path.join(data_dir, filename)
         if os.path.exists(filepath):
             try:
@@ -2373,7 +2374,7 @@ async def load_from_drive():
     print(f"🔄 Drive 載入開始：OAuth={'✅' if has_oauth else '❌'} SA={'✅' if has_sa else '❌'} client_id={'✅' if cid else '❌'}")
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json"]:
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json"]:
         content = await _drive_download(filename)
         if content:
             try:
@@ -2836,7 +2837,7 @@ async def on_ready():
 @bot.event
 async def setup_hook():
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception:
@@ -2850,6 +2851,8 @@ async def setup_hook():
     save_briefing_settings()  # Create file if not exists
     load_chat_ai_settings()
     save_chat_ai_settings()  # Create file if not exists
+    load_quiz_data()
+    save_quiz_data()  # Create files if not exists
     load_user_memories()
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
@@ -2858,6 +2861,8 @@ async def setup_hook():
     asyncio.ensure_future(weekly_briefing_scheduler())
     asyncio.ensure_future(drive_sync_loop())
     asyncio.ensure_future(server_context_refresh_loop())
+    asyncio.ensure_future(quiz_question_loop())
+    asyncio.ensure_future(quiz_settlement_loop())
 
 
 @bot.event
@@ -4705,6 +4710,711 @@ class ChatGroup(app_commands.Group):
             if len(result) > 1900:
                 display += "..."
             await interaction.followup.send(f"📚 搜尋「{query}」的結果：\n\n{display}", ephemeral=True)
+
+
+# ════════════════════════════════════════════════════════════
+# AI 問答系統（AI Quiz System）
+# 每半小時從微國家百科隨機出題，搶答得分，每晚 22:00 結算冠軍
+# ════════════════════════════════════════════════════════════
+
+import random as _quiz_random
+
+# ── 資料檔案路徑 ──
+QUIZ_SETTINGS_FILE = os.path.join(DATA_DIR, "quiz_settings.json")
+QUIZ_SCORES_FILE = os.path.join(DATA_DIR, "quiz_scores.json")
+QUIZ_CHAMPIONS_FILE = os.path.join(DATA_DIR, "quiz_champions.json")
+
+# ── 記憶體狀態 ──
+quiz_settings = {
+    "channel_id": None,       # Discord channel ID for quiz
+    "guild_id": None,         # Discord guild ID
+    "enabled": False,         # on/off
+    "interval_minutes": 30,   # question frequency
+}
+quiz_scores = {}      # {user_id_str: {username, daily_score, total_score, date}}
+quiz_champions = []   # [{date, champion_id, champion_name, champion_score, runner_up_name, runner_up_score}]
+# Active questions: {message_id_str: {question, options, correct_index, source_title, source_url, answered_by, created_at}}
+quiz_active_questions = {}
+
+
+def save_quiz_data():
+    """Save quiz settings, scores, and champions to disk."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        with open(QUIZ_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(quiz_settings, f, ensure_ascii=False, indent=2)
+        with open(QUIZ_SCORES_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(quiz_scores, f, ensure_ascii=False, indent=2)
+        with open(QUIZ_CHAMPIONS_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(quiz_champions, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ Quiz data save failed: {e}")
+
+
+def load_quiz_data():
+    """Load quiz data from disk."""
+    global quiz_settings, quiz_scores, quiz_champions
+    try:
+        if os.path.exists(QUIZ_SETTINGS_FILE):
+            with open(QUIZ_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                quiz_settings.update(json_module.load(f))
+        if os.path.exists(QUIZ_SCORES_FILE):
+            with open(QUIZ_SCORES_FILE, "r", encoding="utf-8") as f:
+                quiz_scores = json_module.load(f)
+        if os.path.exists(QUIZ_CHAMPIONS_FILE):
+            with open(QUIZ_CHAMPIONS_FILE, "r", encoding="utf-8") as f:
+                quiz_champions = json_module.load(f)
+        print(f"✅ 問答資料載入：{'啟用' if quiz_settings.get('enabled') else '停用'}, "
+              f"{len(quiz_scores)} 位玩家, {len(quiz_champions)} 位冠軍")
+    except Exception as e:
+        print(f"⚠️ Quiz data load failed: {e}")
+
+
+async def _generate_quiz_question() -> dict | None:
+    """Fetch a random micropedia article and generate a quiz question via AI.
+    Returns {question, options: [4], correct_index: 0-3, source_title, source_url} or None."""
+    if not chat_ai_settings.get("api_key"):
+        print("⚠️ Quiz: No AI API key configured")
+        return None
+
+    # Pick a random broad search term to get varied articles
+    search_terms = [
+        "共和國", "聯邦", "王國", "帝國", "公國", "共和",
+        "自由邦", "城邦", "聯盟", "組織", "條約", "宣言",
+        "憲法", "政府", "選舉", "文化", "歷史", "經濟",
+        "外交", "國旗", "國歌", "節日", "軍事", "教育",
+    ]
+    term = _quiz_random.choice(search_terms)
+    try:
+        article_text = await asyncio.wait_for(
+            _fetch_micropedia(term, max_results=3),
+            timeout=10
+        )
+    except asyncio.TimeoutError:
+        print("⚠️ Quiz: Micropedia fetch timed out")
+        return None
+    except Exception as e:
+        print(f"⚠️ Quiz: Micropedia fetch error: {e}")
+        return None
+
+    if not article_text or len(article_text.strip()) < 50:
+        # Retry with a different term
+        term2 = _quiz_random.choice(search_terms)
+        try:
+            article_text = await asyncio.wait_for(
+                _fetch_micropedia(term2, max_results=3),
+                timeout=10
+            )
+        except Exception:
+            print("⚠️ Quiz: Micropedia retry also failed")
+            return None
+        if not article_text or len(article_text.strip()) < 50:
+            print("⚠️ Quiz: Not enough content from micropedia")
+            return None
+
+    # Truncate to keep token usage reasonable
+    article_text = article_text[:3000]
+
+    # Extract source title/URL from the article text if present
+    source_title = ""
+    source_url = ""
+    for line in article_text.split("\n"):
+        if line.startswith("📖 ") or line.startswith("標題:") or line.startswith("【"):
+            source_title = line.strip("📖標題：【】 ")
+            break
+    for line in article_text.split("\n"):
+        if "micropedia.site" in line:
+            source_url = line.strip()
+            break
+
+    # Generate question via AI
+    system_prompt = (
+        "你是微國家百科問答出題機。根據提供的百科資料，出一道單選題。\n"
+        "題目要求：\n"
+        "- 只出單選題，4個選項\n"
+        "- 題目要清楚明確，答案必須能從資料中找到\n"
+        "- 選項要合理，有迷惑性但不能有爭議\n"
+        "- 正確答案的位置要隨機（不要總是放在同一個位置）\n\n"
+        "請嚴格回覆以下 JSON 格式（不要加 markdown code block，不要加其他文字）：\n"
+        '{"question": "題目", "options": ["選項A", "選項B", "選項C", "選項D"], "correct_index": 0}'
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"百科資料：\n{article_text}\n\n請根據以上資料出一道單選題。"}
+    ]
+
+    try:
+        result = await asyncio.wait_for(
+            call_chat_api(messages, chat_ai_settings),
+            timeout=30
+        )
+    except asyncio.TimeoutError:
+        print("⚠️ Quiz: AI question generation timed out")
+        return None
+    except Exception as e:
+        print(f"⚠️ Quiz: AI API error: {e}")
+        return None
+
+    # Parse the AI response
+    raw_reply = result.get("content", "")
+    if not raw_reply:
+        # Try tool_calls if content is empty
+        tool_calls = result.get("tool_calls", [])
+        if tool_calls:
+            raw_reply = tool_calls[0].get("function", {}).get("arguments", "")
+
+    # Strip markdown code blocks if present
+    raw_reply = raw_reply.strip()
+    if raw_reply.startswith("```"):
+        raw_reply = raw_reply.split("\n", 1)[-1] if "\n" in raw_reply else raw_reply[3:]
+    if raw_reply.endswith("```"):
+        raw_reply = raw_reply[:-3]
+    raw_reply = raw_reply.strip()
+
+    try:
+        quiz_data = json_module.loads(raw_reply)
+    except Exception:
+        # Try to extract JSON from the text
+        import re
+        match = re.search(r'\{[^{}]*"question"[^{}]*\}', raw_reply, re.DOTALL)
+        if match:
+            try:
+                quiz_data = json_module.loads(match.group())
+            except Exception:
+                print(f"⚠️ Quiz: Cannot parse AI response: {raw_reply[:200]}")
+                return None
+        else:
+            print(f"⚠️ Quiz: Cannot parse AI response: {raw_reply[:200]}")
+            return None
+
+    # Validate schema
+    if not isinstance(quiz_data, dict):
+        print("⚠️ Quiz: AI response is not a dict")
+        return None
+    if "question" not in quiz_data or "options" not in quiz_data or "correct_index" not in quiz_data:
+        print("⚠️ Quiz: AI response missing required fields")
+        return None
+    options = quiz_data["options"]
+    if not isinstance(options, list) or len(options) != 4:
+        print(f"⚠️ Quiz: options must have 4 items, got {len(options)}")
+        return None
+    correct_index = quiz_data["correct_index"]
+    if not isinstance(correct_index, int) or correct_index < 0 or correct_index > 3:
+        print(f"⚠️ Quiz: correct_index must be 0-3, got {correct_index}")
+        return None
+    question = quiz_data["question"]
+    if not isinstance(question, str) or len(question.strip()) < 5:
+        print(f"⚠️ Quiz: question too short")
+        return None
+
+    return {
+        "question": question.strip(),
+        "options": [str(o).strip() for o in options],
+        "correct_index": correct_index,
+        "source_title": source_title,
+        "source_url": source_url,
+    }
+
+
+class QuizAnswerView(discord.ui.View):
+    """Interactive buttons for quiz answers. Times out after 10 minutes."""
+
+    def __init__(self, question_data: dict, message_id: int):
+        super().__init__(timeout=600)  # 10 minutes
+        self.question_data = question_data
+        self.message_id = message_id
+        self.answered = False
+        self.correct_user_id = None
+
+        for i, option_text in enumerate(question_data["options"]):
+            label = f"{'🇦🇧🇨🇩'[i]} {option_text}" if i < 4 else option_text
+            # Use simple letter labels to keep buttons short
+            letter = "ABCD"[i]
+            btn = discord.ui.Button(
+                label=f"{letter}. {option_text[:70]}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"quiz_{message_id}_{i}"
+            )
+            btn.callback = self._make_callback(i)
+            self.add_item(btn)
+
+    def _make_callback(self, index: int):
+        async def callback(interaction: discord.Interaction):
+            await self._handle_answer(interaction, index)
+        return callback
+
+    async def _handle_answer(self, interaction: discord.Interaction, selected_index: int):
+        user_id_str = str(interaction.user.id)
+
+        # Already answered by someone
+        if self.answered:
+            if user_id_str == self.correct_user_id:
+                await interaction.response.send_message("你已經答對了！🎉", ephemeral=True)
+            else:
+                await interaction.response.send_message("已經有人搶答成功了！⚡", ephemeral=True)
+            return
+
+        correct_index = self.question_data["correct_index"]
+
+        if selected_index == correct_index:
+            # First correct answer!
+            self.answered = True
+            self.correct_user_id = user_id_str
+
+            # Award 5 points
+            today = _time.strftime("%Y-%m-%d")
+            user_entry = quiz_scores.get(user_id_str, {
+                "username": interaction.user.display_name,
+                "daily_score": 0,
+                "total_score": 0,
+                "date": today,
+            })
+            # Reset daily score if date changed
+            if user_entry.get("date") != today:
+                user_entry["daily_score"] = 0
+                user_entry["date"] = today
+            user_entry["username"] = interaction.user.display_name
+            user_entry["daily_score"] = user_entry.get("daily_score", 0) + 5
+            user_entry["total_score"] = user_entry.get("total_score", 0) + 5
+            quiz_scores[user_id_str] = user_entry
+            save_quiz_data()
+
+            # Update the active question
+            quiz_active_questions[str(self.message_id)]["answered_by"] = user_id_str
+
+            # Edit the embed to show the answer
+            embed = interaction.message.embeds[0] if interaction.message.embeds else None
+            if embed:
+                embed.color = discord.Color.green()
+                embed.add_field(
+                    name="🎉 搶答成功！",
+                    value=f"**{interaction.user.display_name}** 最先答對，獲得 **5 分**！\n"
+                          f"正確答案：**{'ABCD'[correct_index]}. {self.question_data['options'][correct_index]}**",
+                    inline=False
+                )
+                if self.question_data.get("source_url"):
+                    embed.add_field(
+                        name="📚 來源",
+                        value=f"[{self.question_data.get('source_title', '查看原文')}]({self.question_data['source_url']})",
+                        inline=False
+                    )
+                # Disable all buttons
+                for child in self.children:
+                    child.disabled = True
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.response.send_message(
+                    f"🎉 答對了！+5 分！你今天累積 {user_entry['daily_score']} 分。",
+                    ephemeral=True
+                )
+
+            # Also send a public celebration message
+            try:
+                await interaction.followup.send(
+                    f"🎉 **{interaction.user.display_name}** 搶答成功！+5 分！"
+                    f"（今日累積 {user_entry['daily_score']} 分）",
+                    ephemeral=False
+                )
+            except Exception:
+                pass
+            print(f"🎉 Quiz: {interaction.user.display_name} answered correctly (+5 pts, daily={user_entry['daily_score']})")
+        else:
+            # Wrong answer
+            await interaction.response.send_message(
+                "❌ 不對哦，再試試看！其他選項還有機會～",
+                ephemeral=True
+            )
+
+    async def on_timeout(self):
+        """Reveal the answer when no one answers in time."""
+        if self.answered:
+            return  # Already answered, nothing to do
+
+        # Mark as timed out
+        quiz_active_questions.pop(str(self.message_id), None)
+
+        # Try to edit the message with the answer
+        try:
+            channel_id = quiz_settings.get("channel_id")
+            if channel_id:
+                channel = bot.get_channel(int(channel_id))
+                if channel:
+                    correct_idx = self.question_data["correct_index"]
+                    embed = discord.Embed(
+                        title="⏰ 時間到！無人答對",
+                        color=discord.Color.orange(),
+                    )
+                    embed.add_field(
+                        name="正確答案",
+                        value=f"**{'ABCD'[correct_idx]}. {self.question_data['options'][correct_idx]}**",
+                        inline=False
+                    )
+                    if self.question_data.get("source_url"):
+                        embed.add_field(
+                            name="📚 來源",
+                            value=f"[{self.question_data.get('source_title', '查看原文')}]({self.question_data['source_url']})",
+                            inline=False
+                        )
+                    # Disable all buttons
+                    for child in self.children:
+                        child.disabled = True
+                    # Get the original message
+                    msg = await channel.fetch_message(self.message_id)
+                    if msg:
+                        await msg.edit(embed=embed, view=self)
+                    print("⏰ Quiz: Question timed out, answer revealed")
+        except Exception as e:
+            print(f"⚠️ Quiz timeout reveal failed: {e}")
+
+
+async def quiz_question_loop():
+    """Background task: post a new quiz question every 30 minutes."""
+    await asyncio.sleep(60)  # Wait for bot to be ready
+    while True:
+        try:
+            if not quiz_settings.get("enabled"):
+                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                continue
+
+            channel_id = quiz_settings.get("channel_id")
+            if not channel_id:
+                print("⚠️ Quiz: No channel configured, skipping round")
+                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                continue
+
+            channel = bot.get_channel(int(channel_id))
+            if not channel:
+                print(f"⚠️ Quiz: Cannot find channel {channel_id}")
+                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                continue
+
+            # Check if there's an unanswered active question — don't pile up
+            if quiz_active_questions:
+                print(f"ℹ️ Quiz: {len(quiz_active_questions)} question(s) still active, skipping this round")
+                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                continue
+
+            # Generate the question
+            print("📝 Quiz: Generating new question...")
+            quiz_data = await _generate_quiz_question()
+            if not quiz_data:
+                print("⚠️ Quiz: Failed to generate question, skipping round")
+                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                continue
+
+            # Create embed
+            embed = discord.Embed(
+                title="🧠 微國家百科問答",
+                description=f"**{quiz_data['question']}**\n\n快選出正確答案！最先答對得 5 分！",
+                color=discord.Color.blurple(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.set_footer(text="⏱️ 10 分鐘內搶答 | 最先答對得 5 分")
+
+            # Send the question
+            msg = await channel.send(embed=embed)
+            # Now create the view with buttons (need message ID)
+            view = QuizAnswerView(quiz_data, msg.id)
+            # Re-send with buttons (edit the original message)
+            await msg.edit(view=view)
+
+            # Store the active question
+            quiz_active_questions[str(msg.id)] = {
+                "question": quiz_data["question"],
+                "options": quiz_data["options"],
+                "correct_index": quiz_data["correct_index"],
+                "source_title": quiz_data.get("source_title", ""),
+                "source_url": quiz_data.get("source_url", ""),
+                "answered_by": None,
+                "created_at": _time.time(),
+            }
+
+            print(f"✅ Quiz: Question posted in #{channel.name} (msg_id={msg.id})")
+        except Exception as e:
+            print(f"⚠️ Quiz loop error: {e}")
+
+        await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+
+
+async def quiz_settlement_loop():
+    """Background task: settle daily champion at 22:00 every day."""
+    await asyncio.sleep(60)  # Wait for bot to be ready
+    while True:
+        try:
+            # Check if it's 22:00 (check every 30 seconds for precision)
+            now = _time.localtime()
+            if now.tm_hour == 22 and now.tm_min == 0 and now.tm_sec < 30:
+                today = _time.strftime("%Y-%m-%d")
+
+                # Find today's top scorer(s)
+                today_scores = []
+                for uid, entry in quiz_scores.items():
+                    if entry.get("date") == today and entry.get("daily_score", 0) > 0:
+                        today_scores.append((uid, entry["username"], entry["daily_score"]))
+
+                channel_id = quiz_settings.get("channel_id")
+                channel = bot.get_channel(int(channel_id)) if channel_id else None
+
+                if not today_scores:
+                    if channel:
+                        embed = discord.Embed(
+                            title="📊 今日問答結算",
+                            description="今天沒有人得分，再接再厲！明天 22:00 再結算～",
+                            color=discord.Color.orange(),
+                        )
+                        await channel.send(embed=embed)
+                    # Still reset daily scores
+                    for uid, entry in quiz_scores.items():
+                        if entry.get("date") == today:
+                            entry["daily_score"] = 0
+                    save_quiz_data()
+                    print("📊 Quiz: Daily settlement — no scores today")
+                else:
+                    # Sort by score descending
+                    today_scores.sort(key=lambda x: -x[2])
+                    champion_uid, champion_name, champion_score = today_scores[0]
+                    runner_up_name = today_scores[1][1] if len(today_scores) > 1 else "—"
+                    runner_up_score = today_scores[1][2] if len(today_scores) > 1 else 0
+
+                    # Check for ties
+                    tied = [(uid, name, score) for uid, name, score in today_scores if score == champion_score]
+
+                    # Record champion(s)
+                    for uid, name, score in tied:
+                        quiz_champions.append({
+                            "date": today,
+                            "champion_id": uid,
+                            "champion_name": name,
+                            "champion_score": score,
+                            "runner_up_name": runner_up_name,
+                            "runner_up_score": runner_up_score,
+                        })
+
+                    if channel:
+                        if len(tied) > 1:
+                            embed = discord.Embed(
+                                title="🏆 今日問答結算 — 共同冠軍！",
+                                color=discord.Color.gold(),
+                                timestamp=discord.utils.utcnow(),
+                            )
+                            champ_text = "\n".join(f"👑 **{name}** — {score} 分" for _, name, score in tied)
+                            embed.add_field(name="共同冠軍", value=champ_text, inline=False)
+                        else:
+                            embed = discord.Embed(
+                                title="🏆 今日問答結算",
+                                color=discord.Color.gold(),
+                                timestamp=discord.utils.utcnow(),
+                            )
+                            embed.add_field(
+                                name="🥇 冠軍",
+                                value=f"**{champion_name}** — {champion_score} 分",
+                                inline=False
+                            )
+                            if len(today_scores) > 1:
+                                embed.add_field(
+                                    name="🥈 亞軍",
+                                    value=f"**{runner_up_name}** — {runner_up_score} 分",
+                                    inline=False
+                                )
+                            embed.add_field(
+                                name="📊 完整排名",
+                                value="\n".join(
+                                    f"{i+1}. {name} — {score} 分"
+                                    for i, (_, name, score) in enumerate(today_scores[:10])
+                                ),
+                                inline=False
+                            )
+                        embed.set_footer(text="每日 22:00 自動結算 | 明日重新計分")
+                        await channel.send(embed=embed)
+
+                    # Reset daily scores for the new day
+                    for uid, entry in quiz_scores.items():
+                        if entry.get("date") == today:
+                            entry["daily_score"] = 0
+                    save_quiz_data()
+                    print(f"🏆 Quiz: Champion settled — {champion_name} ({champion_score} pts)")
+
+                # Sleep past this minute to avoid double-settling
+                await asyncio.sleep(60)
+        except Exception as e:
+            print(f"⚠️ Quiz settlement error: {e}")
+
+        await asyncio.sleep(30)
+
+
+# ── Slash Command Group ──
+
+class QuizGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="quiz", description="AI 問答系統")
+
+    @app_commands.command(name="toggle", description="開啟/關閉 AI 問答功能（機器人擁有者限定）")
+    async def quiz_toggle(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        quiz_settings["enabled"] = not quiz_settings.get("enabled", False)
+        save_quiz_data()
+        status = "開啟" if quiz_settings["enabled"] else "關閉"
+        await interaction.response.send_message(f"✅ AI 問答已{status}。", ephemeral=True)
+
+    @app_commands.command(name="channel", description="設定 AI 問答頻道（機器人擁有者限定）")
+    @app_commands.describe(channel="要設為問答頻道的頻道")
+    async def quiz_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        quiz_settings["channel_id"] = str(channel.id)
+        quiz_settings["guild_id"] = str(interaction.guild.id) if interaction.guild else None
+        save_quiz_data()
+        await interaction.response.send_message(
+            f"✅ AI 問答頻道已設為 {channel.mention}。\n"
+            f"每 30 分鐘會自動出題，最先答對得 5 分，每晚 22:00 結算冠軍。",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="interval", description="設定出題間隔分鐘數（機器人擁有者限定）")
+    @app_commands.describe(minutes="間隔分鐘數（預設 30）")
+    async def quiz_interval(self, interaction: discord.Interaction, minutes: int):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        if minutes < 5:
+            await interaction.response.send_message("❌ 間隔至少 5 分鐘。", ephemeral=True)
+            return
+        quiz_settings["interval_minutes"] = minutes
+        save_quiz_data()
+        await interaction.response.send_message(f"✅ 出題間隔已設為 {minutes} 分鐘。", ephemeral=True)
+
+    @app_commands.command(name="scoreboard", description="查看問答積分榜")
+    async def quiz_scoreboard(self, interaction: discord.Interaction):
+        today = _time.strftime("%Y-%m-%d")
+        today_scores = []
+        all_time_scores = []
+        for uid, entry in quiz_scores.items():
+            if entry.get("date") == today and entry.get("daily_score", 0) > 0:
+                today_scores.append((entry["username"], entry["daily_score"]))
+            total = entry.get("total_score", 0)
+            if total > 0:
+                all_time_scores.append((entry["username"], total))
+
+        today_scores.sort(key=lambda x: -x[1])
+        all_time_scores.sort(key=lambda x: -x[1])
+
+        embed = discord.Embed(
+            title="📊 AI 問答積分榜",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+
+        if today_scores:
+            embed.add_field(
+                name=f"📅 今日排名 ({today})",
+                value="\n".join(
+                    f"{i+1}. {name} — {score} 分"
+                    for i, (name, score) in enumerate(today_scores[:10])
+                ),
+                inline=False
+            )
+        else:
+            embed.add_field(name="📅 今日排名", value="尚無得分紀錄", inline=False)
+
+        if all_time_scores:
+            embed.add_field(
+                name="🏆 總排行",
+                value="\n".join(
+                    f"{i+1}. {name} — {score} 分"
+                    for i, (name, score) in enumerate(all_time_scores[:10])
+                ),
+                inline=False
+            )
+        else:
+            embed.add_field(name="🏆 總排行", value="尚無得分紀錄", inline=False)
+
+        embed.set_footer(text="每日 22:00 結算 | 最先答對得 5 分")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="champion", description="查看歷屆問答冠軍")
+    async def quiz_champion(self, interaction: discord.Interaction):
+        if not quiz_champions:
+            await interaction.response.send_message("尚無冠軍紀錄。每晚 22:00 自動結算。", ephemeral=True)
+            return
+
+        recent = quiz_champions[-7:]  # last 7 days
+        embed = discord.Embed(
+            title="🏆 歷屆問答冠軍",
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        for champ in reversed(recent):
+            embed.add_field(
+                name=f"📅 {champ['date']}",
+                value=f"👑 **{champ['champion_name']}** — {champ['champion_score']} 分\n"
+                      f"🥈 {champ.get('runner_up_name', '—')} — {champ.get('runner_up_score', 0)} 分",
+                inline=False
+            )
+        embed.set_footer(text="顯示最近 7 天 | 每晚 22:00 自動結算")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="now", description="立即出題（機器人擁有者限定）")
+    async def quiz_now(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        channel_id = quiz_settings.get("channel_id")
+        if not channel_id:
+            await interaction.response.send_message("❌ 尚未設定問答頻道。請先用 `/quiz channel` 設定。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        quiz_data = await _generate_quiz_question()
+        if not quiz_data:
+            await interaction.followup.send("❌ 出題失敗，請稍後再試。", ephemeral=True)
+            return
+        channel = bot.get_channel(int(channel_id))
+        if not channel:
+            await interaction.followup.send("❌ 找不到問答頻道。", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title="🧠 微國家百科問答",
+            description=f"**{quiz_data['question']}**\n\n快選出正確答案！最先答對得 5 分！",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_footer(text="⏱️ 10 分鐘內搶答 | 最先答對得 5 分")
+        msg = await channel.send(embed=embed)
+        view = QuizAnswerView(quiz_data, msg.id)
+        await msg.edit(view=view)
+        quiz_active_questions[str(msg.id)] = {
+            "question": quiz_data["question"],
+            "options": quiz_data["options"],
+            "correct_index": quiz_data["correct_index"],
+            "source_title": quiz_data.get("source_title", ""),
+            "source_url": quiz_data.get("source_url", ""),
+            "answered_by": None,
+            "created_at": _time.time(),
+        }
+        await interaction.followup.send(f"✅ 已在 {channel.mention} 出題。", ephemeral=True)
+
+    @app_commands.command(name="status", description="查看問答系統狀態")
+    async def quiz_status(self, interaction: discord.Interaction):
+        today = _time.strftime("%Y-%m-%d")
+        today_players = sum(1 for e in quiz_scores.values() if e.get("date") == today and e.get("daily_score", 0) > 0)
+        total_questions_answered = sum(1 for q in quiz_active_questions.values() if q.get("answered_by"))
+        embed = discord.Embed(
+            title="📋 AI 問答系統狀態",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="狀態", value="✅ 啟用" if quiz_settings.get("enabled") else "❌ 停用", inline=True)
+        embed.add_field(name="出題間隔", value=f"{quiz_settings.get('interval_minutes', 30)} 分鐘", inline=True)
+        ch = quiz_settings.get("channel_id")
+        embed.add_field(name="頻道", value=f"<#{ch}>" if ch else "未設定", inline=True)
+        embed.add_field(name="今日玩家", value=str(today_players), inline=True)
+        embed.add_field(name="總玩家", value=str(len(quiz_scores)), inline=True)
+        embed.add_field(name="冠軍紀錄", value=str(len(quiz_champions)), inline=True)
+        embed.add_field(name="活躍題目", value=str(len(quiz_active_questions)), inline=True)
+        embed.set_footer(text="每日 22:00 自動結算 | /quiz toggle 開關 | /quiz channel 設定頻道")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ──────────────────────────────────────────────
