@@ -4233,6 +4233,7 @@ async def setup_hook():
     load_knowledge_base()
     load_corrections()
     load_blacklist()
+    load_feedback()
     # Load local files (will use Drive-downloaded data if available)
     load_polls_from_disk()
     save_polls_to_disk()  # Create file if not exists
@@ -5476,6 +5477,66 @@ class SystemGroup(app_commands.Group):
                 lines.append("→ 請把上面「詳細」的錯誤內容回報，才能進一步排查。")
 
         await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
+
+    @app_commands.command(name="feedback", description="查看使用者的讚/倒讚評價統計（機器人擁有者限定）")
+    @app_commands.describe(action="stats=統計總覽, recent=查看最近的評價")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="統計總覽", value="stats"),
+        app_commands.Choice(name="查看最近評價", value="recent"),
+    ])
+    async def system_feedback(self, interaction: discord.Interaction, action: app_commands.Choice[str]):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        entries = _feedback.get("entries", [])
+        if not entries:
+            await interaction.followup.send("📊 目前沒有任何評價資料。", ephemeral=True)
+            return
+
+        if action.value == "stats":
+            likes = [e for e in entries if e.get("rating") == "like"]
+            dislikes = [e for e in entries if e.get("rating") == "dislike"]
+            with_image = [e for e in entries if e.get("image_url")]
+
+            from collections import Counter
+            like_reasons = Counter(e.get("reason", "?") for e in likes)
+            dislike_reasons = Counter(e.get("reason", "?") for e in dislikes)
+
+            lines = [
+                f"📊 **評價統計**",
+                f"👍 讚：{len(likes)}　👎 倒讚：{len(dislikes)}　📷 含附圖：{len(with_image)}",
+                "",
+                "**👍 讚的原因分佈：**",
+            ]
+            for reason, count in like_reasons.most_common():
+                lines.append(f"  • {reason}：{count}")
+            lines.append("")
+            lines.append("**👎 倒讚的原因分佈：**")
+            for reason, count in dislike_reasons.most_common():
+                lines.append(f"  • {reason}：{count}")
+
+            await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
+
+        elif action.value == "recent":
+            recent = sorted(entries, key=lambda e: e.get("_ts", 0), reverse=True)[:10]
+            lines = []
+            for e in recent:
+                emoji = "👍" if e.get("rating") == "like" else "👎"
+                line = (
+                    f"{emoji} **{e.get('user_name', '?')}** | {e.get('date', '?')}\n"
+                    f"  原因：{e.get('reason', '?')}"
+                )
+                if e.get("custom_text"):
+                    line += f"\n  補充：{e['custom_text'][:100]}"
+                if e.get("image_url"):
+                    line += f"\n  附圖：{e['image_url']}"
+                lines.append(line)
+            await interaction.followup.send(
+                f"📋 **最近評價（{len(recent)} 筆）**\n\n" + "\n\n".join(lines[:10]),
+                ephemeral=True,
+            )
 
     @app_commands.command(name="corrections", description="查看/審核使用者提交的修正建議（機器人擁有者限定）")
     @app_commands.describe(action="list=列出待審核, approve=批准, reject=拒絕", entry_id="要審核的修正 ID（approve/reject 時必填）")
@@ -6986,17 +7047,353 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
             pass
 
 
-class CorrectionButtonView(discord.ui.View):
-    """View with a '修正建議' button attached to AI replies.
-    Only the user who asked the original question can use it."""
+def _create_feedback_entry(rating: str, reason: str, custom_text: str, question: str,
+                            ai_answer: str, user_id: str, user_name: str,
+                            guild_id: int, channel_id: int) -> dict:
+    """Create and persist a feedback entry. Returns the entry dict so callers
+    can attach an image_url to it later (before the final save)."""
+    now = _time.time()
+    entry_id = str(int(now * 1000))
+    entry = {
+        "id": entry_id,
+        "date": _time.strftime("%Y-%m-%d %H:%M"),
+        "_ts": now,
+        "rating": rating,  # "like" or "dislike"
+        "reason": reason,
+        "custom_text": (custom_text or "")[:500],
+        "question": (question or "")[:300],
+        "ai_answer": (ai_answer or "")[:300],
+        "user_id": user_id,
+        "user_name": user_name,
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+        "image_url": "",
+    }
+    _feedback.setdefault("entries", []).append(entry)
+    save_feedback()
+    _feedback_cooldowns[user_id] = now
+    return entry
 
-    def __init__(self, question: str, original_answer: str, user_id: str, user_name: str, guild_id: int):
-        super().__init__(timeout=600)  # button active for 10 min after reply
+
+async def _log_feedback(interaction: discord.Interaction, entry: dict):
+    """Log a completed feedback entry (with final image_url, if any) to the
+    AI log channel. Best-effort — failures are silently ignored."""
+    log_ch_id = chat_ai_settings.get("log_channel_id")
+    if not log_ch_id:
+        return
+    try:
+        log_ch = interaction.guild.get_channel(int(log_ch_id)) if interaction.guild else None
+        if not log_ch:
+            return
+        emoji = "👍" if entry["rating"] == "like" else "👎"
+        text = (
+            f"{emoji} **使用者評價**\n"
+            f"**使用者：** {entry.get('user_name', '?')}\n"
+            f"**原始問題：** {entry.get('question', '')[:100]}\n"
+            f"**原因：** {entry.get('reason', '')}"
+        )
+        if entry.get("custom_text"):
+            text += f"\n**補充：** {entry['custom_text'][:200]}"
+        if entry.get("image_url"):
+            text += f"\n**附圖：** {entry['image_url']}"
+        text += f"\n**ID：** {entry.get('id', '')}"
+        await log_ch.send(text)
+    except Exception:
+        pass
+
+
+async def _prompt_image_upload(interaction: discord.Interaction, entry: dict, user_id: str, channel_id: int):
+    """After a like/dislike reason is recorded, give the user a 60s window to
+    upload an image in the channel — it gets attached to their feedback.
+    Independent of the correction-suggestion flow; never blocks it."""
+    msg = None
+    try:
+        msg = await interaction.followup.send(
+            "✅ 已記錄你的評價！\n"
+            "📷 如果想附上截圖佐證，請在 60 秒內於此頻道上傳一張圖片，我會自動附加到你的回饋中（不需要可忽略這則訊息）。",
+            ephemeral=True,
+            wait=True,
+        )
+    except Exception:
+        pass
+
+    def _check(m: discord.Message) -> bool:
+        return (
+            str(m.author.id) == user_id
+            and m.channel.id == channel_id
+            and len(m.attachments) > 0
+        )
+
+    try:
+        image_msg = await bot.wait_for("message", check=_check, timeout=60)
+        attachment = image_msg.attachments[0]
+        entry["image_url"] = attachment.url
+        save_feedback()
+        if msg:
+            try:
+                await msg.edit(content="✅ 已收到你的評價與附圖，感謝回饋！")
+            except Exception:
+                pass
+    except asyncio.TimeoutError:
+        if msg:
+            try:
+                await msg.edit(content="✅ 已記錄你的評價（未附圖）。")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    await _log_feedback(interaction, entry)
+
+
+class FeedbackOtherReasonModal(discord.ui.Modal, title="請說明給予這個評價的原因"):
+    """'其他' 原因的文字輸入框，讚/倒讚共用，只差在 rating 參數。"""
+
+    reason_input = discord.ui.TextInput(
+        label="提供其他意見",
+        style=discord.TextStyle.paragraph,
+        placeholder="請說明原因...",
+        required=True,
+        max_length=300,
+    )
+
+    def __init__(self, rating: str, question: str, original_answer: str,
+                 user_id: str, user_name: str, guild_id: int, channel_id: int):
+        super().__init__(timeout=300)
+        self.rating = rating
         self.question = question
         self.original_answer = original_answer
         self.user_id = user_id
         self.user_name = user_name
         self.guild_id = guild_id
+        self.channel_id = channel_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        now = _time.time()
+        last = _feedback_cooldowns.get(self.user_id, 0)
+        if now - last < 15:
+            remaining = int(15 - (now - last))
+            await interaction.response.send_message(
+                f"⏳ 請等候 {remaining} 秒後再提交評價。", ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        entry = _create_feedback_entry(
+            rating=self.rating,
+            reason="其他",
+            custom_text=self.reason_input.value.strip(),
+            question=self.question,
+            ai_answer=self.original_answer,
+            user_id=self.user_id,
+            user_name=self.user_name,
+            guild_id=self.guild_id,
+            channel_id=self.channel_id,
+        )
+        await _prompt_image_upload(interaction, entry, self.user_id, self.channel_id)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        print(f"⚠️ 評價原因 Modal 錯誤：{error}")
+        try:
+            await interaction.response.send_message("⚠️ 提交評價時發生錯誤，請稍後再試。", ephemeral=True)
+        except Exception:
+            pass
+
+
+class LikeReasonView(discord.ui.View):
+    """👍 讚 之後彈出的原因選擇按鈕：與事實相符／簡單易懂／資訊豐富／有創意趣味／其他。"""
+
+    def __init__(self, question: str, original_answer: str, user_id: str,
+                 user_name: str, guild_id: int, channel_id: int):
+        super().__init__(timeout=120)
+        self.question = question
+        self.original_answer = original_answer
+        self.user_id = user_id
+        self.user_name = user_name
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+
+    async def _pick(self, interaction: discord.Interaction, reason: str):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ 只有提出問題的人才能提交這個評價。", ephemeral=True)
+            return
+        now = _time.time()
+        last = _feedback_cooldowns.get(self.user_id, 0)
+        if now - last < 15:
+            remaining = int(15 - (now - last))
+            await interaction.response.send_message(f"⏳ 請等候 {remaining} 秒後再提交評價。", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.response.edit_message(content=f"👍 你選擇了「{reason}」", view=self)
+        except Exception:
+            pass
+        entry = _create_feedback_entry(
+            rating="like", reason=reason, custom_text="",
+            question=self.question, ai_answer=self.original_answer,
+            user_id=self.user_id, user_name=self.user_name,
+            guild_id=self.guild_id, channel_id=self.channel_id,
+        )
+        await _prompt_image_upload(interaction, entry, self.user_id, self.channel_id)
+
+    @discord.ui.button(label="與事實相符", style=discord.ButtonStyle.secondary, row=0)
+    async def r_fact(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "與事實相符")
+
+    @discord.ui.button(label="簡單易懂", style=discord.ButtonStyle.secondary, row=0)
+    async def r_clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "簡單易懂")
+
+    @discord.ui.button(label="資訊豐富", style=discord.ButtonStyle.secondary, row=0)
+    async def r_rich(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "資訊豐富")
+
+    @discord.ui.button(label="有創意/趣味", style=discord.ButtonStyle.secondary, row=1)
+    async def r_fun(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "有創意/趣味")
+
+    @discord.ui.button(label="其他", style=discord.ButtonStyle.secondary, row=1)
+    async def r_other(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ 只有提出問題的人才能提交這個評價。", ephemeral=True)
+            return
+        modal = FeedbackOtherReasonModal(
+            rating="like", question=self.question, original_answer=self.original_answer,
+            user_id=self.user_id, user_name=self.user_name,
+            guild_id=self.guild_id, channel_id=self.channel_id,
+        )
+        await interaction.response.send_modal(modal)
+
+
+class DislikeReasonView(discord.ui.View):
+    """👎 倒讚 之後彈出的原因選擇按鈕：
+    令人反感/感到不安全、與事實不符、不符合指令、個人化問題、用錯語言、其他。"""
+
+    def __init__(self, question: str, original_answer: str, user_id: str,
+                 user_name: str, guild_id: int, channel_id: int):
+        super().__init__(timeout=120)
+        self.question = question
+        self.original_answer = original_answer
+        self.user_id = user_id
+        self.user_name = user_name
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+
+    async def _pick(self, interaction: discord.Interaction, reason: str):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ 只有提出問題的人才能提交這個評價。", ephemeral=True)
+            return
+        now = _time.time()
+        last = _feedback_cooldowns.get(self.user_id, 0)
+        if now - last < 15:
+            remaining = int(15 - (now - last))
+            await interaction.response.send_message(f"⏳ 請等候 {remaining} 秒後再提交評價。", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.response.edit_message(content=f"👎 你選擇了「{reason}」", view=self)
+        except Exception:
+            pass
+        entry = _create_feedback_entry(
+            rating="dislike", reason=reason, custom_text="",
+            question=self.question, ai_answer=self.original_answer,
+            user_id=self.user_id, user_name=self.user_name,
+            guild_id=self.guild_id, channel_id=self.channel_id,
+        )
+        await _prompt_image_upload(interaction, entry, self.user_id, self.channel_id)
+
+    @discord.ui.button(label="令人反感/感到不安全", style=discord.ButtonStyle.secondary, row=0)
+    async def r_offensive(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "令人反感/感到不安全")
+
+    @discord.ui.button(label="與事實不符", style=discord.ButtonStyle.secondary, row=0)
+    async def r_wrong(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "與事實不符")
+
+    @discord.ui.button(label="不符合指令", style=discord.ButtonStyle.secondary, row=0)
+    async def r_offtask(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "不符合指令")
+
+    @discord.ui.button(label="個人化問題", style=discord.ButtonStyle.secondary, row=1)
+    async def r_personal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "個人化問題")
+
+    @discord.ui.button(label="用錯語言", style=discord.ButtonStyle.secondary, row=1)
+    async def r_lang(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._pick(interaction, "用錯語言")
+
+    @discord.ui.button(label="其他", style=discord.ButtonStyle.secondary, row=1)
+    async def r_other(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ 只有提出問題的人才能提交這個評價。", ephemeral=True)
+            return
+        modal = FeedbackOtherReasonModal(
+            rating="dislike", question=self.question, original_answer=self.original_answer,
+            user_id=self.user_id, user_name=self.user_name,
+            guild_id=self.guild_id, channel_id=self.channel_id,
+        )
+        await interaction.response.send_modal(modal)
+
+
+class CorrectionButtonView(discord.ui.View):
+    """View attached to every AI reply with THREE independent actions:
+    👍 讚 / 👎 倒讚 (sentiment feedback, stored in feedback.json) and
+    📝 修正建議 (factual correction, stored in corrections.json).
+    They are functionally separate — different storage, different cooldowns,
+    clicking one never overwrites or blocks the others. Only the original
+    question author can use any of them."""
+
+    def __init__(self, question: str, original_answer: str, user_id: str, user_name: str, guild_id: int):
+        super().__init__(timeout=600)  # buttons active for 10 min after reply
+        self.question = question
+        self.original_answer = original_answer
+        self.user_id = user_id
+        self.user_name = user_name
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="讚", style=discord.ButtonStyle.secondary, emoji="👍")
+    async def like_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ 只有提出問題的人才能評價這個回覆。", ephemeral=True)
+            return
+        now = _time.time()
+        last = _feedback_cooldowns.get(self.user_id, 0)
+        if now - last < 15:
+            remaining = int(15 - (now - last))
+            await interaction.response.send_message(f"⏳ 請等候 {remaining} 秒後再提交評價。", ephemeral=True)
+            return
+        view = LikeReasonView(
+            question=self.question, original_answer=self.original_answer,
+            user_id=self.user_id, user_name=self.user_name,
+            guild_id=self.guild_id,
+            channel_id=interaction.channel.id if interaction.channel else 0,
+        )
+        await interaction.response.send_message(
+            "👍 請說明給予這個評價的原因：", view=view, ephemeral=True,
+        )
+
+    @discord.ui.button(label="倒讚", style=discord.ButtonStyle.secondary, emoji="👎")
+    async def dislike_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ 只有提出問題的人才能評價這個回覆。", ephemeral=True)
+            return
+        now = _time.time()
+        last = _feedback_cooldowns.get(self.user_id, 0)
+        if now - last < 15:
+            remaining = int(15 - (now - last))
+            await interaction.response.send_message(f"⏳ 請等候 {remaining} 秒後再提交評價。", ephemeral=True)
+            return
+        view = DislikeReasonView(
+            question=self.question, original_answer=self.original_answer,
+            user_id=self.user_id, user_name=self.user_name,
+            guild_id=self.guild_id,
+            channel_id=interaction.channel.id if interaction.channel else 0,
+        )
+        await interaction.response.send_message(
+            "👎 請說明給予這個評價的原因：", view=view, ephemeral=True,
+        )
 
     @discord.ui.button(label="修正建議", style=discord.ButtonStyle.secondary, emoji="📝")
     async def correction_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -7842,6 +8239,16 @@ _corrections = {"entries": []}
 _correction_cooldowns = {}  # user_id -> last submission timestamp
 _knowledge_base = {"summaries": []}
 
+FEEDBACK_FILE = os.path.join(DATA_DIR, "feedback.json")
+
+# User 讚/倒讚 feedback on AI replies. Completely separate from _corrections —
+# different file, different cooldown, different purpose (sentiment + reason
+# tracking vs. factual correction). Each entry:
+#   {id, date, rating: "like"/"dislike", reason, custom_text, image_url,
+#    question, ai_answer, user_id, user_name, guild_id, channel_id}
+_feedback = {"entries": []}
+_feedback_cooldowns = {}  # user_id -> last submission timestamp
+
 
 def load_knowledge_base():
     """Load the permanent knowledge base from local file (synced from Drive)."""
@@ -7887,6 +8294,29 @@ def save_corrections():
             f.write(json_module.dumps(_corrections, ensure_ascii=False, indent=2))
     except Exception as e:
         print(f"⚠️ 修正資料儲存失敗：{e}")
+
+
+def load_feedback():
+    """Load like/dislike feedback from local file (synced from Drive)."""
+    global _feedback
+    try:
+        if os.path.exists(FEEDBACK_FILE):
+            with open(FEEDBACK_FILE, "r", encoding="utf-8") as f:
+                _feedback = json_module.loads(f.read())
+            print(f"👍 評價資料已載入：{len(_feedback.get('entries', []))} 筆")
+    except Exception as e:
+        print(f"⚠️ 評價資料載入失敗：{e}")
+        _feedback = {"entries": []}
+
+
+def save_feedback():
+    """Save like/dislike feedback to local file (auto-synced to Drive)."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(FEEDBACK_FILE, "w", encoding="utf-8") as f:
+            f.write(json_module.dumps(_feedback, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"⚠️ 評價資料儲存失敗：{e}")
 
 
 def load_blacklist():
