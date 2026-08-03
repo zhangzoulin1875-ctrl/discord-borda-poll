@@ -4441,6 +4441,7 @@ class ChatGroup(app_commands.Group):
             fake.channel = interaction.channel
             fake.author = interaction.user
             fake.content = message
+            fake.guild = interaction.guild  # needed by generate_chat_reply's server-awareness lookup
             reply, new_facts, mod_action = await generate_chat_reply(fake, chat_ai_settings)
             # Strip [MEMORY:] from test reply
             if "[MEMORY:" in reply:
