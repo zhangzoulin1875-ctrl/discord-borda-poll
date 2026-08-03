@@ -3071,6 +3071,41 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             )
             print(f"📝 修正資料：已注入 {len(matched_corrections)} 筆到 AI 上下文")
 
+    # ── 讚/倒讚評價自動注入 ──
+    # Inject recent dislike feedback so the AI knows which answer styles
+    # are problematic, and recent like feedback as positive reinforcement.
+    # Only inject the most recent N entries (not all-time) to keep the
+    # system prompt lean and avoid stale advice.
+    try:
+        fb_entries = _feedback.get("entries", [])
+        if fb_entries:
+            recent_fb = sorted(fb_entries, key=lambda e: e.get("_ts", 0), reverse=True)[:20]
+            dislikes = [e for e in recent_fb if e.get("rating") == "dislike"]
+            likes = [e for e in recent_fb if e.get("rating") == "like"]
+            fb_lines = []
+            if dislikes:
+                fb_lines.append("⚠️ 以下回答曾收到 👎 倒讚，請避免類似問題的回覆方式：")
+                for e in dislikes[:5]:
+                    reason = e.get("reason", "?")
+                    extra = e.get("custom_text", "")
+                    q = e.get("question", "")[:60]
+                    detail = f"（{reason}）" if not extra else f"（{reason}：{extra[:80]}）"
+                    fb_lines.append(f"  • 問題：{q} {detail}")
+            if likes:
+                fb_lines.append("✅ 以下回答收到 👍 讚，這類回覆方式受使用者肯定：")
+                for e in likes[:3]:
+                    reason = e.get("reason", "?")
+                    q = e.get("question", "")[:60]
+                    fb_lines.append(f"  • 問題：{q}（{reason}）")
+            if fb_lines:
+                system_prompt += (
+                    f"\n\n─── 使用者評價回饋 ───\n"
+                    + "\n".join(fb_lines)
+                )
+                print(f"👍 評價回饋：已注入 {len(likes)} 讚 + {len(dislikes)} 倒讚到 AI 上下文")
+    except Exception as e:
+        print(f"⚠️ 評價回饋注入失敗：{e}")
+
     # Build tool list FIRST so we know whether search_discord is available
     # before constructing the system prompt (avoids adding ~500 chars of
     # search_discord instructions when the tool won't even be sent).
