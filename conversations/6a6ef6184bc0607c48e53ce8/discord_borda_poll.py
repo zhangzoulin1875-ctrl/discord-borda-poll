@@ -1213,9 +1213,24 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
     # When trying with tools, use a SHORTER timeout (12s) — if the endpoint
     # hangs on the tools param (common with non-OpenAI proxies), we fail fast
     # and retry without tools at the normal timeout, instead of burning 30s.
-    status, body_text = await _post(payload, timeout_total=12 if use_tools else 30, timeout_read=10 if use_tools else 25)
     ok = False
     data = None
+    try:
+        status, body_text = await _post(payload, timeout_total=12 if use_tools else 30, timeout_read=10 if use_tools else 25)
+    except (asyncio.TimeoutError, Exception) as e:
+        if use_tools:
+            # The endpoint HUNG on the tools param (didn't return an error,
+            # just sat there until our timeout fired). Mark it as unsupported
+            # and retry immediately WITHOUT tools at the normal timeout.
+            print(f"⚠️ Chat AI 端點帶 tools 參數逾時/錯誤（{type(e).__name__}: {e}），判定不支援 tools，立即重試...")
+            _tools_unsupported_apis.add(api_url)
+            save_tools_unsupported()
+            payload.pop("tools", None)
+            payload.pop("tool_choice", None)
+            status, body_text = await _post(payload, timeout_total=30, timeout_read=25)
+        else:
+            raise
+
     if status == 200:
         try:
             data = json_module.loads(body_text)
@@ -1225,8 +1240,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
             pass
 
     if not ok and use_tools:
-        # Whatever went wrong, it only happens with `tools` attached — assume
-        # this endpoint doesn't support function calling and never try again.
+        # Endpoint returned a non-200 or malformed response WITH tools —
+        # assume it doesn't support function calling and never try again.
         print(f"⚠️ Chat AI 端點帶 tools 參數呼叫失敗（status={status}），之後略過 tools：{body_text[:200]}")
         _tools_unsupported_apis.add(api_url)
         save_tools_unsupported()
