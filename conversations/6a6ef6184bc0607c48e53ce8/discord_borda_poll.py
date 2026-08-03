@@ -940,8 +940,8 @@ def _update_user_memory(user_id: str, user_name: str, new_facts: list):
     })
     existing_lower = set(f.lower().strip() for f in mem.get("facts", []))
     for f in new_facts:
-        f = f.strip()
-        if f and f.lower() not in existing_lower and len(f) < 100:
+        f = f.strip()[:200]  # cap individual fact length
+        if f and f.lower() not in existing_lower:
             mem["facts"].append(f)
             existing_lower.add(f.lower())
     # Cap at 20 facts (keep most recent)
@@ -1299,6 +1299,7 @@ async def server_context_refresh_loop():
         try:
             for guild in bot.guilds:
                 await _refresh_server_context(guild)
+                await asyncio.sleep(1)  # stagger to avoid rate limits
         except Exception as e:
             print(f"⚠️ 伺服器結構背景更新失敗：{e}")
         await asyncio.sleep(_SERVER_CONTEXT_TTL)
@@ -1473,7 +1474,7 @@ async def _execute_mute(message, duration: int, reason: str):
         print(f"🛡️ 濫用偵測：Bot 沒有 Moderate Members 權限，無法禁言")
         try:
             await message.channel.send(f"⚠️ 偵測到濫用行為但 Bot 缺少「禁言成員」權限。請給 Bot「Moderate Members」權限。")
-        except:
+        except Exception:
             pass
         return False
 
@@ -2407,7 +2408,7 @@ async def api_get_chat_ai_settings(request):
         "enabled": chat_ai_settings["enabled"],
         "cooldown_seconds": chat_ai_settings["cooldown_seconds"],
         "channels_whitelist": chat_ai_settings["channels_whitelist"],
-        "filter_strength": chat_ai_settings.get("filter_strength", "low"),
+        "filter_strength": chat_ai_settings.get("filter_strength", "mention"),
         "abuse_detection_enabled": chat_ai_settings.get("abuse_detection_enabled", False),
         "abuse_detection_strictness": chat_ai_settings.get("abuse_detection_strictness", "medium"),
         "abuse_mute_admins": chat_ai_settings.get("abuse_mute_admins", False),
@@ -2806,7 +2807,11 @@ async def on_ready():
     global _chat_semaphore, _shared_session
     if _chat_semaphore is None:
         _chat_semaphore = asyncio.Semaphore(5)
-    if _shared_session is None or _shared_session.closed:
+    if _shared_session is not None and not _shared_session.closed:
+        pass  # reuse existing session
+    else:
+        if _shared_session is not None and _shared_session.closed:
+            print("🔄 舊的 HTTP session 已關閉，建立新的...")
         _shared_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25),
             connector=aiohttp.TCPConnector(limit=20, limit_per_host=10)
@@ -2861,15 +2866,15 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # Ignore slash commands and prefix commands
-    if message.content.startswith("/") or message.content.startswith("!"):
+    # Ignore slash commands (but allow messages starting with "!" which could be normal text)
+    if message.content.startswith("/"):
         return
 
     # Debug: log all human messages
     content_preview = message.content[:80].replace("\n", " ") if message.content else "(empty)"
     is_mentioned = bot.user in message.mentions
     print(f"📩 on_message: #{message.channel} | {message.author.display_name}: {content_preview}")
-    print(f"   enabled={chat_ai_settings.get('enabled')}, key={'✅' if chat_ai_settings.get('api_key') else '❌'}, mentioned={is_mentioned}, filter={chat_ai_settings.get('filter_strength', 'low')}")
+    print(f"   enabled={chat_ai_settings.get('enabled')}, key={'✅' if chat_ai_settings.get('api_key') else '❌'}, mentioned={is_mentioned}, filter={chat_ai_settings.get('filter_strength', 'mention')}")
 
     # Check if chat AI is enabled and has API key
     if not chat_ai_settings.get("enabled"):
@@ -2981,6 +2986,19 @@ async def on_message(message):
         async with sem:
             async with message.channel.typing():
                 reply, new_facts, mod_action = await generate_chat_reply(message, chat_ai_settings)
+        # Save user memory if AI extracted facts (regardless of reply success)
+        if new_facts:
+            _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
+            print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
+
+        # Log conversation to log channel if configured
+        log_cfg = chat_ai_settings.get("log_channel_id")
+        if log_cfg:
+            try:
+                await _send_chat_log(message, clean or message.content, reply or "(空回覆)")
+            except Exception as log_exc:
+                print(f"   ⚠️ _send_chat_log 拋出例外（不影響回覆）：{log_exc}")
+
         if reply and reply.strip():
             chat_cooldowns[(message.channel.id, message.author.id)] = _time.time()
             print(f"   📤 發送回覆（{len(reply[:2000])} chars）到 #{message.channel}...")
@@ -2995,18 +3013,10 @@ async def on_message(message):
                 return
         else:
             print(f"⚠️ AI 回覆為空，發送 fallback 訊息")
-            await message.reply("🤔 讓我想想...", mention_author=False)
-            # Save user memory if AI extracted facts
-            if new_facts:
-                _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
-                print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
-            # Log conversation to log channel if configured
-            log_cfg = chat_ai_settings.get("log_channel_id")
-            print(f"   📝 準備寫入對話紀錄：log_channel_id={log_cfg!r} (type={type(log_cfg).__name__})")
             try:
-                await _send_chat_log(message, clean or message.content, reply)
-            except Exception as log_exc:
-                print(f"   ⚠️ _send_chat_log 拋出例外（不影響回覆）：{log_exc}")
+                await message.reply("🤔 讓我想想...", mention_author=False)
+            except Exception:
+                pass
         # ── Abuse detection: AI path (after AI call) ──
         if mod_action and chat_ai_settings.get("abuse_detection_enabled", False):
             duration = min(mod_action, 86400)
@@ -4394,7 +4404,13 @@ class ChatGroup(app_commands.Group):
             return
         try:
             await user.timeout(None, reason=f"由 {interaction.user.display_name} 手動解除禁言")
-            await interaction.response.send_message(f"✅ 已解除 {user.mention} 的禁言。", ephemeral=True)
+            # Reset abuse tracker so they don't get escalated next time
+            target_id = str(user.id)
+            if target_id in abuse_tracker:
+                abuse_tracker[target_id]["message_times"] = []
+                abuse_tracker[target_id]["warnings"] = 0
+                abuse_tracker[target_id]["total_mutes"] = 0
+            await interaction.response.send_message(f"✅ 已解除 {user.mention} 的禁言，並重置濫用追蹤紀錄。", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"❌ 解除禁言失敗：{e}", ephemeral=True)
 
