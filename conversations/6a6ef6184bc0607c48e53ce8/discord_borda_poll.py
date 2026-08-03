@@ -2371,6 +2371,32 @@ async def _drive_upload(filename: str, content: str, return_detail: bool = False
         return _ret(False, detail)
 
 
+async def _drive_list_files() -> list:
+    """List all files currently in the configured Google Drive folder.
+    Returns a list of {"id": ..., "name": ...} dicts, or [] on any failure."""
+    token = await _get_drive_access_token()
+    if not token:
+        return []
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            query = "trashed=false"
+            if folder_id:
+                query += f" and '{folder_id}' in parents"
+            list_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)&pageSize=200"
+            async with session.get(list_url, headers=headers) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    print(f"⚠️ Drive 列出檔案失敗（{resp.status}）：{text[:400]}")
+                    return []
+                data = json_module.loads(text)
+                return data.get("files", [])
+    except Exception as e:
+        print(f"⚠️ Drive list files failed: {e}")
+        return []
+
+
 async def _drive_download(filename: str) -> str:
     """Download a file from Google Drive. Returns content or None."""
     token = await _get_drive_access_token()
@@ -2410,37 +2436,46 @@ async def _drive_download(filename: str) -> str:
 
 
 async def sync_to_drive():
-    """Sync all local data files to Google Drive."""
+    """Sync ALL local data files to Google Drive.
+    Dynamically scans the local data/ directory for every *.json file —
+    no hardcoded filename list — so any new persistent state (present or
+    future) is automatically backed up without needing a code change."""
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") and not os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"):
         return
-    # Log which auth method is being used
     has_oauth = bool(os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"))
     has_sa = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"))
     cid = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
     print(f"🔄 Drive 同步開始：OAuth={'✅' if has_oauth else '❌'} SA={'✅' if has_sa else '❌'} client_id={'✅' if cid else '❌'}")
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    if not os.path.isdir(data_dir):
+        return
     ok_count = 0
     fail_count = 0
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json", "quiz_state.json", "token_usage.json"]:
+    json_filenames = [f for f in os.listdir(data_dir) if f.endswith(".json")]
+    for filename in json_filenames:
         filepath = os.path.join(data_dir, filename)
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    content = f.read()
-                success = await _drive_upload(filename, content)
-                if success:
-                    ok_count += 1
-                else:
-                    fail_count += 1
-            except Exception as e:
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+            success = await _drive_upload(filename, content)
+            if success:
+                ok_count += 1
+            else:
                 fail_count += 1
-                print(f"⚠️ Sync {filename} failed: {e}")
+        except Exception as e:
+            fail_count += 1
+            print(f"⚠️ Sync {filename} failed: {e}")
     if fail_count > 0:
-        print(f"⚠️ Drive 同步：{ok_count} 成功，{fail_count} 失敗（見上方詳細錯誤）")
+        print(f"⚠️ Drive 同步：{ok_count} 成功，{fail_count} 失敗（見上方詳細錯誤，共 {len(json_filenames)} 個檔案）")
+    else:
+        print(f"✅ Drive 同步完成：{ok_count}/{len(json_filenames)} 個檔案成功")
 
 
 async def load_from_drive():
-    """Load all data files from Google Drive on startup (overwrites local)."""
+    """Load ALL data files from Google Drive on startup (overwrites local).
+    Dynamically discovers every file actually present in the Drive folder —
+    no hardcoded filename list — so nothing is ever missed on restart/redeploy,
+    even files added by future features."""
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") and not os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"):
         print("ℹ️ Drive 未設定，略過載入")
         return
@@ -2450,24 +2485,40 @@ async def load_from_drive():
     print(f"🔄 Drive 載入開始：OAuth={'✅' if has_oauth else '❌'} SA={'✅' if has_sa else '❌'} client_id={'✅' if cid else '❌'}")
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json", "quiz_state.json", "token_usage.json"]:
+
+    files = await _drive_list_files()
+    json_files = [f for f in files if f.get("name", "").endswith(".json")]
+
+    if not json_files:
+        print("ℹ️ Drive 資料夾目前沒有任何 .json 檔（首次使用正常）")
+        return
+
+    ok_count = 0
+    fail_count = 0
+    for f in json_files:
+        filename = f["name"]
         content = await _drive_download(filename)
         if content:
             try:
                 filepath = os.path.join(data_dir, filename)
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
+                with open(filepath, "w", encoding="utf-8") as fh:
+                    fh.write(content)
                 print(f"✅ 從 Google Drive 載入 {filename}")
+                ok_count += 1
             except Exception as e:
                 print(f"⚠️ 寫入 {filename} 失敗：{e}")
+                fail_count += 1
         else:
-            print(f"ℹ️ Drive 上找不到 {filename}（首次使用正常）")
+            print(f"⚠️ 下載 {filename} 失敗（Drive 上有列出但下載回傳空內容）")
+            fail_count += 1
+    print(f"🔄 Drive 載入完成：{ok_count} 個成功，{fail_count} 個失敗（共 {len(json_files)} 個檔案）")
 
 
 async def drive_sync_loop():
-    """Background task: sync local data to Google Drive every 60 seconds."""
+    """Background task: sync local data to Google Drive every 20 seconds.
+    Kept short so a hot redeploy / crash never loses more than ~20s of state."""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(20)
         await sync_to_drive()
 
 
@@ -5772,12 +5823,61 @@ class BriefingGroup(app_commands.Group):
 # 啟動
 # ──────────────────────────────────────────────
 
+async def _graceful_shutdown_save():
+    """Save every local state file and force one last upload to Drive.
+    Called on SIGTERM (Render redeploy/restart) so we never lose the last
+    few seconds of activity between periodic sync cycles."""
+    print("🛑 收到終止訊號，儲存所有暫存資料到雲端硬碟...")
+    try:
+        save_polls_to_disk()
+        save_quiz_data()
+        save_token_usage()
+        save_briefing_settings()
+        save_chat_ai_settings()
+        save_user_memories()
+        await sync_to_drive()
+        print("✅ 關機前資料已全部同步到 Google Drive")
+    except Exception as e:
+        print(f"⚠️ 關機前儲存失敗：{e}")
+
+
+def _install_shutdown_handler(loop):
+    """Register SIGTERM/SIGINT handlers that flush state to Drive before exit."""
+    import signal as _signal
+
+    def _handler(sig_name):
+        print(f"🛑 收到 {sig_name}，準備優雅關機...")
+        asyncio.ensure_future(_shutdown_and_close())
+
+    async def _shutdown_and_close():
+        await _graceful_shutdown_save()
+        await bot.close()
+
+    try:
+        for sig in (_signal.SIGTERM, _signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: _handler(s.name))
+    except NotImplementedError:
+        # add_signal_handler isn't available on some platforms (e.g. Windows) — skip gracefully
+        print("ℹ️ 此平台不支援 signal handler，略過優雅關機設定（Linux/Render 上不受影響）")
+
+
 def main():
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
         print("⚠️  請設定環境變數 DISCORD_BOT_TOKEN")
         return
-    bot.run(token)
+
+    async def runner():
+        discord.utils.setup_logging()  # preserve discord.py's default logging (normally set up by bot.run)
+        loop = asyncio.get_event_loop()
+        _install_shutdown_handler(loop)
+        async with bot:
+            await bot.start(token)
+
+    try:
+        asyncio.run(runner())
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 if __name__ == "__main__":
