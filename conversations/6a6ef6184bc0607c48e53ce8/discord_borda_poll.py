@@ -878,7 +878,19 @@ CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "da
 
 # Per-channel cooldown tracking
 chat_cooldowns: dict = {}  # channel_id -> timestamp
-chat_generating: set = set()  # channel_ids currently generating
+# Per-USER generating lock (not per-channel) — different people in the same
+# channel can get replies simultaneously; only the same user is blocked from
+# having two in-flight requests at once (which would be redundant).
+_user_generating: set = set()  # user_ids currently generating a reply
+# Global concurrency cap: at most this many AI API calls in flight at the same
+# time. Prevents API rate-limiting / connection exhaustion when many users hit
+# the bot simultaneously. Extra requests wait their turn (don't get dropped).
+_chat_semaphore: asyncio.Semaphore = None  # initialised in on_ready
+# Shared aiohttp session for ALL outgoing HTTP calls (chat API + micropedia).
+# Creating a new session per request is wasteful and exhausts connections under
+# concurrency; one reusable session with connection pooling handles load far
+# better.
+_shared_session: aiohttp.ClientSession = None  # initialised in on_ready
 
 # ──────────────────────────────────────────────
 # 每用戶記憶系統（per-user memory）
@@ -1091,13 +1103,19 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
             api_url += "/v1/chat/completions"
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
-    timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
 
     async def _post(payload):
-        async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
-                body_text = await resp.text()
-                return resp.status, body_text
+        # Use the shared, pooled session (set up in on_ready) instead of opening
+        # a new connection per request. Falls back to a throwaway session only
+        # if the shared one isn't ready yet (very early startup edge case).
+        session = _shared_session
+        if session is None or session.closed:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)) as resp:
+                    return resp.status, await resp.text()
+        else:
+            async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)) as resp:
+                return resp.status, await resp.text()
 
     payload = {
         "model": settings.get("model", "gpt-4o-mini"),
@@ -1639,7 +1657,12 @@ async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
             return cached_content
 
     try:
-        async with aiohttp.ClientSession() as session:
+        own_session = False
+        session = _shared_session if (_shared_session and not _shared_session.closed) else None
+        if session is None:
+            session = aiohttp.ClientSession()
+            own_session = True
+        try:
             print(f"📚 Micropedia: 搜尋 '{query}'")
             titles = await _micropedia_search_api(session, query, max_results)
             if not titles:
@@ -1651,6 +1674,9 @@ async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
             _micropedia_cache[cache_key] = (_time.time(), result)
             print(f"📚 Micropedia: 取得內容 ({len(result)} chars)")
             return result
+        finally:
+            if own_session:
+                await session.close()
     except asyncio.TimeoutError:
         print(f"📚 Micropedia: 搜尋逾時 for '{query}'")
         return ""
@@ -2601,6 +2627,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    global _chat_semaphore, _shared_session
+    if _chat_semaphore is None:
+        _chat_semaphore = asyncio.Semaphore(5)
+    if _shared_session is None or _shared_session.closed:
+        _shared_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25),
+            connector=aiohttp.TCPConnector(limit=20, limit_per_host=10)
+        )
     bot.tree.add_command(PollGroup())
     bot.tree.add_command(MeetingGroup())
     bot.tree.add_command(BriefingGroup())
@@ -2673,18 +2707,22 @@ async def on_message(message):
         print(f"   ⏭️ Channel not in whitelist.")
         return
 
-    # Skip if already generating in this channel
-    if message.channel.id in chat_generating:
-        print(f"   ⏭️ Already generating in this channel.")
+    # Skip if THIS USER already has a reply being generated (prevents one person
+    # spamming; different users in the same channel are NOT blocked).
+    uid_str = str(message.author.id)
+    if uid_str in _user_generating:
+        print(f"   ⏭️ Already generating for this user.")
         return
 
-    # Check cooldown (skip for @mentions)
+    # Check cooldown — keyed per (channel, user) so one person's question
+    # doesn't cool down the entire channel for everyone else.
     if not is_mentioned:
-        last_reply = chat_cooldowns.get(message.channel.id, 0)
+        cooldown_key = (message.channel.id, message.author.id)
+        last_reply = chat_cooldowns.get(cooldown_key, 0)
         cooldown = chat_ai_settings.get("cooldown_seconds", 60)
         remaining = cooldown - (_time.time() - last_reply)
         if remaining > 0:
-            print(f"   ⏭️ Cooldown: {remaining:.0f}s remaining.")
+            print(f"   ⏭️ Cooldown for {message.author.display_name}: {remaining:.0f}s remaining.")
             return
 
     # Worthiness check
@@ -2725,12 +2763,17 @@ async def on_message(message):
                 return
 
     # Generate reply
-    chat_generating.add(message.channel.id)
+    _user_generating.add(uid_str)
     try:
-        async with message.channel.typing():
-            reply, new_facts, mod_action = await generate_chat_reply(message, chat_ai_settings)
+        # Wait for a concurrency slot (max 5 simultaneous AI calls). This makes
+        # extra requests QUEUE instead of all hitting the API at once and timing
+        # out under load. The semaphore is created in on_ready.
+        sem = _chat_semaphore or asyncio.Semaphore(5)
+        async with sem:
+            async with message.channel.typing():
+                reply, new_facts, mod_action = await generate_chat_reply(message, chat_ai_settings)
         if reply and reply.strip():
-            chat_cooldowns[message.channel.id] = _time.time()
+            chat_cooldowns[(message.channel.id, message.author.id)] = _time.time()
             await message.reply(reply[:2000], mention_author=False)
         else:
             print(f"⚠️ AI 回覆為空，發送 fallback 訊息")
@@ -2769,7 +2812,7 @@ async def on_message(message):
         except Exception:
             pass
     finally:
-        chat_generating.discard(message.channel.id)
+        _user_generating.discard(uid_str)
 
 
 # ──────────────────────────────────────────────
