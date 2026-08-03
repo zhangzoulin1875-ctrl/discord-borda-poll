@@ -1087,7 +1087,7 @@ async def call_chat_api(messages: list, settings: dict) -> str:
             api_url += "/chat/completions"
         else:
             api_url += "/v1/chat/completions"
-    timeout = aiohttp.ClientTimeout(total=45, connect=10, sock_read=40)
+    timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
     async with aiohttp.ClientSession() as session:
         async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
@@ -1553,7 +1553,7 @@ async def _search_micropedia_titles(session, query: str, max_results: int, skip_
     import urllib.parse as _up
     import re as _re
 
-    timeout = aiohttp.ClientTimeout(total=8, connect=5)
+    timeout = aiohttp.ClientTimeout(total=5, connect=3)
     search_url = f"https://www.micropedia.site/wiki/{_up.quote('特殊:搜尋')}?search={_up.quote(query)}"
 
     async with session.get(
@@ -1615,10 +1615,10 @@ def _micropedia_backoff_queries(query: str) -> list:
         candidate = _re.sub(r"[!！,，。.、~～\s]+$", "", candidate).strip()
         if len(candidate) >= 2 and candidate not in variants:
             variants.append(candidate)
-    return variants[:4]  # cap attempts to avoid hammering the site
+    return variants[:2]  # cap attempts — each one is a full network round trip
 
 
-async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
+async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
     """Search micropedia.site and return relevant article content.
     Returns formatted text with article content, or empty string if no results."""
     if not query:
@@ -1658,7 +1658,7 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
             print(f"📚 Micropedia: 找到 {len(article_titles)} 篇相關文章: {article_titles[:5]}")
 
             # ── Fetch content for each article via the MediaWiki API ──
-            timeout = aiohttp.ClientTimeout(total=8, connect=5)
+            timeout = aiohttp.ClientTimeout(total=5, connect=3)
             titles_param = "|".join(_up.quote(t) for t in article_titles)
             api_url = (
                 f"https://www.micropedia.site/api.php?action=query"
@@ -1704,6 +1704,19 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
         return ""
     except Exception as e:
         print(f"📚 Micropedia: 錯誤 for '{query}': {e}")
+        return ""
+
+
+async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
+    """Thin wrapper enforcing a hard overall time budget on the micropedia lookup
+    (search + backoff retries + content fetch combined). Individual HTTP requests
+    already have their own short timeouts, but backoff retries can still stack up —
+    this guarantees the whole lookup never meaningfully delays the chat reply,
+    no matter how many retries happen underneath."""
+    try:
+        return await asyncio.wait_for(_fetch_micropedia_inner(query, max_results), timeout=10)
+    except asyncio.TimeoutError:
+        print(f"📚 Micropedia: 整體查詢逾時（>10s），放棄 for '{query}'")
         return ""
 
 
