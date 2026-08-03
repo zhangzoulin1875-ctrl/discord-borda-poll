@@ -14,6 +14,15 @@
   @keyframes spin{to{transform:rotate(360deg)}}
   .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3ba55d;animation:pulse 1.5s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .toggle{position:relative;width:44px;height:24px;cursor:pointer}
+  .toggle input{opacity:0;width:0;height:0}
+  .toggle-slider{position:absolute;inset:0;background:#4e5058;border-radius:12px;transition:.3s}
+  .toggle-slider:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.3s}
+  .toggle input:checked + .toggle-slider{background:#3ba55d}
+  .toggle input:checked + .toggle-slider:before{transform:translateX(20px)}
+  .nav-tab{padding:6px 14px;border-radius:6px;font-size:13px;cursor:pointer;transition:.15s}
+  .nav-tab:hover{background:#3a3c43}
+  .nav-tab.active{background:#5865f2;color:#fff}
 </style>
 </head>
 <body class="bg-[#313338] text-gray-100 min-h-screen">
@@ -22,7 +31,11 @@
 <nav class="bg-[#2b2d31] border-b border-black/30 px-6 py-3 flex items-center justify-between sticky top-0 z-50">
   <div class="flex items-center gap-3">
     <button onclick="navigate('guilds')" class="text-xl font-bold text-[#5865f2]">ICEA official</button>
-    <button onclick="showAISettings()" class="text-sm text-gray-400 hover:text-white ml-4">⚙️ AI 設定</button>
+    <div class="flex items-center gap-1 ml-4">
+      <div class="nav-tab active" data-tab="polls" onclick="navigate('guilds')">📋 投票</div>
+      <div class="nav-tab" data-tab="chat-ai" onclick="showChatAIPanel()">🤖 AI 聊天</div>
+      <div class="nav-tab" data-tab="meeting-ai" onclick="showMeetingAIPanel()">📝 會議AI</div>
+    </div>
   </div>
   <div id="nav-user" class="hidden flex items-center gap-3">
     <img id="nav-avatar" class="w-8 h-8 rounded-full" src="">
@@ -41,7 +54,7 @@
 <div id="login-view" class="hidden flex-col items-center justify-center min-h-[70vh] gap-6">
   <div class="text-center">
     <h1 class="text-3xl font-bold mb-2">ICEA official</h1>
-    <p class="text-gray-400">使用 Discord 帳號登入以管理投票</p>
+    <p class="text-gray-400">使用 Discord 帳號登入以管理投票與設定</p>
   </div>
   <a href="/login" class="bg-[#5865f2] hover:bg-[#4752c4] text-white font-semibold px-8 py-3 rounded-lg transition flex items-center gap-2">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.37a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .373-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.099.246.198.373.292a.077.077 0 0 1-.006.127 12.3 12.3 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.056c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
@@ -84,6 +97,136 @@
     </div>
     <div id="detail-content"></div>
   </div>
+
+  <!-- Chat AI Settings Panel -->
+  <div id="chat-ai-view" class="hidden fade-in">
+    <div class="flex items-center gap-3 mb-6">
+      <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+      <h2 class="text-xl font-bold">🤖 AI 聊天設定</h2>
+    </div>
+    <div class="space-y-4">
+      <!-- Status toggle -->
+      <div class="bg-[#2b2d31] rounded-xl p-5 flex items-center justify-between">
+        <div>
+          <h3 class="font-semibold mb-1">AI 聊天功能</h3>
+          <p class="text-sm text-gray-400">開啟後機器人會在伺服器中回覆訊息</p>
+        </div>
+        <label class="toggle"><input type="checkbox" id="ai-enabled"><span class="toggle-slider"></span></label>
+      </div>
+      <!-- API Config -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-3">API 設定</h3>
+        <label class="block text-sm text-gray-400 mb-1">API 端點 URL</label>
+        <input id="ai-api-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/chat/completions">
+        <label class="block text-sm text-gray-400 mb-1">API Key</label>
+        <input id="ai-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
+        <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
+        <input id="ai-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+        <label class="block text-sm text-gray-400 mb-1">系統提示詞（人設）</label>
+        <textarea id="ai-system-prompt" rows="5" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] resize-none text-sm" placeholder="定義 AI 的角色和回覆風格"></textarea>
+      </div>
+      <!-- Rate Limiting -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-3">回應頻率控制</h3>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">冷卻時間（秒）</label>
+            <p class="text-xs text-gray-500 mb-2">每個用戶在同一頻道的回覆間隔（@提及不受限）</p>
+            <input id="ai-cooldown" type="number" min="0" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="60">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">全域最短間隔（秒）</label>
+            <p class="text-xs text-gray-500 mb-2">所有回應的全域最短間隔，防止被防炸踢（0=不限）</p>
+            <input id="ai-min-interval" type="number" min="0" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="0">
+          </div>
+        </div>
+      </div>
+      <!-- Filter & Micropedia -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-3">過濾與搜尋</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">訊息過濾強度</label>
+            <select id="ai-filter" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none text-sm">
+              <option value="off">關閉（回覆所有訊息）</option>
+              <option value="mention">僅提及（只回 @機器人）</option>
+              <option value="low">低（大部分訊息都回）</option>
+              <option value="medium">中（有實質內容才回）</option>
+              <option value="high">高（只有重要問題才回）</option>
+            </select>
+          </div>
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-sm">微國家百科查詢</p>
+              <p class="text-xs text-gray-400">自動從 micropedia.site 查詢微國家相關資訊</p>
+            </div>
+            <label class="toggle"><input type="checkbox" id="ai-micropedia"><span class="toggle-slider"></span></label>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">百科查詢最大結果數</label>
+            <input id="ai-micropedia-max" type="number" min="1" max="20" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="5">
+          </div>
+        </div>
+      </div>
+      <!-- Abuse Detection -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-3">濫用偵測系統</h3>
+        <div class="space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-sm">啟用濫用偵測</p>
+              <p class="text-xs text-gray-400">偵測刷屏、嚴重違規用語等行為</p>
+            </div>
+            <label class="toggle"><input type="checkbox" id="ai-abuse-enabled"><span class="toggle-slider"></span></label>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">偵測嚴格度</label>
+            <select id="ai-abuse-level" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none text-sm">
+              <option value="low">低（只抓最嚴重的）</option>
+              <option value="medium">中</option>
+              <option value="high">高（嚴格限制）</option>
+            </select>
+          </div>
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-sm">允許禁言管理員</p>
+              <p class="text-xs text-gray-400">開啟後管理員也可能被系統禁言</p>
+            </div>
+            <label class="toggle"><input type="checkbox" id="ai-abuse-admins"><span class="toggle-slider"></span></label>
+          </div>
+        </div>
+      </div>
+      <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
+    </div>
+  </div>
+
+  <!-- Meeting AI Settings Panel -->
+  <div id="meeting-ai-view" class="hidden fade-in">
+    <div class="flex items-center gap-3 mb-6">
+      <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+      <h2 class="text-xl font-bold">📝 會議紀錄 AI 設定</h2>
+    </div>
+    <div class="bg-[#2b2d31] rounded-xl p-5 space-y-4">
+      <p class="text-xs text-gray-400">用於 <code class="bg-[#1e1f22] px-1 rounded">/meeting adjourn</code> 自動整理會議紀錄。支援 OpenAI 相容 API。</p>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">API 端點 URL</label>
+        <input id="mtg-api-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/chat/completions">
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">API Key</label>
+        <input id="mtg-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
+        <input id="mtg-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">系統提示詞</label>
+        <textarea id="mtg-system-prompt" rows="6" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] resize-none text-sm" placeholder="定義 AI 整理會議紀錄的格式和風格"></textarea>
+      </div>
+      <button onclick="saveMeetingAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存會議 AI 設定</button>
+    </div>
+  </div>
 </div>
 
 <!-- Create Modal -->
@@ -123,6 +266,9 @@
   </div>
 </div>
 
+<!-- Toast -->
+<div id="toast" class="hidden fixed bottom-6 right-6 bg-[#3ba55d] text-white px-5 py-3 rounded-lg shadow-lg z-50 text-sm font-medium"></div>
+
 <script>
 let currentGuild = null;
 let currentGuildName = null;
@@ -135,6 +281,19 @@ const statusBadge = {
   ended: '<span class="text-xs px-2 py-0.5 rounded-full bg-gray-500/20 text-gray-400">已結束</span>'
 };
 const modeName = { borda: '波達計數法', simple: '一般投票' };
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  setTimeout(() => t.classList.add('hidden'), 3000);
+}
+
+function setActiveTab(tab) {
+  document.querySelectorAll('.nav-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tab);
+  });
+}
 
 function showOnly(id) {
   ['loading','login-view','main-view','error-view'].forEach(v => {
@@ -185,117 +344,60 @@ function showLoading(msg) { document.getElementById('loading-msg').textContent =
 
 function navigate(view) {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-  ['guilds-view','polls-view','detail-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   showOnly('main-view');
-  if (view === 'guilds') loadGuilds();
-  else if (view === 'polls') loadPolls();
-  else if (view === 'detail') loadDetail();
+  if (view === 'guilds') { document.getElementById('guilds-view').classList.remove('hidden'); loadGuilds(); setActiveTab('polls'); }
+  else if (view === 'polls') { document.getElementById('polls-view').classList.remove('hidden'); setActiveTab('polls'); }
+  else if (view === 'detail') { document.getElementById('detail-view').classList.remove('hidden'); setActiveTab('polls'); }
 }
 
 async function loadGuilds() {
-  showLoading('載入伺服器列表...');
-  const guilds = await api('/api/guilds');
-  if (guilds.error) { showError('載入伺服器失敗：' + guilds.error); return; }
-  showOnly('main-view');
-  document.getElementById('guilds-view').classList.remove('hidden');
-  const html = guilds.map(g => `
-    <div onclick="enterGuild('${g.id}','${escHtml(g.name)}')" class="bg-[#2b2d31] hover:bg-[#3f4147] rounded-xl p-4 cursor-pointer transition flex items-center gap-3">
-      ${g.icon_url ? `<img src="${g.icon_url}" class="w-12 h-12 rounded-full">` : `<div class="w-12 h-12 rounded-full bg-[#5865f2] flex items-center justify-center text-lg font-bold">${escHtml(g.name[0])}</div>`}
-      <div><div class="font-semibold">${escHtml(g.name)}</div><div class="text-xs text-gray-400">${g.id}</div></div>
-    </div>`).join('');
-  document.getElementById('guild-list').innerHTML = html || '<p class="text-gray-400">沒有可管理的伺服器（你需要在伺服器中有管理員權限）</p>';
+  const data = await api('/api/guilds');
+  if (data.error) { if (data.status === 401) { showOnly('login-view'); return; } showError('載入伺服器失敗：' + data.error); return; }
+  const list = document.getElementById('guild-list');
+  list.innerHTML = data.guilds.map(g => `
+    <div class="bg-[#2b2d31] rounded-xl p-4 cursor-pointer hover:bg-[#3a3c43] transition" onclick="selectGuild('${g.id}','${escAttr(g.name)}')">
+      ${g.icon_url ? `<img src="${g.icon_url}" class="w-12 h-12 rounded-xl mb-2">` : `<div class="w-12 h-12 rounded-xl bg-[#5865f2] flex items-center justify-center text-xl font-bold mb-2">${g.name[0]}</div>`}
+      <h3 class="font-semibold text-sm">${escHtml(g.name)}</h3>
+      <p class="text-xs text-gray-400">${g.polls_count || 0} 個投票</p>
+    </div>
+  `).join('');
 }
 
-function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
-function enterGuild(id, name) { currentGuild = id; currentGuildName = name; navigate('polls'); }
+function selectGuild(id, name) {
+  currentGuild = id; currentGuildName = name;
+  document.getElementById('polls-title').textContent = name;
+  navigate('polls'); loadPolls();
+}
 
 async function loadPolls() {
-  if (!currentGuild) return navigate('guilds');
-  showLoading('載入投票列表...');
-  const polls = await api(`/api/guilds/${currentGuild}/polls`);
-  if (polls.error) { showError('載入投票失敗：' + polls.error); return; }
-  showOnly('main-view');
-  document.getElementById('polls-view').classList.remove('hidden');
-  document.getElementById('polls-title').textContent = currentGuildName;
-  const html = polls.map(p => {
-    let extra = '';
-    if (p.ends_at) {
-      const endTime = new Date(p.ends_at);
-      const now = new Date();
-      if (p.status === 'active' && endTime > now) {
-        const hrs = Math.round((endTime - now) / 3600000);
-        extra += ` · ⏰ ${hrs}h 後結束`;
-      } else if (p.status === 'active') {
-        extra += ' · ⏰ 結束中';
-      }
-    }
-    if (p.description) extra += ` · 📝 ${escHtml(p.description.slice(0,30))}${p.description.length>30?'...':''}`;
-    return `
-    <div onclick="viewPoll('${escHtml(p.poll_id)}')" class="bg-[#2b2d31] hover:bg-[#3f4147] rounded-xl p-4 cursor-pointer transition">
-      <div class="flex items-center justify-between">
-        <div class="font-semibold">${escHtml(p.title)}</div>
-        ${statusBadge[p.status] || ''}
-      </div>
-      <div class="text-xs text-gray-400 mt-1">${modeName[p.mode]||p.mode} · ${p.option_count} 選項 · ${p.vote_count} 人投票${extra}</div>
+  const data = await api(`/api/guilds/${currentGuild}/polls`);
+  if (data.error) { showError('載入投票失敗：' + data.error); return; }
+  const list = document.getElementById('poll-list');
+  if (!data.polls || data.polls.length === 0) { list.innerHTML = '<p class="text-gray-400 text-center py-8">尚無投票</p>'; return; }
+  list.innerHTML = data.polls.map(p => {
+    const badge = statusBadge[p.status] || p.status;
+    const mode = modeName[p.mode] || p.mode;
+    return `<div class="bg-[#2b2d31] rounded-xl p-4 cursor-pointer hover:bg-[#3a3c43] transition" onclick="selectPoll('${p.poll_id}')">
+      <div class="flex items-center justify-between mb-1"><h3 class="font-semibold">${escHtml(p.title)}</h3>${badge}</div>
+      <p class="text-xs text-gray-400">${mode} · ${p.vote_count} 票 · ${p.option_count} 選項</p>
     </div>`;
   }).join('');
-  document.getElementById('poll-list').innerHTML = html || '<p class="text-gray-400 py-4">尚無投票，點右上角按鈕建立</p>';
 }
 
-function viewPoll(id) { currentPollId = id; navigate('detail'); }
+function selectPoll(id) { currentPollId = id; navigate('detail'); loadDetail(); }
 
 async function loadDetail() {
-  if (!currentGuild || !currentPollId) return navigate('polls');
-  showLoading('載入投票詳情...');
-  const p = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`);
-  if (p.error) { showError('載入投票失敗：' + p.error); return; }
-  showOnly('main-view');
-  document.getElementById('detail-view').classList.remove('hidden');
-  renderDetail(p);
-
-  // Auto-refresh for active polls every 10 seconds
-  if (p.status === 'active') {
-    refreshTimer = setInterval(async () => {
-      const fresh = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`);
-      if (!fresh.error && fresh.status === 'active') {
-        renderDetail(fresh);
-      } else {
-        // Poll ended or error - stop refreshing and reload final state
-        if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-        const final = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`);
-        if (!final.error) renderDetail(final);
-      }
-    }, 10000);
-  }
-}
-
-function renderDetail(p) {
-  const tally = {};
-  if (p.status !== 'drafting') {
-    if (p.mode === 'borda') {
-      Object.values(p.votes || {}).forEach(rank => {
-        if (Array.isArray(rank)) {
-          rank.forEach((optIdx, pos) => { const txt = p.options[optIdx]?.text || '?'; tally[txt] = (tally[txt]||0) + (p.options.length - 1 - pos); });
-        }
-      });
-    } else {
-      Object.values(p.votes || {}).forEach(idx => { const txt = p.options[idx]?.text || '?'; tally[txt] = (tally[txt]||0) + 1; });
-    }
-  }
-  const ranked = Object.entries(tally).sort((a,b) => b[1]-a[1]);
+  const data = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`);
+  if (data.error) { showError('載入詳情失敗：' + data.error); return; }
+  const p = data.poll;
+  const ranked = (p.results || []).sort((a,b) => b[1] - a[1]);
   const medals = ['🥇','🥈','🥉'];
   const unit = p.mode === 'borda' ? '分' : '票';
-
   let actions = '';
-  if (p.status === 'drafting') {
-    actions = `
-      <button onclick="startPoll()" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded-lg text-sm font-semibold">▶ 啟動投票</button>
-      <button onclick="showOptionModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">+ 新增選項</button>`;
-  } else if (p.status === 'active') {
-    actions = `<button onclick="endPoll()" class="bg-orange-600 hover:bg-orange-700 px-4 py-2 rounded-lg text-sm font-semibold">⏹ 結束投票</button>`;
-  }
-  actions += ` <button onclick="deletePoll()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg text-sm font-semibold">🗑 刪除投票</button>`;
-
+  if (p.status === 'drafting') actions += `<button onclick="startPoll()" class="bg-green-600 hover:bg-green-700 px-3 py-1.5 rounded-lg text-sm">▶ 啟動投票</button>`;
+  if (p.status === 'active') { actions += `<button onclick="endPoll()" class="bg-red-600 hover:bg-red-700 px-3 py-1.5 rounded-lg text-sm">⏹ 結束投票</button>`; actions += `<button onclick="showOptionModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-3 py-1.5 rounded-lg text-sm">+ 選項</button>`; }
+  actions += `<button onclick="deletePoll()" class="bg-gray-600 hover:bg-gray-700 px-3 py-1.5 rounded-lg text-sm">🗑 刪除</button>`;
   let voteDetail = '';
   const voteEntries = Object.entries(p.votes || {});
   if (voteEntries.length > 0) {
@@ -312,169 +414,119 @@ function renderDetail(p) {
   } else {
     voteDetail = '<p class="text-gray-400 text-sm mt-4">📭 尚無投票紀錄</p>';
   }
-
-  // Description section
   let descHtml = '';
-  if (p.description) {
-    descHtml = `<div class="bg-[#1e1f22] rounded-lg px-4 py-3 mb-4 text-sm text-gray-300">📝 ${escHtml(p.description)}</div>`;
-  }
-
-  // End time display
+  if (p.description) descHtml = `<div class="bg-[#1e1f22] rounded-lg px-4 py-3 mb-4 text-sm text-gray-300">📝 ${escHtml(p.description)}</div>`;
   let endsAtHtml = '';
   if (p.ends_at) {
     const endTime = new Date(p.ends_at);
     const now = new Date();
     if (p.status === 'active') {
       const remaining = endTime - now;
-      if (remaining > 0) {
-        const hrs = Math.floor(remaining / 3600000);
-        const mins = Math.floor((remaining % 3600000) / 60000);
-        endsAtHtml = `<div class="text-xs text-yellow-400 mb-2">⏰ 剩餘 ${hrs}小時 ${mins}分鐘（${endTime.toLocaleString('zh-TW')} 自動結束）</div>`;
-      } else {
-        endsAtHtml = `<div class="text-xs text-red-400 mb-2">⏰ 已過截止時間（結束中...）</div>`;
-      }
-    } else {
-      endsAtHtml = `<div class="text-xs text-gray-400 mb-2">⏰ 截止：${endTime.toLocaleString('zh-TW')}</div>`;
-    }
+      if (remaining > 0) { const hrs = Math.floor(remaining/3600000); const mins = Math.floor((remaining%3600000)/60000); endsAtHtml = `<div class="text-xs text-yellow-400 mb-2">⏰ 剩餘 ${hrs}小時 ${mins}分鐘（${endTime.toLocaleString('zh-TW')} 自動結束）</div>`; }
+      else endsAtHtml = `<div class="text-xs text-red-400 mb-2">⏰ 已過截止時間（結束中...）</div>`;
+    } else endsAtHtml = `<div class="text-xs text-gray-400 mb-2">⏰ 截止：${endTime.toLocaleString('zh-TW')}</div>`;
   }
-
-  // Live indicator for active polls
   let liveBadge = '';
-  if (p.status === 'active') {
-    liveBadge = ' <span class="text-xs text-green-400"><span class="live-dot"></span> 即時更新中</span>';
-  }
-
+  if (p.status === 'active') liveBadge = ' <span class="text-xs text-green-400"><span class="live-dot"></span> 即時更新中</span>';
   const optionHtml = ranked.length
     ? ranked.map(([txt, score], i) => `<div class="flex items-center justify-between bg-[#1e1f22] rounded-lg px-3 py-2 mb-1"><span>${medals[i]||`#${i+1}`} ${escHtml(txt)}</span><span class="font-bold text-[#5865f2]">${score} ${unit}</span></div>`).join('')
     : p.options.map((o,i)=>`<div class="bg-[#1e1f22] rounded-lg px-3 py-2 mb-1">${i+1}. ${escHtml(o.text)}</div>`).join('');
-
   document.getElementById('detail-content').innerHTML = `
     <div class="bg-[#2b2d31] rounded-xl p-6">
-      <div class="flex items-center justify-between mb-4">
-        <div>
-          <h3 class="text-xl font-bold">${escHtml(p.title)}${liveBadge}</h3>
-          <div class="text-sm text-gray-400 mt-1">${modeName[p.mode]||p.mode} · ${statusBadge[p.status]||p.status} · ID: ${escHtml(p.poll_id)}</div>
-        </div>
-      </div>
-      ${descHtml}
-      ${endsAtHtml}
-      <div class="flex flex-wrap gap-2 mb-4">${actions}</div>
-      <div>
-        <h4 class="text-sm font-semibold text-gray-400 mb-2">選項與結果</h4>
-        ${optionHtml}
-      </div>
-      ${voteDetail}
+      <div class="flex items-center justify-between mb-4"><div><h3 class="text-xl font-bold">${escHtml(p.title)}${liveBadge}</h3><div class="text-sm text-gray-400 mt-1">${modeName[p.mode]||p.mode} · ${statusBadge[p.status]||p.status} · ID: ${escHtml(p.poll_id)}</div></div></div>
+      ${descHtml}${endsAtHtml}<div class="flex flex-wrap gap-2 mb-4">${actions}</div><div><h4 class="text-sm font-semibold text-gray-400 mb-2">選項與結果</h4>${optionHtml}</div>${voteDetail}
     </div>`;
 }
 
-async function startPoll() {
-  if (!confirm('確定啟動投票？')) return;
-  const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/start`, 'POST');
-  if (r.error) { alert('啟動失敗：' + r.error); return; }
-  loadDetail();
-}
-async function endPoll() {
-  if (!confirm('確定結束投票？')) return;
-  const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/end`, 'POST');
-  if (r.error) { alert('結束失敗：' + r.error); return; }
-  loadDetail();
-}
-async function deletePoll() {
-  if (!confirm('確定刪除此投票？此操作無法復原。')) return;
-  const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`, 'DELETE');
-  if (r.error) { alert('刪除失敗：' + r.error); return; }
-  navigate('polls');
-}
-
-function showCreateModal() {
-  document.getElementById('create-title').value = '';
-  document.getElementById('create-description').value = '';
-  document.getElementById('create-mode').value = 'borda';
-  document.getElementById('create-duration').value = '0';
-  document.getElementById('create-options').innerHTML = '';
-  addOptionInput(); addOptionInput();
-  document.getElementById('create-modal').classList.remove('hidden');
-}
+async function startPoll() { if (!confirm('確定啟動投票？')) return; const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/start`,'POST'); if (r.error) { alert('啟動失敗：'+r.error); return; } loadDetail(); }
+async function endPoll() { if (!confirm('確定結束投票？')) return; const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/end`,'POST'); if (r.error) { alert('結束失敗：'+r.error); return; } loadDetail(); }
+async function deletePoll() { if (!confirm('確定刪除此投票？此操作無法復原。')) return; const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}`,'DELETE'); if (r.error) { alert('刪除失敗：'+r.error); return; } navigate('polls'); }
+function showCreateModal() { document.getElementById('create-title').value=''; document.getElementById('create-description').value=''; document.getElementById('create-mode').value='borda'; document.getElementById('create-duration').value='0'; document.getElementById('create-options').innerHTML=''; addOptionInput(); addOptionInput(); document.getElementById('create-modal').classList.remove('hidden'); }
 function closeCreateModal() { document.getElementById('create-modal').classList.add('hidden'); }
-function addOptionInput() {
-  const div = document.createElement('div');
-  div.className = 'flex gap-2';
-  div.innerHTML = `<input class="flex-1 bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2]" placeholder="選項文字"><button onclick="this.parentElement.remove()" class="text-red-400 px-2">✕</button>`;
-  document.getElementById('create-options').appendChild(div);
-}
-async function createPoll() {
-  const title = document.getElementById('create-title').value.trim();
-  const description = document.getElementById('create-description').value.trim();
-  const mode = document.getElementById('create-mode').value;
-  const duration = parseInt(document.getElementById('create-duration').value) || 0;
-  const options = [...document.querySelectorAll('#create-options input')].map(i => i.value.trim()).filter(Boolean);
-  if (!title) return alert('請輸入標題');
-  if (options.length < 2) return alert('至少需要 2 個選項');
-  const r = await api(`/api/guilds/${currentGuild}/polls`, 'POST', { title, mode, options, description, duration_hours: duration });
-  if (r.error) { alert('建立失敗：' + r.error); return; }
-  closeCreateModal(); loadPolls();
-}
-
-function showOptionModal() { document.getElementById('option-text').value = ''; document.getElementById('option-modal').classList.remove('hidden'); }
+function addOptionInput() { const div=document.createElement('div'); div.className='flex gap-2'; div.innerHTML=`<input class="flex-1 bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2]" placeholder="選項文字"><button onclick="this.parentElement.remove()" class="text-red-400 px-2">✕</button>`; document.getElementById('create-options').appendChild(div); }
+async function createPoll() { const title=document.getElementById('create-title').value.trim(); const description=document.getElementById('create-description').value.trim(); const mode=document.getElementById('create-mode').value; const duration=parseInt(document.getElementById('create-duration').value)||0; const options=[...document.querySelectorAll('#create-options input')].map(i=>i.value.trim()).filter(Boolean); if(!title) return alert('請輸入標題'); if(options.length<2) return alert('至少需要2個選項'); const r=await api(`/api/guilds/${currentGuild}/polls`,'POST',{title,mode,options,description,duration_hours:duration}); if(r.error){alert('建立失敗：'+r.error);return;} closeCreateModal(); loadPolls(); }
+function showOptionModal() { document.getElementById('option-text').value=''; document.getElementById('option-modal').classList.remove('hidden'); }
 function closeOptionModal() { document.getElementById('option-modal').classList.add('hidden'); }
-async function addOption() {
-  const text = document.getElementById('option-text').value.trim();
-  if (!text) return alert('請輸入選項文字');
-  const r = await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/options`, 'POST', { text });
-  if (r.error) { alert('新增失敗：' + r.error); return; }
-  closeOptionModal(); loadDetail();
-}
+async function addOption() { const text=document.getElementById('option-text').value.trim(); if(!text) return alert('請輸入選項文字'); const r=await api(`/api/guilds/${currentGuild}/polls/${currentPollId}/options`,'POST',{text}); if(r.error){alert('新增失敗：'+r.error);return;} closeOptionModal(); loadDetail(); }
+async function logout() { await fetch('/logout',{method:'POST',credentials:'include'}); location.reload(); }
 
-async function logout() { await fetch('/logout', { method: 'POST', credentials: 'include' }); location.reload(); }
-// AI Settings
-async function showAISettings() {
-  document.getElementById('ai-modal').classList.remove('hidden');
-  // Load current settings
-  const s = await api('/api/ai-settings');
-  if (s.error) { alert('載入設定失敗：' + s.error); return; }
+function escHtml(s) { return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escAttr(s) { return String(s||'').replace(/'/g,"\\'"); }
+
+// ── Chat AI Settings ──
+async function showChatAIPanel() {
+  ['guilds-view','polls-view','detail-view','meeting-ai-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  document.getElementById('chat-ai-view').classList.remove('hidden');
+  showOnly('main-view');
+  setActiveTab('chat-ai');
+  const s = await api('/api/chat-ai-settings');
+  if (s.error) { if (s.status === 401) { showOnly('login-view'); return; } alert('載入 AI 設定失敗：' + s.error); return; }
+  document.getElementById('ai-enabled').checked = s.enabled || false;
   document.getElementById('ai-api-url').value = s.api_url || '';
-  document.getElementById('ai-api-key').placeholder = s.has_key ? '已設定（' + s.api_key_masked + '）輸入新值可覆蓋' : '輸入 API Key';
+  document.getElementById('ai-api-key').placeholder = s.api_key_masked ? `已設定（${s.api_key_masked}）輸入新值可覆蓋` : '輸入 API Key';
   document.getElementById('ai-model').value = s.model || 'gpt-4o-mini';
   document.getElementById('ai-system-prompt').value = s.system_prompt || '';
+  document.getElementById('ai-cooldown').value = s.cooldown_seconds ?? 60;
+  document.getElementById('ai-min-interval').value = s.min_response_interval ?? 0;
+  document.getElementById('ai-filter').value = s.filter_strength || 'mention';
+  document.getElementById('ai-micropedia').checked = s.micropedia_enabled !== false;
+  document.getElementById('ai-micropedia-max').value = s.micropedia_max_results ?? 5;
+  document.getElementById('ai-abuse-enabled').checked = s.abuse_detection_enabled || false;
+  document.getElementById('ai-abuse-level').value = s.abuse_detection_strictness || 'medium';
+  document.getElementById('ai-abuse-admins').checked = s.abuse_mute_admins || false;
 }
 
-function closeAISettings() { document.getElementById('ai-modal').classList.add('hidden'); }
-
-async function saveAISettings() {
+async function saveChatAISettings() {
   const data = {
+    enabled: document.getElementById('ai-enabled').checked,
     api_url: document.getElementById('ai-api-url').value.trim(),
-    api_key: document.getElementById('ai-api-key').value.trim(),
     model: document.getElementById('ai-model').value.trim(),
     system_prompt: document.getElementById('ai-system-prompt').value,
+    cooldown_seconds: parseInt(document.getElementById('ai-cooldown').value) || 0,
+    min_response_interval: parseInt(document.getElementById('ai-min-interval').value) || 0,
+    filter_strength: document.getElementById('ai-filter').value,
+    micropedia_enabled: document.getElementById('ai-micropedia').checked,
+    micropedia_max_results: parseInt(document.getElementById('ai-micropedia-max').value) || 5,
+    abuse_detection_enabled: document.getElementById('ai-abuse-enabled').checked,
+    abuse_detection_strictness: document.getElementById('ai-abuse-level').value,
+    abuse_mute_admins: document.getElementById('ai-abuse-admins').checked,
   };
-  if (!data.api_key) delete data.api_key; // Don't overwrite with empty
+  const apiKey = document.getElementById('ai-api-key').value.trim();
+  if (apiKey) data.api_key = apiKey;
+  const r = await api('/api/chat-ai-settings', 'PUT', data);
+  if (r.error) { alert('儲存失敗：' + r.error); return; }
+  showToast('✅ AI 聊天設定已儲存！');
+}
+
+// ── Meeting AI Settings ──
+async function showMeetingAIPanel() {
+  ['guilds-view','polls-view','detail-view','chat-ai-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  document.getElementById('meeting-ai-view').classList.remove('hidden');
+  showOnly('main-view');
+  setActiveTab('meeting-ai');
+  const s = await api('/api/ai-settings');
+  if (s.error) { if (s.status === 401) { showOnly('login-view'); return; } alert('載入設定失敗：' + s.error); return; }
+  document.getElementById('mtg-api-url').value = s.api_url || '';
+  document.getElementById('mtg-api-key').placeholder = s.has_key ? '已設定（輸入新值可覆蓋）' : '輸入 API Key';
+  document.getElementById('mtg-model').value = s.model || 'gpt-4o-mini';
+  document.getElementById('mtg-system-prompt').value = s.system_prompt || '';
+}
+
+async function saveMeetingAISettings() {
+  const data = {
+    api_url: document.getElementById('mtg-api-url').value.trim(),
+    api_key: document.getElementById('mtg-api-key').value.trim(),
+    model: document.getElementById('mtg-model').value.trim(),
+    system_prompt: document.getElementById('mtg-system-prompt').value,
+  };
+  if (!data.api_key) delete data.api_key;
   const r = await api('/api/ai-settings', 'PUT', data);
   if (r.error) { alert('儲存失敗：' + r.error); return; }
-  closeAISettings();
-  alert('✅ AI 設定已儲存！');
+  showToast('✅ 會議 AI 設定已儲存！');
 }
 
 init();
 </script>
-<!-- AI Settings Modal -->
-<div id="ai-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-  <div class="bg-[#2b2d31] rounded-xl p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto">
-    <h3 class="text-lg font-bold mb-4">⚙️ AI 會議紀錄設定</h3>
-    <p class="text-xs text-gray-400 mb-4">用於 <code class="bg-[#1e1f22] px-1 rounded">/meeting adjourn</code> 自動整理會議紀錄。支援 OpenAI 相容 API。</p>
-    <label class="block text-sm text-gray-400 mb-1">API 端點 URL</label>
-    <input id="ai-api-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/chat/completions">
-    <label class="block text-sm text-gray-400 mb-1">API Key</label>
-    <input id="ai-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
-    <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
-    <input id="ai-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
-    <label class="block text-sm text-gray-400 mb-1">系統提示詞（System Prompt）</label>
-    <textarea id="ai-system-prompt" rows="6" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] resize-none text-sm" placeholder="定義 AI 整理會議紀錄的格式和風格"></textarea>
-    <div class="flex justify-end gap-2 mt-4">
-      <button onclick="closeAISettings()" class="px-4 py-2 text-gray-400 hover:text-white">取消</button>
-      <button onclick="saveAISettings()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg font-semibold text-sm">儲存</button>
-    </div>
-  </div>
-</div>
 
 </body>
 </html>

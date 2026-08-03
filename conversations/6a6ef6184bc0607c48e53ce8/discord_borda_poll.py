@@ -3438,6 +3438,7 @@ async def api_get_chat_ai_settings(request):
         "system_prompt": chat_ai_settings["system_prompt"],
         "enabled": chat_ai_settings["enabled"],
         "cooldown_seconds": chat_ai_settings["cooldown_seconds"],
+        "min_response_interval": chat_ai_settings.get("min_response_interval", 0),
         "channels_whitelist": chat_ai_settings["channels_whitelist"],
         "filter_strength": chat_ai_settings.get("filter_strength", "mention"),
         "abuse_detection_enabled": chat_ai_settings.get("abuse_detection_enabled", False),
@@ -3472,6 +3473,16 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["micropedia_enabled"] = body["micropedia_enabled"]
     if "micropedia_max_results" in body:
         chat_ai_settings["micropedia_max_results"] = int(body["micropedia_max_results"])
+    if "min_response_interval" in body:
+        chat_ai_settings["min_response_interval"] = int(body["min_response_interval"])
+    if "filter_strength" in body:
+        chat_ai_settings["filter_strength"] = body["filter_strength"]
+    if "abuse_detection_enabled" in body:
+        chat_ai_settings["abuse_detection_enabled"] = body["abuse_detection_enabled"]
+    if "abuse_detection_strictness" in body:
+        chat_ai_settings["abuse_detection_strictness"] = body["abuse_detection_strictness"]
+    if "abuse_mute_admins" in body:
+        chat_ai_settings["abuse_mute_admins"] = body["abuse_mute_admins"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
