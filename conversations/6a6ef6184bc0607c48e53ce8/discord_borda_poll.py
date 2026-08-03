@@ -3532,7 +3532,7 @@ async def on_ready():
         if _shared_session is not None and _shared_session.closed:
             print("🔄 舊的 HTTP session 已關閉，建立新的...")
         _shared_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25),
+            timeout=aiohttp.ClientTimeout(total=300, connect=10, sock_read=60),
             connector=aiohttp.TCPConnector(limit=20, limit_per_host=10)
         )
     # Check message_content intent
