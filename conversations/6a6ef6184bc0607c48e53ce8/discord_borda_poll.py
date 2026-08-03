@@ -3740,7 +3740,7 @@ async def on_ready():
 @bot.event
 async def setup_hook():
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception:
@@ -6735,6 +6735,134 @@ class BriefingGroup(app_commands.Group):
         )
         embed.set_footer(text="使用 /briefing daily_set, weekly_set 設定 | daily_off, weekly_off 關閉")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ──────────────────────────────────────────────
+# 國號評價 (Nation Name Rating)
+# ──────────────────────────────────────────────
+
+async def _rate_nation_name(nation_name: str, ai_settings: dict) -> dict:
+    """Call the AI to rate a micronation name and return structured result.
+    Returns {"score": float, "comment": str, "suggestions": str, "error": str?}."""
+    prompt = (
+        f"你是微國家社群的國號評鑑專家。請對以下國號進行評價。\n\n"
+        f"國號：「{nation_name}」\n\n"
+        f"請從以下維度綜合評分（1.0 到 10.0，精確到小數第一位）：\n"
+        f"- 獨特性與原創性\n"
+        f"- 微國家適配性（是否像一個國家的名字而非隨機詞組）\n"
+        f"- 美感與音韻\n"
+        f"- 政治意涵與辨識度\n"
+        f"- 實用性（是否好記、好唸、不容易混淆）\n\n"
+        f"請嚴格按以下格式回覆（不要加其他多餘內容）：\n"
+        f"評分：X.X\n"
+        f"評論：（100-200字的中文評論，說明為什麼給這個分數，包含優點和缺點）\n"
+        f"建議：（50-100字的具體修改建議，如果已經很好可以說「無需修改」並簡短說明原因）"
+    )
+
+    messages = [
+        {"role": "system", "content": "你是一位專業的微國家國號評鑑專家，用繁體中文回答，語氣專業但親切。"},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        result = await call_chat_api(
+            messages,
+            {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
+        )
+        text = ""
+        if isinstance(result, dict):
+            choices = result.get("choices", [])
+            if choices:
+                text = choices[0].get("message", {}).get("content", "")
+        if not text:
+            return {"error": "AI 回應為空"}
+
+        # Parse the response
+        import re as _re
+        score_match = _re.search(r'評分[：:]\s*(\d+(?:\.\d+)?)', text)
+        score = float(score_match.group(1)) if score_match else 0.0
+        if score > 10:
+            score = 10.0
+        elif score < 0:
+            score = 0.0
+
+        comment_match = _re.search(r'評論[：:]\s*(.+?)(?=建議[：:]|$)', text, _re.DOTALL)
+        comment = comment_match.group(1).strip() if comment_match else ""
+
+        suggest_match = _re.search(r'建議[：:]\s*(.+)', text, _re.DOTALL)
+        suggestions = suggest_match.group(1).strip() if suggest_match else ""
+
+        if not comment:
+            comment = text[:200]
+
+        return {"score": score, "comment": comment, "suggestions": suggestions}
+    except asyncio.TimeoutError:
+        return {"error": "AI 回應逾時"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+class NationGroup(app_commands.Group):
+    """微國家相關指令群組"""
+
+    @app_commands.command(name="name_rate", description="評價微國家國號（1-10分 + AI評論 + 修改建議）")
+    @app_commands.describe(nation_name="要評價的國號名稱")
+    async def nation_name_rate(self, interaction: discord.Interaction, nation_name: str):
+        await interaction.response.defer()  # public, not ephemeral
+
+        nation_name = nation_name.strip()
+        if not nation_name or len(nation_name) > 100:
+            await interaction.followup.send("❌ 國號名稱無效（請輸入 1-100 字）。")
+            return
+
+        # Use the briefing AI settings (more reliable than the chat AI settings)
+        result = await _rate_nation_name(nation_name, ai_settings)
+
+        if "error" in result:
+            await interaction.followup.send(f"❌ 評價失敗：{result['error']}")
+            return
+
+        score = result["score"]
+        comment = result["comment"]
+        suggestions = result["suggestions"]
+
+        # Color based on score: red < 4, orange 4-6, yellow 6-8, green > 8
+        if score >= 8:
+            color = discord.Color.from_rgb(76, 175, 80)   # green
+        elif score >= 6:
+            color = discord.Color.from_rgb(255, 193, 7)    # amber
+        elif score >= 4:
+            color = discord.Color.from_rgb(255, 152, 0)    # orange
+        else:
+            color = discord.Color.from_rgb(244, 67, 54)    # red
+
+        # Score bar (10 blocks)
+        filled = int(round(score))
+        bar = "█" * filled + "░" * (10 - filled)
+
+        embed = discord.Embed(
+            title=f"🏷️ 國號評價：{nation_name}",
+            color=color,
+        )
+        embed.add_field(
+            name=f"📊 評分　{score:.1f} / 10.0",
+            value=f"`{bar}`",
+            inline=False,
+        )
+        embed.add_field(
+            name="📝 AI 評論",
+            value=comment[:1024] if comment else "（無評論）",
+            inline=False,
+        )
+        embed.add_field(
+            name="💡 修改建議",
+            value=suggestions[:1024] if suggestions else "（無建議）",
+            inline=False,
+        )
+        embed.set_footer(text=f"由 {interaction.user.display_name} 發起評價")
+        embed.timestamp = interaction.created_at
+
+        await interaction.followup.send(embed=embed)
 
 
 # ──────────────────────────────────────────────
