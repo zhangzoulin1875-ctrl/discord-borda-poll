@@ -854,7 +854,8 @@ DEFAULT_CHAT_AI_PROMPT = """你是一個微國家組織的 Discord 成員，也�
 - 語氣自然輕鬆，像群組裡的一個朋友
 - 不要使用 markdown 標題（## ###）
 - 不要每次都長篇大論，有時候一句話就夠了
-- 可以開玩笑，但不要冒犯別人"""
+- 可以開玩笑，但不要冒犯別人
+- 如果對話涉及微國家相關知識，你會收到微國家百科的查詢資料，請優先參考這些資料回答"""
 
 chat_ai_settings = {
     "api_url": os.getenv("CHAT_AI_API_URL", "https://api.openai.com/v1/chat/completions"),
@@ -2096,6 +2097,13 @@ async def api_get_chat_ai_settings(request):
         "enabled": chat_ai_settings["enabled"],
         "cooldown_seconds": chat_ai_settings["cooldown_seconds"],
         "channels_whitelist": chat_ai_settings["channels_whitelist"],
+        "filter_strength": chat_ai_settings.get("filter_strength", "low"),
+        "abuse_detection_enabled": chat_ai_settings.get("abuse_detection_enabled", False),
+        "abuse_detection_strictness": chat_ai_settings.get("abuse_detection_strictness", "medium"),
+        "abuse_mute_admins": chat_ai_settings.get("abuse_mute_admins", False),
+        "log_channel_id": chat_ai_settings.get("log_channel_id"),
+        "micropedia_enabled": chat_ai_settings.get("micropedia_enabled", True),
+        "micropedia_max_results": chat_ai_settings.get("micropedia_max_results", 5),
     })
 
 
