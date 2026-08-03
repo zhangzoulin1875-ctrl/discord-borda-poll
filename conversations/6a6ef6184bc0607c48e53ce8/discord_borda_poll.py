@@ -1548,6 +1548,143 @@ _tools_unsupported_apis: set = set()
 _MICROPEDIA_SKIP_PREFIXES = ("特殊:", "File:", "Category:", "Template:", "Help:",
                              "Special:", "MediaWiki:", "User:", "Talk:", "Project:", "分類:")
 
+# ── Bigram title-matching: robust auto-search that doesn't depend on the AI's
+# tool-calling ability or judgment ──
+#
+# Real-world finding: micropedia.site's own search (list=search) does basic
+# MySQL matching with NO Chinese word segmentation. A full phrase like
+# "山海事件" or "琉璃是誰" returns ZERO hits even though the real articles
+# ("山海密謀事件", "琉璃") plainly exist — only a bare substring/short term
+# reliably matches. Relying on the AI to guess the "right" short term (via
+# tool calling) only works if the LLM provider actually supports tool calling
+# (many self-hosted / third-party OpenAI-compatible proxies quietly don't).
+#
+# So instead: cache the wiki's full list of page titles (a few thousand — cheap
+# to hold in memory) and do our OWN fuzzy matching in Python using Chinese
+# character bigrams (2-char sliding windows). This runs automatically on every
+# message, for free, with no dependency on tool-calling support at all — it
+# directly fixes the "琉璃是誰" / "山海事件" style failures we saw in production.
+_micropedia_titles_cache = {"titles": [], "fetched_at": 0.0}
+_MICROPEDIA_TITLES_TTL = 6 * 3600  # refresh the title list every 6 hours
+
+
+def _bigrams(s: str) -> set:
+    """2-char sliding-window bigrams of a string (with whitespace stripped).
+    Single-character strings fall back to the character itself."""
+    import re as _re
+    s = _re.sub(r"\s+", "", s)
+    if len(s) < 2:
+        return {s} if s else set()
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def _fuzzy_match_titles(message: str, titles: list, top_n: int = 5) -> list:
+    """Score every cached wiki title against the message by bigram containment
+    (what fraction of the TITLE's bigrams also appear in the message) and
+    return the best matching titles. Tuned against real production queries:
+    - short titles (<=3 chars / <=2 bigrams) require FULL containment, to
+      avoid one common bigram matching tons of unrelated short titles.
+    - longer titles require >=60% containment AND >=2 overlapping bigrams,
+      to avoid weak, coincidental single-bigram matches.
+    This deliberately favors precision — silently finding nothing is fine
+    (no context gets injected); a bad/irrelevant match is not."""
+    msg_bg = _bigrams(message)
+    if not msg_bg:
+        return []
+    scored = []
+    for t in titles:
+        tbg = _bigrams(t)
+        if not tbg:
+            continue
+        overlap = msg_bg & tbg
+        if not overlap:
+            continue
+        containment = len(overlap) / len(tbg)
+        if len(tbg) <= 2:
+            if containment < 1.0:
+                continue
+        else:
+            if containment < 0.4 or len(overlap) < 2:
+                continue
+        scored.append((t, containment, len(overlap), len(t)))
+    # Best containment first, then more overlap, then shorter/more specific title
+    scored.sort(key=lambda x: (-x[1], -x[2], x[3]))
+    return [t for t, _, _, _ in scored[:top_n]]
+
+
+async def _fetch_all_micropedia_titles(session) -> list:
+    """Fetch every page title on the wiki via the MediaWiki allpages API
+    (paginated, ~4000+ pages as of writing — small enough to hold in memory).
+    JSON API only, no scraping."""
+    import urllib.parse as _up
+    all_titles = []
+    apfrom = ""
+    timeout = aiohttp.ClientTimeout(total=8, connect=3)
+    for _ in range(30):  # hard cap on pagination loops as a safety net
+        url = f"https://www.micropedia.site/api.php?action=query&list=allpages&aplimit=500&format=json"
+        if apfrom:
+            url += f"&apfrom={_up.quote(apfrom)}"
+        async with session.get(url, headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"}, timeout=timeout) as resp:
+            if resp.status != 200:
+                break
+            data = await resp.json()
+        pages = data.get("query", {}).get("allpages", [])
+        all_titles.extend(p["title"] for p in pages)
+        apcontinue = data.get("continue", {}).get("apcontinue")
+        if not apcontinue:
+            break
+        apfrom = apcontinue
+    return [t for t in all_titles if not any(t.startswith(p) for p in _MICROPEDIA_SKIP_PREFIXES)]
+
+
+async def _get_micropedia_titles(session) -> list:
+    """Cached accessor for the full title list — refreshes every 6h."""
+    now = _time.time()
+    if _micropedia_titles_cache["titles"] and (now - _micropedia_titles_cache["fetched_at"] < _MICROPEDIA_TITLES_TTL):
+        return _micropedia_titles_cache["titles"]
+    try:
+        titles = await _fetch_all_micropedia_titles(session)
+        if titles:
+            _micropedia_titles_cache["titles"] = titles
+            _micropedia_titles_cache["fetched_at"] = now
+            print(f"📚 Micropedia: 已快取 {len(titles)} 個頁面標題")
+        return _micropedia_titles_cache["titles"]
+    except Exception as e:
+        print(f"📚 Micropedia: 標題清單取得失敗：{e}")
+        return _micropedia_titles_cache["titles"]  # stale cache (possibly empty) is still safe to use
+
+
+async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> str:
+    """Automatically find and fetch relevant micropedia articles for a chat
+    message — runs on EVERY message (cheap: cached titles + in-memory bigram
+    scoring), with NO dependency on the AI deciding to search or on tool-calling
+    support. This is what actually fixes real-world misses like '琉璃是誰' /
+    '山海事件' where the wiki's own search returns nothing for the full phrase."""
+    if not message_text or len(message_text.strip()) < 2:
+        return ""
+    try:
+        own_session = False
+        session = _shared_session if (_shared_session and not _shared_session.closed) else None
+        if session is None:
+            session = aiohttp.ClientSession()
+            own_session = True
+        try:
+            titles = await _get_micropedia_titles(session)
+            if not titles:
+                return ""
+            matched = _fuzzy_match_titles(message_text, titles, top_n=max_results)
+            if not matched:
+                return ""
+            print(f"📚 Micropedia: 自動比對到 {len(matched)} 篇文章: {matched}")
+            content = await _micropedia_fetch_content(session, matched)
+            return content
+        finally:
+            if own_session:
+                await session.close()
+    except Exception as e:
+        print(f"📚 Micropedia: 自動比對錯誤：{e}")
+        return ""
+
 
 def _clean_wikitext(text: str) -> str:
     """Remove MediaWiki markup to get clean text."""
@@ -1816,26 +1953,51 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     else:
         full_prompt = f"─── 當前訊息 ───\n{user_name}: {clean_content}"
 
-    # ── Micropedia: let the AI search it itself via a tool, instead of us
-    # guessing the query with regex. Tell it the tool exists (if enabled).
+    # ── Micropedia ──
+    # Two layers, so this works regardless of whether the AI provider even
+    # supports tool calling:
+    # 1. AUTO context injection (always runs, no AI judgment needed): fuzzy
+    #    bigram-match the raw message against the wiki's full cached title
+    #    list and inject any matched articles' content directly. This is what
+    #    actually fixes real misses like "琉璃是誰" / "山海事件" where the
+    #    wiki's own search returns zero hits for the full phrase.
+    # 2. The search_micropedia TOOL, for models that support tool calling, to
+    #    dig further with a different term if the auto context isn't enough.
     micropedia_enabled = settings.get("micropedia_enabled", True)
+    max_results = settings.get("micropedia_max_results", 5)
+
     if micropedia_enabled:
+        try:
+            auto_context = await asyncio.wait_for(
+                _micropedia_auto_context(clean_content, max_results), timeout=10
+            )
+        except asyncio.TimeoutError:
+            print(f"📚 Micropedia: 自動比對逾時（>10s），跳過")
+            auto_context = ""
+        if auto_context:
+            system_prompt += (
+                f"\n\n─── 微國家百科資料（已自動比對到相關文章）───\n"
+                f"以下是根據使用者訊息，自動從微國家百科 (micropedia.site) 比對到的相關文章。"
+                f"請優先參考這些資料來回答問題；如果資料裡沒有直接答案，可以合理推論，"
+                f"但不要無中生有捏造細節。\n{auto_context}"
+            )
+            print(f"📚 Micropedia: 已自動注入 {len(auto_context)} chars 到 AI 上下文")
+
         system_prompt += (
-            f"\n\n─── 微國家百科 (search_micropedia 工具) ───\n"
-            f"你有一個 search_micropedia 工具，可以查詢微國家百科 (micropedia.site) 的正式資料。"
+            f"\n\n─── search_micropedia 工具 ───\n"
+            f"你還有一個 search_micropedia 工具，可以再查詢微國家百科的其他資料"
+            f"（例如上面自動比對到的資料不夠、或你懷疑還有其他相關文章時）。"
             f"當使用者問到任何組織內部的人事時地物、事件、專有名詞，而你不確定或沒印象時，"
             f"呼叫這個工具查證，不要憑印象亂猜或編造內容。"
-            f"如果第一次查詢的關鍵字找不到結果，試試看換成更短的核心詞再查一次"
+            f"如果查詢的關鍵字找不到結果，試試看換成更短的核心詞再查一次"
             f"（這個 wiki 的搜尋不支援中文斷詞，完整片語常常查不到，但拆開的核心詞可以）。"
-            f"查到資料就優先採用；如果嘗試過仍然查不到，才誠實告知使用者你沒有找到相關資料。"
+            f"如果自動比對和你的查詢都找不到資料，才誠實告知使用者你沒有找到相關資料。"
         )
 
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": full_prompt},
     ]
-
-    max_results = settings.get("micropedia_max_results", 5)
     tools = [_MICROPEDIA_TOOL_SCHEMA] if micropedia_enabled else None
 
     async def _run_tool_loop():
