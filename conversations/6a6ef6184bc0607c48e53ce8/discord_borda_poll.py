@@ -40,6 +40,7 @@
     /chat model <model>        - 設定模型
     /chat prompt <prompt>      - 設定人設
     /chat cooldown <seconds>   - 設定冷卻時間
+  /chat min_interval <seconds> - 設定全域最短回應間隔（防炸）
     /chat channel <action> [channel] - 管理頻道白名單
     /chat test <message>       - 測試 AI 回覆
     /chat status               - 查看設定
@@ -894,12 +895,14 @@ chat_ai_settings = {
     "log_channel_id": None,  # channel ID for AI action logs (mute, warnings, etc.)
     "micropedia_enabled": True,  # auto-lookup micropedia.site for micronation questions
     "micropedia_max_results": 5,  # max articles to fetch per query
+    "min_response_interval": 0,  # 全域最短回應間隔（秒），0=不限。防止機器人被防炸系統踢
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
 
 # Per-channel cooldown tracking
 chat_cooldowns: dict = {}  # channel_id -> timestamp
+_last_global_reply: float = 0  # 全域上次回應時間（所有頻道共用）
 # ──────────────────────────────────────────────
 # Token 使用量追蹤（Token Usage Tracking）
 # ──────────────────────────────────────────────
@@ -3970,6 +3973,7 @@ async def setup_hook():
 
 @bot.event
 async def on_message(message):
+    global _last_global_reply
     # Ignore bot messages
     if message.author.bot:
         return
@@ -4009,6 +4013,16 @@ async def on_message(message):
     if uid_str in _user_generating:
         print(f"   ⏭️ Already generating for this user.")
         return
+
+    # ── 全域最短回應間隔（防止機器人被防炸踢）──
+    # 這是硬性限制，不管是不是@提及都適用。即使多人同時@，
+    # 機器人也不會在間隔內連續發訊息。
+    _global_interval = chat_ai_settings.get("min_response_interval", 0)
+    if _global_interval > 0:
+        _global_remaining = _global_interval - (_time.time() - _last_global_reply)
+        if _global_remaining > 0:
+            print(f"   ⏭️ 全域回應間隔：還需 {_global_remaining:.1f}s（設定 {_global_interval}s）")
+            return
 
     # Check cooldown — keyed per (channel, user) so one person's question
     # doesn't cool down the entire channel for everyone else.
@@ -4109,6 +4123,7 @@ async def on_message(message):
 
         if reply and reply.strip():
             chat_cooldowns[(message.channel.id, message.author.id)] = _time.time()
+            _last_global_reply = _time.time()
             print(f"   📤 發送回覆（{len(reply[:2000])} chars）到 #{message.channel}...")
             try:
                 await message.reply(reply[:2000], mention_author=False)
@@ -5691,6 +5706,8 @@ class ChatGroup(app_commands.Group):
         lines.append(f"")
         lines.append(f"**5. 冷卻時間**")
         lines.append(f"  {chat_ai_settings.get('cooldown_seconds', 60)} 秒（@提及不受限）")
+        _min_int = chat_ai_settings.get("min_response_interval", 0)
+        lines.append(f"  全域最短間隔：{'關閉' if _min_int == 0 else f'{_min_int} 秒'}")
         lines.append(f"")
         filter_str = chat_ai_settings.get("filter_strength", "mention")
         filter_descs = {
@@ -5757,6 +5774,8 @@ class ChatGroup(app_commands.Group):
         embed.add_field(name="API Key", value=key_set, inline=True)
         embed.add_field(name="模型", value=f"`{model}`", inline=True)
         embed.add_field(name="冷卻時間", value=f"{cooldown} 秒", inline=True)
+        _min_int = chat_ai_settings.get("min_response_interval", 0)
+        embed.add_field(name="全域最短間隔", value=f"{_min_int} 秒" if _min_int > 0 else "關閉", inline=True)
         filter_str = chat_ai_settings.get("filter_strength", "mention")
         filter_names = {"off": "關閉", "low": "低", "medium": "中", "high": "高"}
         embed.add_field(name="過濾強度", value=filter_names.get(filter_str, filter_str), inline=True)
