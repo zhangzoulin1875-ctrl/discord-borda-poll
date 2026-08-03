@@ -869,6 +869,8 @@ chat_ai_settings = {
     "abuse_detection_strictness": "medium",  # low / medium / high
     "abuse_mute_admins": False,
     "log_channel_id": None,  # channel ID for AI action logs (mute, warnings, etc.)
+    "micropedia_enabled": True,  # auto-lookup micropedia.site for micronation questions
+    "micropedia_max_results": 5,  # max articles to fetch per query
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -965,6 +967,10 @@ def load_chat_ai_settings():
                 loaded["abuse_mute_admins"] = False
             if "log_channel_id" not in loaded:
                 loaded["log_channel_id"] = None
+            if "micropedia_enabled" not in loaded:
+                loaded["micropedia_enabled"] = True
+            if "micropedia_max_results" not in loaded:
+                loaded["micropedia_max_results"] = 5
             chat_ai_settings.update(loaded)
             print("✅ 載入 AI 聊天設定")
     except Exception as e:
@@ -1455,6 +1461,189 @@ async def _execute_mute(message, duration: int, reason: str):
         return False
 
 
+# ──────────────────────────────────────────────
+# 微國家百科 (micropedia.site) 整合
+# ──────────────────────────────────────────────
+
+_micropedia_cache: dict = {}  # query -> (timestamp, content)
+_MICROPEDIA_CACHE_TTL = 600  # 10 minutes
+
+# Keywords that suggest a question might be about micronations
+_MICROPEDIA_TRIGGER_KEYWORDS = [
+    "微國家", "micronation", "百科", "微國", "micropedia",
+    "微國家百科", "獨立", "建國", "主權", "國號",
+    "共和", "帝國", "王國", "公國", "聯邦", "條約",
+    "君主", "元首", "政權", "國際組織", "架空國",
+    "建國者", "獨立宣言", "建國史",
+]
+
+
+def _clean_wikitext(text: str) -> str:
+    """Remove MediaWiki markup to get clean text."""
+    import re as _re
+    # Remove templates {{...}} (non-nested)
+    text = _re.sub(r"\{\{[^}]*\}\}", "", text)
+    # Remove wiki links [[link|display]] -> display
+    text = _re.sub(r"\[\[[^]]*?\|([^]]*)\]\]", r"\1", text)
+    text = _re.sub(r"\[\[([^]]*)\]\]", r"\1", text)
+    # Remove external links [url text] -> text
+    text = _re.sub(r"\[https?://\S+\s+([^]]*)\]", r"\1", text)
+    text = _re.sub(r"\[https?://\S+\]", "", text)
+    # Remove HTML tags
+    text = _re.sub(r"<[^>]+>", "", text)
+    # Remove wiki tables {| ... |}
+    text = _re.sub(r"\{\|.*?\|\}", "", text, flags=_re.DOTALL)
+    # Remove headings markup =...=
+    text = _re.sub(r"^=+\s*(.*?)\s*=+$", r"\1", text, flags=_re.MULTILINE)
+    # Remove list markers
+    text = _re.sub(r"^[\*#:]+\s*", "", text, flags=_re.MULTILINE)
+    # Remove excess whitespace
+    text = _re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+    return text
+
+
+def _should_search_micropedia(content: str, is_mentioned: bool) -> bool:
+    """Check if a message is likely about micronations and worth a micropedia lookup."""
+    if not content:
+        return False
+    lower = content.lower()
+    # If explicitly mentions micropedia/micronation keywords, always search
+    for kw in _MICROPEDIA_TRIGGER_KEYWORDS:
+        if kw in lower or kw in content:
+            return True
+    # If mentioned and message is a question, search
+    if is_mentioned and ("?" in content or "？" in content):
+        # But skip very short questions
+        if len(content.strip()) > 10:
+            return True
+    return False
+
+
+def _extract_search_query(content: str, bot_id: int) -> str:
+    """Extract a search query from the message content."""
+    # Remove bot mentions
+    query = content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
+    # Remove common question words and particles
+    for word in ["請問", "你知道", "什麼是", "什麼", "嗎", "呢", "吧", "啊", "嗎？", "？",
+                 "告訴我", "介紹", "一下", "如何", "為什麼", "怎麼", "有哪些", "有哪些",
+                 "查一下", "搜尋", "查詢", "幫我", "可以", "請", "你"]:
+        query = query.replace(word, "")
+    query = query.strip()
+    # If query is too long, truncate
+    if len(query) > 50:
+        query = query[:50]
+    return query
+
+
+async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
+    """Search micropedia.site and return relevant article content.
+    Returns formatted text with article content, or empty string if no results."""
+    if not query:
+        return ""
+
+    # Check cache
+    cache_key = query.lower()
+    if cache_key in _micropedia_cache:
+        cached_time, cached_content = _micropedia_cache[cache_key]
+        if _time.time() - cached_time < _MICROPEDIA_CACHE_TTL:
+            print(f"📚 Micropedia: 使用快取結果 for '{query}'")
+            return cached_content
+
+    timeout = aiohttp.ClientTimeout(total=15, connect=8)
+
+    try:
+        # Step 1: Scrape search results page to find article titles
+        import urllib.parse as _up
+        search_url = f"https://www.micropedia.site/wiki/{_up.quote('特殊:搜尋')}?search={_up.quote(query)}"
+        print(f"📚 Micropedia: 搜尋 '{query}' -> {search_url}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                search_url,
+                headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"},
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    print(f"📚 Micropedia: 搜尋頁回傳 {resp.status}")
+                    return ""
+                html = await resp.text()
+
+            # Extract article titles from search results
+            import re as _re
+            raw_links = _re.findall(r'<a[^>]*href="(/wiki/[^"]*)"[^>]*title="([^"]*)"', html)
+            article_titles = []
+            seen = set()
+            skip_prefixes = ("特殊", "File:", "Category:", "Template:", "Help:",
+                             "Special:", "MediaWiki:", "User:", "Talk:", "Project:")
+            for href, title in raw_links:
+                if any(href.startswith(p) or title.startswith(p) for p in skip_prefixes):
+                    continue
+                if title in seen or not title:
+                    continue
+                seen.add(title)
+                article_titles.append(title)
+                if len(article_titles) >= max_results:
+                    break
+
+            if not article_titles:
+                print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果")
+                _micropedia_cache[cache_key] = (_time.time(), "")
+                return ""
+
+            print(f"📚 Micropedia: 找到 {len(article_titles)} 篇相關文章: {article_titles[:3]}...")
+
+            # Step 2: Fetch content for each article via MediaWiki API
+            # Batch: join titles with | for a single API call
+            titles_param = "|".join(_up.quote(t) for t in article_titles)
+            api_url = (
+                f"https://www.micropedia.site/api.php?action=query"
+                f"&titles={titles_param}"
+                f"&prop=revisions&rvprop=content&format=json&redirects=1"
+            )
+
+            async with session.get(
+                api_url,
+                headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"},
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    print(f"📚 Micropedia: API 回傳 {resp.status}")
+                    return ""
+                data = await resp.json()
+
+            content_parts = []
+            pages = data.get("query", {}).get("pages", {})
+            for pid, page in pages.items():
+                if pid == "-1" or "missing" in page:
+                    continue
+                revs = page.get("revisions", [])
+                if not revs:
+                    continue
+                wikitext = revs[0].get("*", "")
+                if not wikitext or len(wikitext) < 10:
+                    continue
+                clean = _clean_wikitext(wikitext)
+                if clean and len(clean) > 10:
+                    title = page.get("title", "?")
+                    # Truncate very long articles
+                    if len(clean) > 2000:
+                        clean = clean[:2000] + "..."
+                    content_parts.append(f"【{title}】\n{clean}")
+
+            result = "\n\n".join(content_parts)
+            _micropedia_cache[cache_key] = (_time.time(), result)
+            print(f"📚 Micropedia: 取得 {len(content_parts)} 篇文章內容 ({len(result)} chars)")
+            return result
+
+    except asyncio.TimeoutError:
+        print(f"📚 Micropedia: 搜尋逾時 for '{query}'")
+        return ""
+    except Exception as e:
+        print(f"📚 Micropedia: 錯誤 for '{query}': {e}")
+        return ""
+
+
 async def generate_chat_reply(message, settings: dict) -> tuple:
     """Generate a reply for a chat message with brief context, server awareness, and per-user memory.
     Returns (reply_text, new_facts_or_None, mod_action_or_None)."""
@@ -1542,6 +1731,26 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         full_prompt = f"以下是近期頻道對話（其他人說的，僅供參考）：\n{context}\n\n─── 當前訊息 ───\n{user_name}: {clean_content}"
     else:
         full_prompt = f"─── 當前訊息 ───\n{user_name}: {clean_content}"
+
+    # ── Micropedia lookup ──
+    micropedia_context = ""
+    if settings.get("micropedia_enabled", True):
+        bot_id = bot.user.id
+        if _should_search_micropedia(clean_content, False):
+            search_query = _extract_search_query(message.content, bot_id)
+            if search_query:
+                max_results = settings.get("micropedia_max_results", 5)
+                micropedia_context = await _fetch_micropedia(search_query, max_results)
+
+    if micropedia_context:
+        system_prompt += (
+            f"\n\n─── 微國家百科資料 ───\n"
+            f"以下是從微國家百科 (micropedia.site) 查詢到的相關資料。"
+            f"請優先參考這些資料來回答關於微國家的問題。"
+            f"如果資料中沒有答案，可以根據你自己的知識補充，但要標明哪些來自百科、哪些是你的推測。\n"
+            f"{micropedia_context}"
+        )
+        print(f"📚 Micropedia: 已將百科資料加入 AI 上下文 ({len(micropedia_context)} chars)")
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -1909,6 +2118,10 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["cooldown_seconds"] = int(body["cooldown_seconds"])
     if "channels_whitelist" in body:
         chat_ai_settings["channels_whitelist"] = body["channels_whitelist"]
+    if "micropedia_enabled" in body:
+        chat_ai_settings["micropedia_enabled"] = body["micropedia_enabled"]
+    if "micropedia_max_results" in body:
+        chat_ai_settings["micropedia_max_results"] = int(body["micropedia_max_results"])
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -4022,8 +4235,54 @@ class ChatGroup(app_commands.Group):
         log_ch_id = chat_ai_settings.get("log_channel_id")
         log_ch_val = f"<#{log_ch_id}>" if log_ch_id else "未設定"
         embed.add_field(name="紀錄頻道", value=log_ch_val, inline=True)
-        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat debug")
+        # Micropedia status
+        micro_on = chat_ai_settings.get("micropedia_enabled", True)
+        micro_max = chat_ai_settings.get("micropedia_max_results", 5)
+        embed.add_field(name="微國家百科", value=f"{'✅' if micro_on else '❌'} (最多{micro_max}篇)", inline=True)
+        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat micropedia | /chat debug")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="micropedia", description="開關微國家百科查詢功能（管理員限定）")
+    @app_commands.describe(action="開啟或關閉", max_results="每次查詢最多抓取幾篇文章（1-10）")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="開啟", value="on"),
+        app_commands.Choice(name="關閉", value="off"),
+    ])
+    async def chat_micropedia(self, interaction: discord.Interaction, action: app_commands.Choice[str] = None, max_results: int = None):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        if action:
+            chat_ai_settings["micropedia_enabled"] = (action.value == "on")
+            save_chat_ai_settings()
+        if max_results is not None:
+            chat_ai_settings["micropedia_max_results"] = max(1, min(10, max_results))
+            save_chat_ai_settings()
+        status = "✅ 開啟" if chat_ai_settings.get("micropedia_enabled", True) else "❌ 關閉"
+        max_r = chat_ai_settings.get("micropedia_max_results", 5)
+        await interaction.response.send_message(
+            f"📚 微國家百科查詢：{status}\n每次查詢最多抓取：{max_r} 篇文章\n"
+            f"來源：https://www.micropedia.site/",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="micropedia_test", description="測試微國家百科查詢（管理員限定）")
+    @app_commands.describe(query="要搜尋的關鍵字")
+    async def chat_micropedia_test(self, interaction: discord.Interaction, query: str):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        max_r = chat_ai_settings.get("micropedia_max_results", 5)
+        result = await _fetch_micropedia(query, max_r)
+        if not result:
+            await interaction.followup.send(f"📚 搜尋「{query}」沒有找到結果。", ephemeral=True)
+        else:
+            # Truncate for Discord (2000 char limit)
+            display = result[:1900]
+            if len(result) > 1900:
+                display += "..."
+            await interaction.followup.send(f"📚 搜尋「{query}」的結果：\n\n{display}", ephemeral=True)
 
 
 # ──────────────────────────────────────────────
