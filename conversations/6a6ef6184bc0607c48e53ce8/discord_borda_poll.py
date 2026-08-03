@@ -2921,6 +2921,19 @@ async def on_message(message):
         return
     print(f"   ✅ Worth replying! Generating...")
 
+    # Check if bot has permission to send messages in this channel
+    if message.guild:
+        perms = message.channel.permissions_for(message.guild.me)
+        if not perms or not perms.send_messages:
+            print(f"   ❌ Bot 沒有在 #{message.channel} 發送訊息的權限！請檢查頻道權限設定。")
+            try:
+                # Try sending via a different method — sometimes read_messages is enough
+                # to receive but send_messages is denied
+                pass
+            except Exception:
+                pass
+            return
+
     # ── Abuse detection: fast path (before AI call) ──
     if chat_ai_settings.get("abuse_detection_enabled", False):
         strictness = chat_ai_settings.get("abuse_detection_strictness", "medium")
@@ -2963,7 +2976,16 @@ async def on_message(message):
                 reply, new_facts, mod_action = await generate_chat_reply(message, chat_ai_settings)
         if reply and reply.strip():
             chat_cooldowns[(message.channel.id, message.author.id)] = _time.time()
-            await message.reply(reply[:2000], mention_author=False)
+            print(f"   📤 發送回覆（{len(reply[:2000])} chars）到 #{message.channel}...")
+            try:
+                await message.reply(reply[:2000], mention_author=False)
+                print(f"   ✅ 回覆已發送")
+            except discord.Forbidden:
+                print(f"   ❌ 發送失敗：Bot 沒有在 #{message.channel} 發送訊息的權限！")
+                return
+            except Exception as send_err:
+                print(f"   ❌ 發送失敗：{send_err}")
+                return
         else:
             print(f"⚠️ AI 回覆為空，發送 fallback 訊息")
             await message.reply("🤔 讓我想想...", mention_author=False)
