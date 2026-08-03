@@ -1087,7 +1087,7 @@ async def call_chat_api(messages: list, settings: dict) -> str:
             api_url += "/chat/completions"
         else:
             api_url += "/v1/chat/completions"
-    timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
+    timeout = aiohttp.ClientTimeout(total=45, connect=10, sock_read=40)
     async with aiohttp.ClientSession() as session:
         async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
@@ -1553,7 +1553,7 @@ async def _search_micropedia_titles(session, query: str, max_results: int, skip_
     import urllib.parse as _up
     import re as _re
 
-    timeout = aiohttp.ClientTimeout(total=15, connect=8)
+    timeout = aiohttp.ClientTimeout(total=8, connect=5)
     search_url = f"https://www.micropedia.site/wiki/{_up.quote('特殊:搜尋')}?search={_up.quote(query)}"
 
     async with session.get(
@@ -1658,7 +1658,7 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
             print(f"📚 Micropedia: 找到 {len(article_titles)} 篇相關文章: {article_titles[:5]}")
 
             # ── Fetch content for each article via the MediaWiki API ──
-            timeout = aiohttp.ClientTimeout(total=15, connect=8)
+            timeout = aiohttp.ClientTimeout(total=8, connect=5)
             titles_param = "|".join(_up.quote(t) for t in article_titles)
             api_url = (
                 f"https://www.micropedia.site/api.php?action=query"
@@ -1731,7 +1731,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
 
     system_prompt += f"\n\n─── 重要：使用者識別 ───\n你現在正在和「{user_name}」對話。"
     system_prompt += f"\n只有「{user_name}」現在說的話，才是關於這位使用者的資訊。"
-    system_prompt += "\n近期對話中其他人的發言，只是上下文參考，絕對不能把它們當作{user_name}的資訊。"
+    system_prompt += f"\n近期對話中其他人的發言，只是上下文參考，絕對不能把它們當作{user_name}的資訊。"
 
     if facts:
         memory_text = "\n".join(f"- {f}" for f in facts)
@@ -1746,6 +1746,8 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         f"\n- 近期對話中其他人說的話，絕對不要記到 {user_name} 的記憶裡"
         f"\n- 如果 {user_name} 沒有提到關於自己的新資訊，寫 [MEMORY: none]"
         f"\n- 這行不會顯示給用戶看"
+        f"\n- ⚠️ 絕對不要把「其他人」說的內容當作 {user_name} 說的"
+        f"\n- ⚠️ 回答問題時，不要混淆不同人的資訊"
     )
 
     # Add abuse detection instruction if enabled
@@ -1843,6 +1845,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         memory_str = parts[1].rstrip("]").strip()
         if memory_str.lower() != "none" and memory_str:
             new_facts = [f.strip() for f in memory_str.split(",") if f.strip()]
+
+    # Final safety: if reply is empty after all parsing, return None so caller can handle
+    if not actual_reply:
+        actual_reply = None
 
     return actual_reply, new_facts, mod_action
 
@@ -2679,6 +2685,9 @@ async def on_message(message):
         if reply and reply.strip():
             chat_cooldowns[message.channel.id] = _time.time()
             await message.reply(reply[:2000], mention_author=False)
+        else:
+            print(f"⚠️ AI 回覆為空，發送 fallback 訊息")
+            await message.reply("🤔 讓我想想...", mention_author=False)
             # Save user memory if AI extracted facts
             if new_facts:
                 _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
@@ -2700,8 +2709,18 @@ async def on_message(message):
                     f"🛡️ {message.author.mention} AI 偵測到不當行為，已被禁言 {duration//60} 分鐘。",
                     mention_author=False
                 )
+    except asyncio.TimeoutError:
+        print(f"⚠️ Chat AI timeout (API call took too long)")
+        try:
+            await message.reply("⏰ 回覆逾時，請稍後再試。", mention_author=False)
+        except Exception:
+            pass
     except Exception as e:
         print(f"⚠️ Chat AI error: {e}")
+        try:
+            await message.reply("⚠️ 發生錯誤，請稍後再試。", mention_author=False)
+        except Exception:
+            pass
     finally:
         chat_generating.discard(message.channel.id)
 
