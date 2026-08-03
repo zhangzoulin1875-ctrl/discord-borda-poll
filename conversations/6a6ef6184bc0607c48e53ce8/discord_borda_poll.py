@@ -895,6 +895,18 @@ def load_user_memories():
         if os.path.exists(USER_MEMORIES_FILE):
             with open(USER_MEMORIES_FILE, "r", encoding="utf-8") as f:
                 user_memories = json_module.load(f)
+            # One-time purge of cross-contaminated memories (v1 fix)
+            purge_flag = os.path.join(os.path.dirname(USER_MEMORIES_FILE), ".memory_purge_v2.done")
+            if not os.path.exists(purge_flag):
+                if user_memories:
+                    print(f"🧹 記憶系統 v2 修復：清除所有舊記憶（可能已串號）")
+                    user_memories = {}
+                    save_user_memories()
+                    with open(purge_flag, "w") as pf:
+                        pf.write("done")
+                else:
+                    with open(purge_flag, "w") as pf:
+                        pf.write("done")
             print(f"✅ 載入 {len(user_memories)} 位使用者記憶")
     except Exception as e:
         print(f"⚠️ Failed to load user memories: {e}")
@@ -1026,17 +1038,29 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     mem = user_memories.get(user_id, {})
     facts = mem.get("facts", [])
 
-    # Build system prompt with memory
+    # Build system prompt with memory — STRICTLY scoped to current user
     system_prompt = settings["system_prompt"]
+    system_prompt += f"\n\n─── 重要：使用者識別 ───\n你現在正在和「{user_name}」對話。"
+    system_prompt += f"\n只有「{user_name}」現在說的話，才是關於這位使用者的資訊。"
+    system_prompt += "\n近期對話中其他人的發言，只是上下文參考，絕對不能把它們當作{user_name}的資訊。"
+
     if facts:
         memory_text = "\n".join(f"- {f}" for f in facts)
-        system_prompt += f"\n\n你對這位使用者（{user_name}）的記憶：\n{memory_text}"
+        system_prompt += f"\n\n你對「{user_name}」的記憶：\n{memory_text}"
+    else:
+        system_prompt += f"\n\n你目前對「{user_name}」沒有記憶。"
+
     system_prompt += (
-        "\n\n每次回覆最後加一行 [MEMORY: 1-3個要記住關於這位使用者的重點，用逗號分隔]。"
-        "如果沒有新東西值得記就寫 [MEMORY: none]。這行不會顯示給用戶看。"
+        f"\n\n─── 記憶提取規則 ───\n"
+        f"回覆最後加一行 [MEMORY: ...]，只記住「{user_name}」本人說的關於自己的資訊。"
+        f"\n- 只記 {user_name} 親口說的事（身分、偏好、近況等）"
+        f"\n- 近期對話中其他人說的話，絕對不要記到 {user_name} 的記憶裡"
+        f"\n- 如果 {user_name} 沒有提到關於自己的新資訊，寫 [MEMORY: none]"
+        f"\n- 這行不會顯示給用戶看"
     )
 
     # Collect brief context (last 5 messages before this one)
+    # Clearly label each message with the speaker's name
     context_lines = []
     try:
         async for msg in message.channel.history(limit=5, before=message):
@@ -1044,9 +1068,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                 continue
             name = msg.author.display_name
             if msg.author.id == bot.user.id:
-                context_lines.insert(0, f"你: {msg.content[:150]}")
+                context_lines.insert(0, f"AI: {msg.content[:150]}")
             else:
-                context_lines.insert(0, f"{name}: {msg.content[:150]}")
+                # Clearly mark that this is someone else speaking, not the current user
+                context_lines.insert(0, f"[其他人] {name}: {msg.content[:150]}")
     except Exception:
         pass
 
@@ -1055,10 +1080,11 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     bot_id = bot.user.id
     clean_content = message.content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
 
+    # Build the user prompt — clearly separate context from current user's message
     if context:
-        full_prompt = f"近期對話:\n{context}\n\n{user_name}: {clean_content}"
+        full_prompt = f"以下是近期頻道對話（其他人說的，僅供參考）：\n{context}\n\n─── 當前訊息 ───\n{user_name}: {clean_content}"
     else:
-        full_prompt = f"{user_name}: {clean_content}"
+        full_prompt = f"─── 當前訊息 ───\n{user_name}: {clean_content}"
 
     messages = [
         {"role": "system", "content": system_prompt},
