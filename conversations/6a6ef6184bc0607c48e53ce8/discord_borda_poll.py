@@ -1301,6 +1301,46 @@ def _get_mute_duration(user_id: str, strictness: str, severity_override: int = 0
     return escalation[idx]
 
 
+async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name: str = ""):
+    """Send a conversation log to the designated log channel."""
+    log_ch_id = chat_ai_settings.get("log_channel_id")
+    if not log_ch_id or not message.guild:
+        return
+    try:
+        log_ch = message.guild.get_channel(log_ch_id)
+        if not log_ch:
+            return
+
+        author = message.author
+        user_text = user_content[:300]
+        if len(user_content) > 300:
+            user_text += "..."
+        ai_text = ai_reply[:1000]
+        if len(ai_reply) > 1000:
+            ai_text += "..."
+
+        embed = discord.Embed(
+            title="💬 AI 對話紀錄",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(
+            name=f"👤 {author.display_name}",
+            value=f"> {user_text}",
+            inline=False
+        )
+        embed.add_field(
+            name="🤖 AI 回覆",
+            value=f"> {ai_text}",
+            inline=False
+        )
+        ch_name = channel_name or (message.channel.name if hasattr(message.channel, "name") else "?")
+        embed.set_footer(text=f"#{ch_name} | User ID: {author.id}")
+        await log_ch.send(embed=embed)
+    except Exception as e:
+        print(f"⚠️ 對話紀錄發送失敗：{e}")
+
+
 async def _execute_mute(message, duration: int, reason: str):
     """Execute Discord timeout on the message author."""
     member = message.author
@@ -2310,6 +2350,8 @@ async def on_message(message):
             if new_facts:
                 _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
                 print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
+            # Log conversation to log channel if configured
+            await _send_chat_log(message, clean_content, reply)
         # ── Abuse detection: AI path (after AI call) ──
         if mod_action and chat_ai_settings.get("abuse_detection_enabled", False):
             duration = min(mod_action, 86400)
@@ -3689,7 +3731,7 @@ class ChatGroup(app_commands.Group):
         except Exception as e:
             await interaction.response.send_message(f"❌ 解除禁言失敗：{e}", ephemeral=True)
 
-    @app_commands.command(name="log_channel", description="設定/清除 AI 紀錄頻道（管理員限定）")
+    @app_commands.command(name="log_channel", description="設定/清除 AI 紀錄頻道（禁言+對話紀錄，管理員限定）")
     @app_commands.describe(action="設定或清除", channel="要設為 log 頻道的頻道（清除時不填）")
     @app_commands.choices(action=[
         app_commands.Choice(name="設定", value="set"),
@@ -3708,7 +3750,7 @@ class ChatGroup(app_commands.Group):
             save_chat_ai_settings()
             await interaction.response.send_message(
                 f"✅ AI 紀錄頻道已設為 {channel.mention}\n"
-                f"AI 自動禁言、警告等紀錄將發送到此頻道。",
+                f"AI 對話紀錄 + 自動禁言紀錄將發送到此頻道。",
                 ephemeral=True
             )
         else:
@@ -3848,7 +3890,7 @@ class ChatGroup(app_commands.Group):
         log_ch_id = chat_ai_settings.get("log_channel_id")
         if log_ch_id:
             lines.append(f"  ✅ 已設定：<#{log_ch_id}>")
-            lines.append(f"  禁言、警告等 AI 動作會自動記錄到此頻道")
+            lines.append(f"  對話紀錄 + 禁言紀錄都會發送到此頻道")
         else:
             lines.append(f"  ❌ 未設定")
             lines.append(f"  → 用 `/chat log_channel` 設定")
