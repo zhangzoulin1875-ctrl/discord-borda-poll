@@ -1552,14 +1552,23 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
             return cached_content
 
     timeout = aiohttp.ClientTimeout(total=15, connect=8)
+    import urllib.parse as _up
+    import re as _re
+
+    skip_prefixes = ("特殊:", "File:", "Category:", "Template:", "Help:",
+                     "Special:", "MediaWiki:", "User:", "Talk:", "Project:", "分類:")
 
     try:
-        # Step 1: Scrape search results page to find article titles
-        import urllib.parse as _up
-        search_url = f"https://www.micropedia.site/wiki/{_up.quote('特殊:搜尋')}?search={_up.quote(query)}"
-        print(f"📚 Micropedia: 搜尋 '{query}' -> {search_url}")
-
         async with aiohttp.ClientSession() as session:
+            article_titles = []
+
+            # ── Step 1: Hit the search page. MediaWiki behaves two ways:
+            #   a) Exact single-title match -> redirects straight to the article page.
+            #   b) Multiple/fuzzy matches -> stays on 特殊:搜尋 with a real results list
+            #      (<div class="mw-search-result-heading"><a href="..." title="...">).
+            search_url = f"https://www.micropedia.site/wiki/{_up.quote('特殊:搜尋')}?search={_up.quote(query)}"
+            print(f"📚 Micropedia: 搜尋 '{query}' -> {search_url}")
+
             async with session.get(
                 search_url,
                 headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"},
@@ -1569,33 +1578,46 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
                     print(f"📚 Micropedia: 搜尋頁回傳 {resp.status}")
                     return ""
                 html = await resp.text()
+                final_url = str(resp.url)
 
-            # Extract article titles from search results
-            import re as _re
-            raw_links = _re.findall(r'<a[^>]*href="(/wiki/[^"]*)"[^>]*title="([^"]*)"', html)
-            article_titles = []
-            seen = set()
-            skip_prefixes = ("特殊", "File:", "Category:", "Template:", "Help:",
-                             "Special:", "MediaWiki:", "User:", "Talk:", "Project:")
-            for href, title in raw_links:
-                if any(href.startswith(p) or title.startswith(p) for p in skip_prefixes):
-                    continue
-                if title in seen or not title:
-                    continue
-                seen.add(title)
-                article_titles.append(title)
-                if len(article_titles) >= max_results:
-                    break
+            redirected_to_article = "特殊:搜尋" not in _up.unquote(final_url) and "Special:Search" not in final_url
+
+            if redirected_to_article and "mw-search-results" not in html:
+                # Case (a): exact-title match, we landed directly on the article.
+                m = _re.search(r'<h1[^>]*id="firstHeading"[^>]*>(?:<span[^>]*>)?([^<]+)', html)
+                if m:
+                    article_titles = [m.group(1).strip()]
+                else:
+                    # Fallback: derive title from the final URL path
+                    path = _up.unquote(final_url).rsplit("/wiki/", 1)[-1]
+                    if path and not any(path.startswith(p) for p in skip_prefixes):
+                        article_titles = [path]
+            else:
+                # Case (b): parse the real search-result list markup.
+                raw_links = _re.findall(
+                    r'<div class="mw-search-result-heading"><a href="([^"]*)" title="([^"]*)"',
+                    html,
+                )
+                seen = set()
+                for href, title in raw_links:
+                    title = _up.unquote(title)
+                    if any(title.startswith(p) for p in skip_prefixes):
+                        continue
+                    if title in seen or not title:
+                        continue
+                    seen.add(title)
+                    article_titles.append(title)
+                    if len(article_titles) >= max_results:
+                        break
 
             if not article_titles:
                 print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果")
                 _micropedia_cache[cache_key] = (_time.time(), "")
                 return ""
 
-            print(f"📚 Micropedia: 找到 {len(article_titles)} 篇相關文章: {article_titles[:3]}...")
+            print(f"📚 Micropedia: 找到 {len(article_titles)} 篇相關文章: {article_titles[:5]}")
 
-            # Step 2: Fetch content for each article via MediaWiki API
-            # Batch: join titles with | for a single API call
+            # ── Step 2: Fetch content for each article via the MediaWiki API ──
             titles_param = "|".join(_up.quote(t) for t in article_titles)
             api_url = (
                 f"https://www.micropedia.site/api.php?action=query"
@@ -1627,7 +1649,6 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
                 clean = _clean_wikitext(wikitext)
                 if clean and len(clean) > 10:
                     title = page.get("title", "?")
-                    # Truncate very long articles
                     if len(clean) > 2000:
                         clean = clean[:2000] + "..."
                     content_parts.append(f"【{title}】\n{clean}")
