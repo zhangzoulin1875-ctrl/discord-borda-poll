@@ -1071,7 +1071,12 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
     Returns the raw assistant message dict (content + possible tool_calls),
     so the caller can drive a tool-calling loop when `tools` is provided.
     Automatically degrades to a plain (no-tools) call if this endpoint has
-    already been observed to reject the `tools` field."""
+    already been observed to reject the `tools` field, or if this specific
+    request with tools fails for ANY reason — different OpenAI-compatible
+    proxies report an unsupported `tools` param with wildly different status
+    codes (400, 422, 500, or even a 200 with an error payload instead of
+    `choices`), so we don't try to guess which one and instead just retry
+    plain whenever a tools-enabled call doesn't come back clean."""
     headers = {
         "Authorization": f"Bearer {settings['api_key']}",
         "Content-Type": "application/json",
@@ -1086,6 +1091,13 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
             api_url += "/v1/chat/completions"
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
+    timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
+
+    async def _post(payload):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
+                body_text = await resp.text()
+                return resp.status, body_text
 
     payload = {
         "model": settings.get("model", "gpt-4o-mini"),
@@ -1097,27 +1109,36 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         payload["tools"] = use_tools
         payload["tool_choice"] = "auto"
 
-    timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
-    async with aiohttp.ClientSession() as session:
-        async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                # If the endpoint doesn't understand `tools`, remember that and
-                # retry once without it — never pay this cost again for this API.
-                if use_tools and resp.status in (400, 422):
-                    print(f"⚠️ Chat AI 端點似乎不支援 tools 參數，之後略過：{error_text[:200]}")
-                    _tools_unsupported_apis.add(api_url)
-                    payload.pop("tools", None)
-                    payload.pop("tool_choice", None)
-                    async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp2:
-                        if resp2.status != 200:
-                            error_text2 = await resp2.text()
-                            raise Exception(f"Chat AI API returned {resp2.status}: {error_text2[:300]}")
-                        data = await resp2.json()
-                        return data["choices"][0]["message"]
-                raise Exception(f"Chat AI API returned {resp.status}: {error_text[:300]}")
-            data = await resp.json()
-            return data["choices"][0]["message"]
+    status, body_text = await _post(payload)
+    ok = False
+    data = None
+    if status == 200:
+        try:
+            data = json_module.loads(body_text)
+            if "choices" in data:
+                ok = True
+        except Exception:
+            pass
+
+    if not ok and use_tools:
+        # Whatever went wrong, it only happens with `tools` attached — assume
+        # this endpoint doesn't support function calling and never try again.
+        print(f"⚠️ Chat AI 端點帶 tools 參數呼叫失敗（status={status}），之後略過 tools：{body_text[:200]}")
+        _tools_unsupported_apis.add(api_url)
+        payload.pop("tools", None)
+        payload.pop("tool_choice", None)
+        status, body_text = await _post(payload)
+        if status == 200:
+            try:
+                data = json_module.loads(body_text)
+                ok = "choices" in data
+            except Exception:
+                ok = False
+
+    if not ok:
+        raise Exception(f"Chat AI API returned {status}: {body_text[:300]}")
+
+    return data["choices"][0]["message"]
 
 
 # ──────────────────────────────────────────────
@@ -1839,6 +1860,15 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     except asyncio.TimeoutError:
         print(f"⚠️ AI 回覆流程整體逾時（>45s）")
         raise
+    except Exception as e:
+        # Something about the tool-calling machinery itself broke (bad response
+        # shape, provider quirk we didn't anticipate, etc.) — never let that take
+        # the whole chat feature down. Fall back to one plain, tool-free call.
+        print(f"⚠️ 工具呼叫流程失敗，改用純文字模式重試：{e}")
+        fallback_msg = await asyncio.wait_for(
+            call_chat_api(messages, settings, tools=None), timeout=30
+        )
+        raw_reply = fallback_msg.get("content") or ""
 
     # Parse [MEMORY:] and [MOD:] tags from reply
     actual_reply = raw_reply
