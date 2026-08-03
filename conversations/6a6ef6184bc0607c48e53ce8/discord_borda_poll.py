@@ -7404,7 +7404,12 @@ async def _process_new_proposal(message: discord.Message, channel):
         "proposer_name": message.author.display_name,
         "channel_id": channel.id,
         "channel_name": channel.name,
-        "thread_id": message.id if hasattr(message, 'thread') and message.thread else None,
+        "thread_id": (
+            # Forum thread: message.channel is a Thread, channel is the parent ForumChannel
+            str(message.channel.id) if hasattr(message, 'channel') and isinstance(message.channel, discord.Thread) and message.channel.id != channel.id
+            # Legacy: message has a sub-thread
+            else (str(message.id) if hasattr(message, 'thread') and message.thread else None)
+        ),
         "message_id": msg_id,
         "message_url": str(message.jump_url) if hasattr(message, 'jump_url') else "",
         "raw_content": message.content[:2000],
@@ -7552,14 +7557,7 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
     entry["reject_reason"] = reject_reason
     save_proposals()
 
-    # Disable buttons on the notification message
-    try:
-        for child in self.children if hasattr(self, 'children') else []:
-            child.disabled = True
-    except Exception:
-        pass
-
-    # Update the secretariat notification
+    # Update the secretariat notification (buttons removed via view=None below)
     status_emoji = "✅" if decision == "accepted" else "❌"
     status_text = "已受理" if decision == "accepted" else "已駁回"
     embed = interaction.message.embeds[0] if interaction.message.embeds else None
@@ -7582,16 +7580,30 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
         except Exception:
             pass
 
-    # ── Notify the original proposer in the original channel ──
+    # ── Notify the original proposer in the original channel/thread ──
     orig_ch_id = entry.get("channel_id")
     guild_id = entry.get("guild_id", 0)
+    thread_id = entry.get("thread_id")
     orig_ch = None
+    target_thread = None
     for guild in bot.guilds:
         if guild.id == guild_id:
             orig_ch = guild.get_channel(int(orig_ch_id)) if orig_ch_id else None
+            # If we have a thread_id, try to get the thread directly
+            if thread_id:
+                try:
+                    target_thread = guild.get_thread(int(thread_id))
+                except Exception:
+                    pass
+                if not target_thread and orig_ch:
+                    # Forum channel: thread might be archived, try to fetch it
+                    try:
+                        target_thread = await orig_ch.fetch_thread(int(thread_id))
+                    except Exception:
+                        pass
             break
 
-    if not orig_ch:
+    if not orig_ch and not target_thread:
         print(f"⚠️ 找不到原始提案頻道 {orig_ch_id}，無法通知提案人")
         return
 
@@ -7625,29 +7637,27 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
         )
 
     try:
-        # If the original proposal was in a thread, reply in that thread
-        thread_id = entry.get("thread_id")
-        if thread_id:
-            try:
-                thread = await orig_ch.fetch_thread(int(thread_id))
-                await thread.send(embed=notify_embed)
-                print(f"✅ 提案結果已發送至貼文 #{thread.name}")
-                return
-            except Exception:
-                pass
-        # Otherwise reply to the original message
+        # If we already resolved a thread, send directly there
+        if target_thread:
+            await target_thread.send(embed=notify_embed)
+            print(f"✅ 提案結果已發送至論壇貼文 #{target_thread.name}")
+            return
+        # If orig_ch is a TextChannel, try to reply to the original message
         msg_id = entry.get("message_id")
-        if msg_id:
+        if msg_id and hasattr(orig_ch, 'fetch_message'):
             try:
                 orig_msg = await orig_ch.fetch_message(int(msg_id))
                 await orig_msg.reply(embed=notify_embed, mention_author=True)
                 print(f"✅ 提案結果已回覆至 #{orig_ch.name}")
                 return
-            except Exception:
-                pass
-        # Fallback: just send in the channel
-        await orig_ch.send(embed=notify_embed)
-        print(f"✅ 提案結果已發送至 #{orig_ch.name}")
+            except Exception as e:
+                print(f"⚠️ fetch_message 失敗 ({e})，改用頻道發送")
+        # Fallback: just send in the channel (if it supports send)
+        if hasattr(orig_ch, 'send'):
+            await orig_ch.send(embed=notify_embed)
+            print(f"✅ 提案結果已發送至 #{orig_ch.name}")
+        else:
+            print(f"❌ 頻道 {orig_ch} 不支援 send，無法通知提案人")
     except Exception as e:
         print(f"❌ 通知提案人失敗：{e}")
 
