@@ -864,6 +864,7 @@ chat_ai_settings = {
     "enabled": False,
     "cooldown_seconds": 60,
     "channels_whitelist": [],  # empty = all channels
+    "filter_strength": "low",  # off / low / medium / high
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -949,52 +950,101 @@ def load_chat_ai_settings():
         if os.path.exists(CHAT_AI_DATA_FILE):
             with open(CHAT_AI_DATA_FILE, "r", encoding="utf-8") as f:
                 loaded = json_module.load(f)
+            # Ensure filter_strength exists (migration for older saves)
+            if "filter_strength" not in loaded:
+                loaded["filter_strength"] = "low"
             chat_ai_settings.update(loaded)
             print("✅ 載入 AI 聊天設定")
     except Exception as e:
         print(f"⚠️ Failed to load chat AI settings: {e}")
 
 
-def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int) -> tuple:
-    """Heuristic check: is this message worth an AI reply? Returns (worth, clean_content)."""
+def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: str = "low") -> tuple:
+    """Heuristic check: is this message worth an AI reply? Returns (worth, clean_content).
+    Strength levels:
+      off    — reply to everything (except empty)
+      low    — only block pure greetings/empty/very short
+      medium — block greetings + require questions/keywords for non-mentions
+      high   — strict: long messages only, keywords required, no random
+    """
     # Remove bot mention
     clean = content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
 
-    # Too short
-    if len(clean) < 5:
+    # Always: empty or whitespace-only
+    if not clean:
         return False, clean
 
-    # Just greetings / low-value messages
-    low_value = {"hi", "hello", "hey", "yo", "ok", "okay", "lol", "haha", "nice",
-                 "你好", "哈囉", "嗨", "測試", "test", "ping", "pong", "好的", "嗯",
-                 "喔", "啊", "喔喔", "哈哈", "推", "+1", "ss"}
-    if clean.lower().strip("!.?？。！，,") in low_value:
-        return False, clean
-
-    # Just a link
-    if clean.startswith("http") and len(clean.split()) == 1:
-        return False, clean
-
-    if is_mentioned:
-        # When @mentioned, require substantive content (> 10 chars)
-        if len(clean) < 10:
-            return False, clean
+    # ── OFF: reply to everything ──
+    if strength == "off":
         return True, clean
-    else:
-        # Not mentioned - be selective to save tokens
-        # Questions are worth replying
+
+    # Common greeting / low-value sets
+    greetings = {"hi", "hello", "hey", "yo", "ok", "okay", "lol", "haha", "nice",
+                 "你好", "哈囉", "嗨", "測試", "test", "ping", "pong", "好的", "嗯",
+                 "喔", "啊", "喔喔", "哈哈", "推", "+1", "ss", "早安", "晚安", "晚安",
+                 "安安", "hihi", "哈囉哈囉", "好喔", "不要", "好啦"}
+    normalized = clean.lower().strip("!.?？。！，,~～")
+    is_greeting = normalized in greetings
+    is_link_only = clean.startswith("http") and len(clean.split()) == 1
+    is_emoji_only = not any(c.isalnum() for c in clean)
+
+    # ── LOW: block only pure greetings, links, emoji-only, and <3 chars ──
+    if strength == "low":
+        if len(clean) < 3:
+            return False, clean
+        if is_greeting or is_link_only or is_emoji_only:
+            return False, clean
+        # @mention: almost anything goes
+        if is_mentioned:
+            return True, clean
+        # Not mentioned: reply to anything that's not a greeting/link/emoji
+        # This is the relaxed mode — normal conversation flows through
+        return True, clean
+
+    # ── MEDIUM: block greetings, require some substance ──
+    if strength == "medium":
+        if len(clean) < 5:
+            return False, clean
+        if is_greeting or is_link_only or is_emoji_only:
+            return False, clean
+        if is_mentioned:
+            if len(clean) < 8:
+                return False, clean
+            return True, clean
+        # Not mentioned: questions, keywords, or 15+ char messages
         if "?" in clean or "？" in clean:
             return True, clean
-        # Discussion keywords
+        keywords = ["投票", "議", "法案", "政策", "選舉", "建議", "想法", "討論",
+                    "如何", "為什麼", "怎麼", "認為", "覺得", "提案", "決議", "規定",
+                    "憲法", "入籍", "公民", "政府", "國家", "問題", " help", "幫忙"]
+        if any(kw in clean for kw in keywords):
+            return True, clean
+        if len(clean) >= 15:
+            return True, clean
+        return False, clean
+
+    # ── HIGH: strict, token-saving mode ──
+    if strength == "high":
+        if len(clean) < 5:
+            return False, clean
+        if is_greeting or is_link_only or is_emoji_only:
+            return False, clean
+        if is_mentioned:
+            if len(clean) < 10:
+                return False, clean
+            return True, clean
+        # Not mentioned: questions and keywords only, no random chance
+        if "?" in clean or "？" in clean:
+            return True, clean
         keywords = ["投票", "議", "法案", "政策", "選舉", "建議", "想法", "討論",
                     "如何", "為什麼", "怎麼", "認為", "覺得", "提案", "決議", "規定",
                     "憲法", "入籍", "公民", "政府", "國家"]
         if any(kw in clean for kw in keywords):
             return True, clean
-        # Very low random chance for other messages
-        if random.random() < 0.03:  # 3% — keep token usage minimal
-            return True, clean
         return False, clean
+
+    # Fallback: same as low
+    return True, clean
 
 
 async def call_chat_api(messages: list, settings: dict) -> str:
@@ -1832,7 +1882,7 @@ async def on_message(message):
     content_preview = message.content[:80].replace("\n", " ") if message.content else "(empty)"
     is_mentioned = bot.user in message.mentions
     print(f"📩 on_message: #{message.channel} | {message.author.display_name}: {content_preview}")
-    print(f"   enabled={chat_ai_settings.get('enabled')}, key={'✅' if chat_ai_settings.get('api_key') else '❌'}, mentioned={is_mentioned}")
+    print(f"   enabled={chat_ai_settings.get('enabled')}, key={'✅' if chat_ai_settings.get('api_key') else '❌'}, mentioned={is_mentioned}, filter={chat_ai_settings.get('filter_strength', 'low')}")
 
     # Check if chat AI is enabled and has API key
     if not chat_ai_settings.get("enabled"):
@@ -1868,7 +1918,7 @@ async def on_message(message):
             return
 
     # Worthiness check
-    worth, clean = _is_worth_replying(message.content, is_mentioned, bot.user.id)
+    worth, clean = _is_worth_replying(message.content, is_mentioned, bot.user.id, chat_ai_settings.get("filter_strength", "low"))
     if not worth:
         print(f"   ⏭️ Not worth replying (content too short/low-value).")
         return
@@ -3124,6 +3174,31 @@ class ChatGroup(app_commands.Group):
             else:
                 await interaction.response.send_message("⚠️ 頻道已在/不在白名單中", ephemeral=True)
 
+    @app_commands.command(name="filter", description="設定垃圾話過濾強度（管理員限定）")
+    @app_commands.describe(level="過濾強度等級")
+    @app_commands.choices(level=[
+        app_commands.Choice(name="關閉（回覆所有訊息）", value="off"),
+        app_commands.Choice(name="低（只擋打招呼/連結/emoji）", value="low"),
+        app_commands.Choice(name="中（需有實質內容或問題）", value="medium"),
+        app_commands.Choice(name="高（嚴格，只回問題和關鍵字）", value="high"),
+    ])
+    async def chat_filter(self, interaction: discord.Interaction, level: app_commands.Choice[str]):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        chat_ai_settings["filter_strength"] = level.value
+        save_chat_ai_settings()
+        descs = {
+            "off": "關閉：AI 會回覆所有非空訊息（最自然，但最耗 token）",
+            "low": "低：只擋純打招呼、連結、emoji、極短訊息（適合活躍群組）",
+            "medium": "中：需要問題、關鍵字、或 15 字以上才回（平衡）",
+            "high": "高：只回覆問題和關鍵字（最省 token，但會擋掉很多正常對話）",
+        }
+        await interaction.response.send_message(
+            f"✅ 過濾強度已設為**{level.name}**\n{descs.get(level.value, '')}",
+            ephemeral=True
+        )
+
     @app_commands.command(name="test", description="測試 AI 聊天回覆（管理員限定）")
     @app_commands.describe(message="要測試的訊息")
     async def chat_test(self, interaction: discord.Interaction, message: str):
@@ -3220,10 +3295,16 @@ class ChatGroup(app_commands.Group):
         lines.append(f"**5. 冷卻時間**")
         lines.append(f"  {chat_ai_settings.get('cooldown_seconds', 60)} 秒（@提及不受限）")
         lines.append(f"")
-        lines.append(f"**6. 判斷邏輯**")
-        lines.append(f"  @提及：需要 >10 字實質內容才回")
-        lines.append(f"  一般訊息：問題(?)或關鍵字才回，3% 隨機機率")
-        lines.append(f"  → 太短的訊息（<5字）、問候語、連結不回")
+        filter_str = chat_ai_settings.get("filter_strength", "low")
+        filter_descs = {
+            "off": "關閉：回覆所有非空訊息",
+            "low": "低：只擋打招呼/連結/emoji/極短",
+            "medium": "中：需問題/關鍵字/15字以上",
+            "high": "高：只回問題和關鍵字",
+        }
+        lines.append(f"**6. 過濾強度**")
+        lines.append(f"  目前：{filter_str} — {filter_descs.get(filter_str, '')}")
+        lines.append(f"  → 用 `/chat filter` 調整")
         lines.append(f"")
         lines.append(f"**7. 測試**")
         lines.append(f"  請在這個頻道發一則 >15 字的訊息，然後查看 Render logs")
@@ -3249,6 +3330,9 @@ class ChatGroup(app_commands.Group):
         embed.add_field(name="API Key", value=key_set, inline=True)
         embed.add_field(name="模型", value=f"`{model}`", inline=True)
         embed.add_field(name="冷卻時間", value=f"{cooldown} 秒", inline=True)
+        filter_str = chat_ai_settings.get("filter_strength", "low")
+        filter_names = {"off": "關閉", "low": "低", "medium": "中", "high": "高"}
+        embed.add_field(name="過濾強度", value=filter_names.get(filter_str, filter_str), inline=True)
         embed.add_field(name="頻道白名單", value=channels, inline=False)
         mem_count = len(user_memories)
         embed.add_field(name="用戶記憶", value=f"已記住 {mem_count} 位使用者", inline=True)
