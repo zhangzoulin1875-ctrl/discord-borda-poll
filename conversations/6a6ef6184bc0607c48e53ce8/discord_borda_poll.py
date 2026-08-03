@@ -879,6 +879,80 @@ CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "da
 
 # Per-channel cooldown tracking
 chat_cooldowns: dict = {}  # channel_id -> timestamp
+# ──────────────────────────────────────────────
+# Token 使用量追蹤（Token Usage Tracking）
+# ──────────────────────────────────────────────
+
+TOKEN_USAGE_FILE = os.path.join(DATA_DIR, "token_usage.json")
+token_usage = {
+    "total_tokens": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "api_calls": 0,
+    "today_tokens": 0,
+    "today_prompt": 0,
+    "today_completion": 0,
+    "today_calls": 0,
+    "today_date": "",
+    "started_at": 0,
+}
+
+def save_token_usage():
+    try:
+        with open(TOKEN_USAGE_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(token_usage, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ Token usage save failed: {e}")
+
+def load_token_usage():
+    global token_usage
+    try:
+        if os.path.exists(TOKEN_USAGE_FILE):
+            with open(TOKEN_USAGE_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+                started_at = loaded.get("started_at", 0)
+                token_usage.update(loaded)
+                if started_at:
+                    token_usage["started_at"] = started_at
+        if not token_usage.get("started_at"):
+            token_usage["started_at"] = _time.time()
+        today = _time.strftime("%Y-%m-%d")
+        if token_usage.get("today_date") != today:
+            token_usage["today_date"] = today
+            token_usage["today_tokens"] = 0
+            token_usage["today_prompt"] = 0
+            token_usage["today_completion"] = 0
+            token_usage["today_calls"] = 0
+        print(f"✅ Token 使用量載入：累計 {token_usage['total_tokens']:,} tokens, 今日 {token_usage['today_tokens']:,} tokens")
+    except Exception as e:
+        print(f"⚠️ Token usage load failed: {e}")
+        token_usage["started_at"] = _time.time()
+
+def _track_token_usage(data: dict):
+    usage = data.get("usage")
+    if not usage or not isinstance(usage, dict):
+        return
+    total = usage.get("total_tokens", 0)
+    prompt = usage.get("prompt_tokens", 0)
+    completion = usage.get("completion_tokens", 0)
+    if not total and not prompt and not completion:
+        return
+    today = _time.strftime("%Y-%m-%d")
+    if token_usage.get("today_date") != today:
+        token_usage["today_date"] = today
+        token_usage["today_tokens"] = 0
+        token_usage["today_prompt"] = 0
+        token_usage["today_completion"] = 0
+        token_usage["today_calls"] = 0
+    token_usage["total_tokens"] += total
+    token_usage["prompt_tokens"] += prompt
+    token_usage["completion_tokens"] += completion
+    token_usage["api_calls"] += 1
+    token_usage["today_tokens"] += total
+    token_usage["today_prompt"] += prompt
+    token_usage["today_completion"] += completion
+    token_usage["today_calls"] += 1
+
 # Per-USER generating lock (not per-channel) — different people in the same
 # channel can get replies simultaneously; only the same user is blocked from
 # having two in-flight requests at once (which would be redundant).
@@ -1163,6 +1237,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
 
     if not ok:
         raise Exception(f"Chat AI API returned {status}: {body_text[:300]}")
+
+    _track_token_usage(data)
 
     return data["choices"][0]["message"]
 
@@ -2374,7 +2450,7 @@ async def load_from_drive():
     print(f"🔄 Drive 載入開始：OAuth={'✅' if has_oauth else '❌'} SA={'✅' if has_sa else '❌'} client_id={'✅' if cid else '❌'}")
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json"]:
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json", "token_usage.json"]:
         content = await _drive_download(filename)
         if content:
             try:
@@ -2853,6 +2929,8 @@ async def setup_hook():
     save_chat_ai_settings()  # Create file if not exists
     load_quiz_data()
     save_quiz_data()  # Create files if not exists
+    load_token_usage()
+    save_token_usage()  # Create file if not exists
     load_user_memories()
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
@@ -2863,6 +2941,7 @@ async def setup_hook():
     asyncio.ensure_future(server_context_refresh_loop())
     asyncio.ensure_future(quiz_question_loop())
     asyncio.ensure_future(quiz_settlement_loop())
+    asyncio.ensure_future(token_log_loop())
 
 
 @bot.event
@@ -4710,6 +4789,78 @@ class ChatGroup(app_commands.Group):
             if len(result) > 1900:
                 display += "..."
             await interaction.followup.send(f"📚 搜尋「{query}」的結果：\n\n{display}", ephemeral=True)
+
+
+# ──────────────────────────────────────────────
+# Token Log 定期公告（每 30 分鐘）
+# ──────────────────────────────────────────────
+
+async def token_log_loop():
+    """Background task: post token usage to the AI log channel every 30 minutes."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            log_channel_id = chat_ai_settings.get("log_channel_id")
+            if not log_channel_id:
+                await asyncio.sleep(1800)
+                continue
+            log_ch = None
+            for guild in bot.guilds:
+                ch = guild.get_channel(int(log_channel_id))
+                if ch:
+                    log_ch = ch
+                    break
+            if not log_ch:
+                print("⚠️ Token Log: Cannot find log channel")
+                await asyncio.sleep(1800)
+                continue
+            today = _time.strftime("%Y-%m-%d")
+            started_at = token_usage.get("started_at", _time.time())
+            uptime_seconds = int(_time.time() - started_at)
+            uptime_days = uptime_seconds // 86400
+            uptime_hours = (uptime_seconds % 86400) // 3600
+            uptime_str = f"{uptime_days}天 {uptime_hours}小時"
+            embed = discord.Embed(
+                title="📊 Token 使用量報告",
+                color=discord.Color.dark_green(),
+                timestamp=discord.utils.utcnow(),
+            )
+            embed.add_field(
+                name="📈 累計總量（自啟用以來）",
+                value=(
+                    f"```\n"
+                    f"Total Tokens:   {token_usage['total_tokens']:>12,}\n"
+                    f"Prompt Tokens:  {token_usage['prompt_tokens']:>12,}\n"
+                    f"Completion:     {token_usage['completion_tokens']:>12,}\n"
+                    f"API 呼叫次數:    {token_usage['api_calls']:>12,}\n"
+                    f"運行時間:        {uptime_str}\n"
+                    f"```"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name=f"📅 今日用量（{today}）",
+                value=(
+                    f"```\n"
+                    f"Total Tokens:   {token_usage['today_tokens']:>12,}\n"
+                    f"Prompt Tokens:  {token_usage['today_prompt']:>12,}\n"
+                    f"Completion:     {token_usage['today_completion']:>12,}\n"
+                    f"API 呼叫次數:    {token_usage['today_calls']:>12,}\n"
+                    f"```"
+                ),
+                inline=False
+            )
+            if token_usage["api_calls"] > 0:
+                avg = token_usage["total_tokens"] / token_usage["api_calls"]
+                embed.set_footer(text=f"平均每次呼叫 {avg:.0f} tokens | 每 30 分鐘自動更新")
+            else:
+                embed.set_footer(text="每 30 分鐘自動更新")
+            await log_ch.send(embed=embed)
+            save_token_usage()
+            print(f"📊 Token Log posted: cumulative={token_usage['total_tokens']:,}, today={token_usage['today_tokens']:,}")
+        except Exception as e:
+            print(f"⚠️ Token Log loop error: {e}")
+        await asyncio.sleep(1800)
 
 
 # ════════════════════════════════════════════════════════════
