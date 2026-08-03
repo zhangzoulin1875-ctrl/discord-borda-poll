@@ -1886,6 +1886,45 @@ def _bigrams(s: str) -> set:
     return {s[i:i + 2] for i in range(len(s) - 1)}
 
 
+# ── 口語填充詞（用於從完整問句中抽取真正的關鍵詞） ──
+# 使用者問問題常常是完整口語句子（例如「查看組織公告頻道，最新當選的秘書長是誰？」），
+# 這些填充詞如果混進 bigram 比對，會稀釋掉真正關鍵詞（如「秘書長」「當選」）的
+# 重疊比例，導致明明相關的內容因為 containment 算出來太低而被漏掉。
+_QUERY_FILLER_WORDS = (
+    "請問", "查看", "幫我", "看看", "查詢", "查一下", "一下", "麻煩",
+    "是誰", "是什麼", "是不是", "有沒有", "可以嗎", "好嗎",
+    "最新", "現在", "目前", "剛剛", "剛才",
+    "怎麼樣", "怎麼", "如何", "可以", "想知道", "知道",
+    "誰是", "結果如何", "組織", "頻道", "公告",
+    "嗎", "呢", "啊", "喔", "呀", "的", "了", "嘛",
+)
+
+
+def _extract_search_keywords(query: str) -> list:
+    """Strip common filler/question words from a natural-language query to
+    recover the actual content keywords. Returns fragments of 2+ chars that
+    can be checked as direct substrings against target text — this catches
+    real matches that bigram-containment-of-the-full-query misses when the
+    query is a long conversational sentence with lots of filler words."""
+    import re as _re
+    q = query.strip()
+    # Normalize punctuation to spaces (acts as a split point)
+    q = _re.sub(r"[？?！!，,。.、；;：:「」『』（）()]", " ", q)
+    for fw in _QUERY_FILLER_WORDS:
+        q = q.replace(fw, " ")
+    chunks = [c.strip() for c in q.split() if len(c.strip()) >= 2]
+    return chunks
+
+
+def _keyword_substring_hit(query: str, text: str) -> bool:
+    """True if any meaningful keyword extracted from the (possibly long,
+    conversational) query appears verbatim in the target text."""
+    keywords = _extract_search_keywords(query)
+    if not keywords:
+        return False
+    return any(kw in text for kw in keywords)
+
+
 def _fuzzy_match_titles(message: str, titles: list, top_n: int = 5) -> list:
     """Score every cached wiki title against the message by bigram containment
     (what fraction of the TITLE's bigrams also appear in the message) and
@@ -2234,11 +2273,17 @@ async def _refresh_channel_index(guild) -> list:
 
 
 def _search_channel_index(query: str, entries: list, top_n: int = 5) -> list:
-    """Search the channel message index using bigram matching."""
+    """Search the channel message index using bigram matching.
+
+    Falls back to keyword-substring matching (extracted from the query with
+    filler words stripped) when full-query bigram containment is too low —
+    this handles long conversational questions where filler words dilute the
+    containment ratio for otherwise perfectly relevant hits."""
     query = query.strip()
     query_bg = _bigrams(query)
     if not query_bg or not entries:
         return []
+    keyword_hit_cache = None  # computed once per query, reused per entry
     scored = []
     for e in entries:
         text = e["text"]
@@ -2247,12 +2292,15 @@ def _search_channel_index(query: str, entries: list, top_n: int = 5) -> list:
             continue
         overlap = query_bg & text_bg
         substring_hit = bool(query) and query in text
-        if not overlap and not substring_hit:
+        keyword_hit = _keyword_substring_hit(query, text)
+        if not overlap and not substring_hit and not keyword_hit:
             continue
         containment = len(overlap) / len(query_bg) if query_bg else 0
-        if not substring_hit and containment < 0.3:
+        if not substring_hit and not keyword_hit and containment < 0.3:
             continue
-        scored.append((e, containment, substring_hit))
+        # Boost score if keyword-hit so real matches surface first
+        score = max(containment, 0.5) if keyword_hit else containment
+        scored.append((e, score, substring_hit or keyword_hit))
     scored.sort(key=lambda x: (-x[2], -x[1]))
     return [e for e, _, _ in scored[:top_n]]
 
@@ -2390,7 +2438,11 @@ def _search_forum_posts(query: str, posts: list, top_n: int = 5) -> list:
     containment (same technique as micropedia title matching), scored by how
     much of the QUERY's bigrams are found in the post's combined text —
     plus a direct substring check, since forum text is long/noisy and a
-    short exact term (e.g. a proper noun) should always count as a hit."""
+    short exact term (e.g. a proper noun) should always count as a hit.
+
+    Also falls back to keyword-substring matching (query with filler words
+    stripped) for long conversational queries that would otherwise fail the
+    containment threshold despite containing the right keywords."""
     query = query.strip()
     query_bg = _bigrams(query)
     if not query_bg or not posts:
@@ -2403,12 +2455,14 @@ def _search_forum_posts(query: str, posts: list, top_n: int = 5) -> list:
             continue
         overlap = query_bg & text_bg
         substring_hit = bool(query) and query in text
-        if not overlap and not substring_hit:
+        keyword_hit = _keyword_substring_hit(query, text)
+        if not overlap and not substring_hit and not keyword_hit:
             continue
         containment = len(overlap) / len(query_bg) if query_bg else 0
-        if not substring_hit and containment < 0.5:
+        if not substring_hit and not keyword_hit and containment < 0.5:
             continue
-        scored.append((p, containment, substring_hit))
+        score = max(containment, 0.5) if keyword_hit else containment
+        scored.append((p, score, substring_hit or keyword_hit))
     scored.sort(key=lambda x: (-x[2], -x[1]))
     return [p for p, _, _ in scored[:top_n]]
 
@@ -7176,7 +7230,9 @@ def save_knowledge_base():
 
 
 def _search_knowledge_base(query: str, top_n: int = 3) -> list:
-    """Search the permanent knowledge base using bigram matching."""
+    """Search the permanent knowledge base using bigram matching, with a
+    keyword-substring fallback for long conversational queries (see
+    _extract_search_keywords)."""
     query = query.strip()
     query_bg = _bigrams(query)
     if not query_bg:
@@ -7192,12 +7248,14 @@ def _search_knowledge_base(query: str, top_n: int = 3) -> list:
             continue
         overlap = query_bg & text_bg
         substring_hit = bool(query) and query in text
-        if not overlap and not substring_hit:
+        keyword_hit = _keyword_substring_hit(query, text)
+        if not overlap and not substring_hit and not keyword_hit:
             continue
         containment = len(overlap) / len(query_bg) if query_bg else 0
-        if not substring_hit and containment < 0.2:
+        if not substring_hit and not keyword_hit and containment < 0.2:
             continue
-        scored.append((s, containment, substring_hit))
+        score = max(containment, 0.5) if keyword_hit else containment
+        scored.append((s, score, substring_hit or keyword_hit))
     scored.sort(key=lambda x: (-x[2], -x[1]))
     return [s for s, _, _ in scored[:top_n]]
 
