@@ -98,7 +98,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 import asyncio
 import os
 import base64
@@ -5960,10 +5960,11 @@ class SystemGroup(app_commands.Group):
         status = "啟用" if proposal_settings["enabled"] else "停用"
         await interaction.response.send_message(f"📋 提案系統已{status}。", ephemeral=True)
 
-    @app_commands.command(name="proposal_channel", description="新增/移除提案區頻道（機器人擁有者限定）")
-    @app_commands.describe(action="add=新增頻道, remove=移除頻道, list=列出所有頻道", channel="要新增/移除的頻道")
+    @app_commands.command(name="proposal_channel", description="新增/移除提案區頻道（機器人擁有者限定，文字頻道或論壇頻道皆可）")
+    @app_commands.describe(action="add=新增頻道, remove=移除頻道, list=列出所有頻道", channel="要新增/移除的頻道（支援文字頻道與論壇頻道）")
     async def proposal_channel(self, interaction: discord.Interaction,
-                               action: str, channel: discord.TextChannel = None):
+                               action: str,
+                               channel: Union[discord.TextChannel, discord.ForumChannel] = None):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
