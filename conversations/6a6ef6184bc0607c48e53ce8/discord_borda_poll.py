@@ -1238,6 +1238,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         _first_chunk_time = None
         _chunk_count = 0
 
+        stream_usage = None  # some APIs send usage in the final chunk
         async for raw_line in resp.content:
             _chunk_count += 1
             if _first_chunk_time is None:
@@ -1251,6 +1252,10 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
                 break
             try:
                 chunk = json_module.loads(data_str)
+                # Capture usage if present (sent by some APIs in the final
+                # chunk when stream_options.include_usage is true)
+                if chunk.get("usage"):
+                    stream_usage = chunk["usage"]
                 choices = chunk.get("choices", [])
                 if not choices:
                     continue
@@ -1285,7 +1290,28 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         message = {"role": "assistant", "content": "".join(content_parts)}
         if tool_calls_acc:
             message["tool_calls"] = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
-        body = json_module.dumps({"choices": [{"message": message, "finish_reason": finish_reason or "stop"}]})
+        body_dict = {"choices": [{"message": message, "finish_reason": finish_reason or "stop"}]}
+        # ── Fallback: estimate token usage if API didn't return it ──
+        # Most streaming endpoints don't include `usage` by default. If
+        # stream_options.include_usage didn't work, estimate from content
+        # length (~4 chars/token, same heuristic OpenAI uses for tiktoken
+        # rough estimates).
+        if stream_usage and isinstance(stream_usage, dict):
+            body_dict["usage"] = stream_usage
+        else:
+            content_str = "".join(content_parts)
+            est_completion = max(1, len(content_str) // 4)
+            # Prompt tokens: estimate from total message content sent.
+            # The caller's messages are not accessible here, so we use a
+            # rough estimate based on content length + overhead.
+            est_prompt = max(1, est_completion * 3)  # prompt usually > completion
+            body_dict["usage"] = {
+                "total_tokens": est_prompt + est_completion,
+                "prompt_tokens": est_prompt,
+                "completion_tokens": est_completion,
+            }
+            body_dict["usage_estimated"] = True  # flag for logging
+        body = json_module.dumps(body_dict)
         _elapsed = _first_chunk_time - _time.time() if _first_chunk_time else 0
         _total_chars = sum(len(p) for p in content_parts)
         print(f"📦 串流完成：{_chunk_count} chunks, content={_total_chars} chars, tool_calls={len(tool_calls_acc)}")
@@ -1296,6 +1322,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": 300,
+        "stream_options": {"include_usage": True},
     }
     if use_tools:
         payload["tools"] = use_tools
@@ -3827,7 +3854,18 @@ async def call_ai_api(conversation: str, settings: dict) -> str:
                     continue
     if not result_chunks:
         raise Exception("AI API returned empty response")
-    return "".join(result_chunks)
+    # Estimate and track token usage (streaming APIs rarely return usage)
+    content_str = "".join(result_chunks)
+    est_completion = max(1, len(content_str) // 4)
+    est_prompt = max(1, len(conversation) // 4)
+    _track_token_usage({
+        "usage": {
+            "total_tokens": est_prompt + est_completion,
+            "prompt_tokens": est_prompt,
+            "completion_tokens": est_completion,
+        }
+    })
+    return content_str
 
 
 async def call_ai_api_stream(conversation: str, settings: dict):
@@ -3860,6 +3898,8 @@ async def call_ai_api_stream(conversation: str, settings: dict):
             if resp.status != 200:
                 error_text = await resp.text()
                 raise Exception(f"AI API returned {resp.status}: {error_text[:500]}")
+            _stream_chars = 0
+            _stream_usage = None
             async for raw_line in resp.content:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data:"):
@@ -3869,11 +3909,27 @@ async def call_ai_api_stream(conversation: str, settings: dict):
                     break
                 try:
                     chunk = json_module.loads(data_str)
+                    if chunk.get("usage"):
+                        _stream_usage = chunk["usage"]
                     delta = chunk["choices"][0].get("delta", {})
                     if "content" in delta and delta["content"]:
+                        _stream_chars += len(delta["content"])
                         yield delta["content"]
                 except Exception:
                     continue
+            # Track token usage after stream ends
+            if _stream_usage:
+                _track_token_usage({"usage": _stream_usage})
+            elif _stream_chars > 0:
+                est_completion = max(1, _stream_chars // 4)
+                est_prompt = max(1, len(conversation) // 4)
+                _track_token_usage({
+                    "usage": {
+                        "total_tokens": est_prompt + est_completion,
+                        "prompt_tokens": est_prompt,
+                        "completion_tokens": est_completion,
+                    }
+                })
 
 
 async def api_get_ai_settings(request):
@@ -6668,7 +6724,7 @@ async def token_log_loop():
                 avg = token_usage["total_tokens"] / token_usage["api_calls"]
                 embed.set_footer(text=f"平均每次呼叫 {avg:.0f} tokens | 每 30 分鐘自動更新")
             else:
-                embed.set_footer(text="每 30 分鐘自動更新")
+                embed.set_footer(text="⚠️ 尚無 API 呼叫記錄 | 每 30 分鐘自動更新")
             await log_ch.send(embed=embed)
             save_token_usage()
             print(f"📊 Token Log posted: cumulative={token_usage['total_tokens']:,}, today={token_usage['today_tokens']:,}")
