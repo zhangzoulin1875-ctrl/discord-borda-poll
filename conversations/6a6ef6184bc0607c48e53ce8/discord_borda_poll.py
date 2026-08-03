@@ -1186,17 +1186,18 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
 
-    async def _post(payload):
+    async def _post(payload, timeout_total=30, timeout_read=25):
         # Use the shared, pooled session (set up in on_ready) instead of opening
         # a new connection per request. Falls back to a throwaway session only
         # if the shared one isn't ready yet (very early startup edge case).
+        t = aiohttp.ClientTimeout(total=timeout_total, connect=10, sock_read=timeout_read)
         session = _shared_session
         if session is None or session.closed:
             async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)) as resp:
+                async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
                     return resp.status, await resp.text()
         else:
-            async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)) as resp:
+            async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
                 return resp.status, await resp.text()
 
     payload = {
@@ -1209,7 +1210,10 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         payload["tools"] = use_tools
         payload["tool_choice"] = "auto"
 
-    status, body_text = await _post(payload)
+    # When trying with tools, use a SHORTER timeout (12s) — if the endpoint
+    # hangs on the tools param (common with non-OpenAI proxies), we fail fast
+    # and retry without tools at the normal timeout, instead of burning 30s.
+    status, body_text = await _post(payload, timeout_total=12 if use_tools else 30, timeout_read=10 if use_tools else 25)
     ok = False
     data = None
     if status == 200:
@@ -1228,7 +1232,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         save_tools_unsupported()
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
-        status, body_text = await _post(payload)
+        status, body_text = await _post(payload, timeout_total=30, timeout_read=25)
         if status == 200:
             try:
                 data = json_module.loads(body_text)
@@ -2454,10 +2458,23 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         {"role": "user", "content": full_prompt},
     ]
     # Build tool list: micropedia + discord history search
+    # BUT: if the API endpoint is already known to reject tools, skip building
+    # the list entirely — avoids a wasted double-call (try-with-tools → fail →
+    # retry-without-tools) that can cost up to 60s on endpoints that hang on
+    # unknown params instead of returning a quick 400.
+    _norm = settings.get("api_url", "").rstrip("/")
+    if not _norm.endswith("/chat/completions"):
+        if _norm.endswith("/v1") or _norm.endswith("/v2"):
+            _norm += "/chat/completions"
+        else:
+            _norm += "/v1/chat/completions"
+    tools_known_unsupported = _norm in _tools_unsupported_apis
+
     tools = []
-    if micropedia_enabled:
-        tools.append(_MICROPEDIA_TOOL_SCHEMA)
-    tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)  # Always available when AI chat is on
+    if not tools_known_unsupported:
+        if micropedia_enabled:
+            tools.append(_MICROPEDIA_TOOL_SCHEMA)
+        tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)
     tools = tools if tools else None
 
     async def _run_tool_loop():
@@ -3324,6 +3341,54 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 @bot.event
+async def _probe_tools_support(settings: dict, api_url: str):
+    """Quick startup probe: send a tiny request WITH tools attached to check
+    if the chat AI endpoint supports function calling. If it fails, record
+    the endpoint in _tools_unsupported_apis and persist it — so the very first
+    real user message skips the double-call penalty entirely."""
+    if not settings.get("api_key"):
+        return
+    headers = {
+        "Authorization": f"Bearer {settings['api_key']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": settings.get("model", "gpt-4o-mini"),
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 5,
+        "temperature": 0,
+        "tools": [_DISCORD_SEARCH_TOOL_SCHEMA],
+        "tool_choice": "auto",
+    }
+    try:
+        t = aiohttp.ClientTimeout(total=10, connect=5, sock_read=8)
+        session = _shared_session
+        if session is None or session.closed:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
+                    status = resp.status
+                    body = await resp.text()
+        else:
+            async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
+                status = resp.status
+                body = await resp.text()
+        if status == 200:
+            data = json_module.loads(body)
+            if "choices" in data:
+                print(f"✅ AI 端點支援 tools（probe 成功）— 工具功能可用")
+                return
+        # Failed — endpoint doesn't support tools
+        print(f"⚠️ AI 端點不支援 tools（probe 失敗 status={status}）— 之後略過 tools 參數")
+        _tools_unsupported_apis.add(api_url)
+        save_tools_unsupported()
+    except asyncio.TimeoutError:
+        print(f"⚠️ AI tools probe 逾時 — 判定端點不支援 tools，之後略過 tools 參數")
+        _tools_unsupported_apis.add(api_url)
+        save_tools_unsupported()
+    except Exception as e:
+        print(f"⚠️ AI tools probe 錯誤（{e}）— 暫時不判定，等第一則訊息再測試")
+
+
 async def on_ready():
     global _chat_semaphore, _shared_session
     if _chat_semaphore is None:
@@ -3352,6 +3417,20 @@ async def on_ready():
         print(f"✅ Bot 上線：{bot.user}（已同步 {len(synced)} 個 slash commands）")
     except Exception as e:
         print(f"❌ 同步指令失敗：{e}")
+
+    # Warmup probe: if we don't yet know whether the chat AI endpoint supports
+    # tools, do a tiny test call NOW (before any user message arrives) so the
+    # first real user message doesn't pay the double-call penalty. This probe
+    # uses a short 10s timeout and sends a minimal request with tools attached.
+    if chat_ai_settings.get("enabled") and chat_ai_settings.get("api_key"):
+        _norm = chat_ai_settings.get("api_url", "").rstrip("/")
+        if not _norm.endswith("/chat/completions"):
+            if _norm.endswith("/v1") or _norm.endswith("/v2"):
+                _norm += "/chat/completions"
+            else:
+                _norm += "/v1/chat/completions"
+        if _norm not in _tools_unsupported_apis:
+            asyncio.ensure_future(_probe_tools_support(chat_ai_settings, _norm))
 
 
 @bot.event
