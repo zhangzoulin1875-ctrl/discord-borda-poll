@@ -865,7 +865,7 @@ chat_ai_settings = {
     "enabled": False,
     "cooldown_seconds": 60,
     "channels_whitelist": [],  # empty = all channels
-    "filter_strength": "low",  # off / low / medium / high
+    "filter_strength": "mention",  # mention / off / low / medium / high
     "abuse_detection_enabled": False,
     "abuse_detection_strictness": "medium",  # low / medium / high
     "abuse_mute_admins": False,
@@ -971,7 +971,7 @@ def load_chat_ai_settings():
                 loaded = json_module.load(f)
             # Ensure filter_strength exists (migration for older saves)
             if "filter_strength" not in loaded:
-                loaded["filter_strength"] = "low"
+                loaded["filter_strength"] = "mention"
             if "abuse_detection_enabled" not in loaded:
                 loaded["abuse_detection_enabled"] = False
             if "abuse_detection_strictness" not in loaded:
@@ -990,9 +990,10 @@ def load_chat_ai_settings():
         print(f"⚠️ Failed to load chat AI settings: {e}")
 
 
-def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: str = "low") -> tuple:
+def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: str = "low", is_reply_to_bot: bool = False) -> tuple:
     """Heuristic check: is this message worth an AI reply? Returns (worth, clean_content).
     Strength levels:
+      mention — ONLY reply when @mentioned or replying to the bot (no random chime-in)
       off    — reply to everything (except empty)
       low    — only block pure greetings/empty/very short
       medium — block greetings + require questions/keywords for non-mentions
@@ -1003,6 +1004,12 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
 
     # Always: empty or whitespace-only
     if not clean:
+        return False, clean
+
+    # ── MENTION: only reply when @mentioned or replying to the bot ──
+    if strength == "mention":
+        if is_mentioned or is_reply_to_bot:
+            return True, clean
         return False, clean
 
     # ── OFF: reply to everything ──
@@ -2887,8 +2894,21 @@ async def on_message(message):
             print(f"   ⏭️ Cooldown for {message.author.display_name}: {remaining:.0f}s remaining.")
             return
 
+    # Detect if this message is a reply to the bot
+    is_reply_to_bot = False
+    if message.reference and message.reference.message_id:
+        try:
+            ref_msg = await message.channel.fetch_message(message.reference.message_id)
+            is_reply_to_bot = ref_msg.author.id == bot.user.id if ref_msg else False
+        except Exception:
+            pass
+
     # Worthiness check
-    worth, clean = _is_worth_replying(message.content, is_mentioned, bot.user.id, chat_ai_settings.get("filter_strength", "low"))
+    worth, clean = _is_worth_replying(
+        message.content, is_mentioned, bot.user.id,
+        chat_ai_settings.get("filter_strength", "low"),
+        is_reply_to_bot=is_reply_to_bot,
+    )
     if not worth:
         print(f"   ⏭️ Not worth replying (content too short/low-value).")
         return
@@ -4212,6 +4232,7 @@ class ChatGroup(app_commands.Group):
     @app_commands.command(name="filter", description="設定垃圾話過濾強度（管理員限定）")
     @app_commands.describe(level="過濾強度等級")
     @app_commands.choices(level=[
+        app_commands.Choice(name="僅@提及和回覆（推薦）", value="mention"),
         app_commands.Choice(name="關閉（回覆所有訊息）", value="off"),
         app_commands.Choice(name="低（只擋打招呼/連結/emoji）", value="low"),
         app_commands.Choice(name="中（需有實質內容或問題）", value="medium"),
@@ -4224,6 +4245,7 @@ class ChatGroup(app_commands.Group):
         chat_ai_settings["filter_strength"] = level.value
         save_chat_ai_settings()
         descs = {
+            "mention": "僅@提及和回覆：AI 只會在被 @到或被回覆時才說話（不會主動亂接話）",
             "off": "關閉：AI 會回覆所有非空訊息（最自然，但最耗 token）",
             "low": "低：只擋純打招呼、連結、emoji、極短訊息（適合活躍群組）",
             "medium": "中：需要問題、關鍵字、或 15 字以上才回（平衡）",
