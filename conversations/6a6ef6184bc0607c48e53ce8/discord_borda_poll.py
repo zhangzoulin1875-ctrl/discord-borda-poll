@@ -79,6 +79,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 import asyncio
 import os
+import base64
 import urllib.request
 import urllib.parse
 import secrets as py_secrets
