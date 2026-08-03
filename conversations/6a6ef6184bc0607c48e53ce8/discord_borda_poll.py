@@ -2699,6 +2699,39 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"如果自動比對和你的查詢都找不到資料，才誠實告知使用者你沒有找到相關資料。"
         )
 
+    # ── search_discord AUTO context injection ──
+    # Tool-calling is entirely up to the (often weak/free) AI model's own
+    # judgment — and in practice it frequently just doesn't bother calling
+    # search_discord even when the question is clearly about server history
+    # (e.g. "新當選的秘書長是誰" — the AI just guessed "I'm not sure" instead
+    # of searching). Mirror the micropedia auto-injection pattern: run a
+    # real search UNCONDITIONALLY (no AI judgment needed) whenever the
+    # message looks like an info-seeking question about people/events/status,
+    # and inject the results directly into the system prompt. The tool is
+    # still offered on top of this for follow-up digging.
+    _INFO_SEEKING_MARKERS = (
+        "誰", "是誰", "什麼", "哪", "何時", "多少", "是不是", "有沒有", "?", "？",
+        "當選", "新任", "上任", "現任", "現在", "最近", "最新", "剛", "已經",
+        "罷免", "撤案", "撤回", "選舉", "投票結果", "誰是", "結果",
+    )
+    if message.guild and len(clean_content) >= 4 and any(m in clean_content for m in _INFO_SEEKING_MARKERS):
+        try:
+            _discord_auto = await asyncio.wait_for(
+                _search_discord_history(message.guild, clean_content, limit=15), timeout=12
+            )
+        except asyncio.TimeoutError:
+            print("🔍 search_discord 自動比對逾時（>12s），跳過")
+            _discord_auto = ""
+        if _discord_auto and "沒有找到" not in _discord_auto:
+            system_prompt += (
+                f"\n\n─── Discord 伺服器歷史資料（已自動搜尋到相關內容）───\n"
+                f"以下是根據使用者的問題，自動從整個伺服器（含論壇貼文與訊息歷史）搜尋到的相關內容。"
+                f"這些是真實存在的伺服器記錄，請優先參考並以此為準來回答，"
+                f"尤其是涉及人事任命、選舉結果、提案狀態等問題——不要僅憑印象猜測或說「不確定/沒有公布」，"
+                f"如果下面的資料已經有答案就直接引用回答。\n{_discord_auto}"
+            )
+            print(f"🔍 search_discord: 已自動注入 {len(_discord_auto)} chars 到 AI 上下文")
+
     # Build tool list FIRST so we know whether search_discord is available
     # before constructing the system prompt (avoids adding ~500 chars of
     # search_discord instructions when the tool won't even be sent).
