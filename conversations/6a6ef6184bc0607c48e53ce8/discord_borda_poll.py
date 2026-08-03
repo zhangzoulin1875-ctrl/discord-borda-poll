@@ -2476,35 +2476,9 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"如果自動比對和你的查詢都找不到資料，才誠實告知使用者你沒有找到相關資料。"
         )
 
-    # search_discord tool — always available
-    system_prompt += (
-        f"\n\n─── search_discord 工具（搜尋伺服器歷史：論壇貼文 + 訊息）───\n"
-        f"你有一個 search_discord 工具，會同時搜尋兩種內容：\n"
-        f"1. 論壇頻道的貼文（提案、罷免案、政策/規範討論等）——這些內容微國家百科"
-        f"通常不會記載，只存在於 Discord 伺服器裡\n"
-        f"2. 一般文字頻道的訊息歷史\n"
-        f"搜尋沒有時間限制，有史以來的內容都能找到。"
-        f"當使用者問到：\n"
-        f"- 過去發生過的事、歷史事件\n"
-        f"- 任何提案、罷免案、政策討論（這些很可能只存在論壇貼文，百科查不到）\n"
-        f"- 某人之前說過什麼、做過什麼\n"
-        f"- 之前的決定、投票、討論\n"
-        f"- 任何「以前」、「之前」、「上次」相關的問題\n"
-        f"請呼叫這個工具搜尋相關關鍵字。如果完整名稱查不到，試試看拆成更短的核心詞再查一次"
-        f"（例如「黃綠燈罷免案」查不到就試「黃綠燈」或「罷免」）。可以多次呼叫嘗試不同關鍵字。"
-        f"找到的內容會標示來源（論壇貼文或頻道訊息）、發言者/提案人、日期和內容，"
-        f"你可以據此回答使用者的問題；如果兩個管道都真的找不到，才誠實告知使用者。"
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": full_prompt},
-    ]
-    # Build tool list: micropedia + discord history search
-    # BUT: if the API endpoint is already known to reject tools, skip building
-    # the list entirely — avoids a wasted double-call (try-with-tools → fail →
-    # retry-without-tools) that can cost up to 60s on endpoints that hang on
-    # unknown params instead of returning a quick 400.
+    # Build tool list FIRST so we know whether search_discord is available
+    # before constructing the system prompt (avoids adding ~500 chars of
+    # search_discord instructions when the tool won't even be sent).
     _norm = settings.get("api_url", "").rstrip("/")
     if not _norm.endswith("/chat/completions"):
         if _norm.endswith("/v1") or _norm.endswith("/v2"):
@@ -2513,23 +2487,51 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             _norm += "/v1/chat/completions"
     # WHITELIST approach: only send tools if we've CONFIRMED the endpoint
     # supports them (via startup probe or previous successful tools call).
-    # This prevents the first-message-after-restart timeout that happens when
-    # we send tools to an endpoint that can't handle them.
-    _tools_supported = getattr(globals().get('_tools_supported_apis', None), '__contains__', lambda x: False)(_norm)
+    _tools_supported = _norm in _tools_supported_apis
     _tools_unsup = _norm in _tools_unsupported_apis
     tools_ok = _tools_supported and not _tools_unsup
 
     tools = []
+    _search_discord_available = False
     if tools_ok:
         if micropedia_enabled:
             tools.append(_MICROPEDIA_TOOL_SCHEMA)
         tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)
+        _search_discord_available = True
     elif micropedia_enabled and not _tools_unsup and not _tools_supported:
         # Endpoint not yet tested — send micropedia tool only (known to work
         # in the past) but NOT search_discord (new, might slow things down).
-        # The probe will confirm support and unlock search_discord.
         tools.append(_MICROPEDIA_TOOL_SCHEMA)
     tools = tools if tools else None
+
+    # Only add search_discord instructions to system prompt when the tool
+    # is actually available — avoids inflating the payload with instructions
+    # for a tool the AI can't even call (which slows down the API response
+    # on heavily-loaded free endpoints).
+    if _search_discord_available:
+        system_prompt += (
+            f"\n\n─── search_discord 工具（搜尋伺服器歷史：論壇貼文 + 訊息）───\n"
+            f"你有一個 search_discord 工具，會同時搜尋兩種內容：\n"
+            f"1. 論壇頻道的貼文（提案、罷免案、政策/規範討論等）——這些內容微國家百科"
+            f"通常不會記載，只存在於 Discord 伺服器裡\n"
+            f"2. 一般文字頻道的訊息歷史\n"
+            f"搜尋沒有時間限制，有史以來的內容都能找到。"
+            f"當使用者問到：\n"
+            f"- 過去發生過的事、歷史事件\n"
+            f"- 任何提案、罷免案、政策討論（這些很可能只存在論壇貼文，百科查不到）\n"
+            f"- 某人之前說過什麼、做過什麼\n"
+            f"- 之前的決定、投票、討論\n"
+            f"- 任何「以前」、「之前」、「上次」相關的問題\n"
+            f"請呼叫這個工具搜尋相關關鍵字。如果完整名稱查不到，試試看拆成更短的核心詞再查一次"
+            f"（例如「黃綠燈罷免案」查不到就試「黃綠燈」或「罷免」）。"
+            f"找到的內容會標示來源、發言者、日期和內容，"
+            f"你可以據此回答使用者的問題；如果找不到，才誠實告知使用者。"
+        )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": full_prompt},
+    ]
 
     async def _run_tool_loop():
         """Drive the tool-calling round-trip — capped at EXACTLY 2 LLM calls
