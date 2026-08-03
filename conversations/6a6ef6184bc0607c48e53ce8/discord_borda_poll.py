@@ -1509,6 +1509,14 @@ async def _get_server_context(guild, user) -> str:
             member_summary.append(f"{m['name']}{tag}")
         lines.append(f"\n👥 成員（★=管理員）：{', '.join(member_summary)}")
 
+    # ⚠️ 重要提醒：身分組/成員列表可能滯後（快取每 10 分鐘更新一次）
+    lines.append(
+        "\n⚠️ 注意：上面的身分組和成員資訊是快取的，可能不是最新狀態。"
+        "\n如果使用者問到「誰是某某職位」「誰當選了」「最新的XX是誰」等人事問題，"
+        "\n請以 Discord 搜尋結果（如果有被注入到上下文）為準，不要僅憑身分組列表回答。"
+        "\n身分組列表只反映快取當下的狀態，人事變動可能還沒同步到。"
+    )
+
     return "\n".join(lines)
 
 
