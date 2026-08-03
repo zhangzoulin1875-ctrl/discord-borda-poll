@@ -5241,45 +5241,67 @@ class QuizAnswerView(discord.ui.View):
             print(f"⚠️ Quiz timeout reveal failed: {e}")
 
 
+_quiz_last_question_time = 0  # timestamp of last posted question
+
 async def quiz_question_loop():
-    """Background task: post a new quiz question every 30 minutes."""
+    """Background task: post a new quiz question at the configured interval.
+    Uses short 15-second poll cycles so interval changes take effect immediately."""
+    global _quiz_last_question_time
     await asyncio.sleep(60)  # Wait for bot to be ready
     while True:
         try:
+            interval_secs = quiz_settings.get("interval_minutes", 30) * 60
+
+            # Not enabled? Short sleep and re-check
             if not quiz_settings.get("enabled"):
-                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                await asyncio.sleep(15)
                 continue
 
             channel_id = quiz_settings.get("channel_id")
             if not channel_id:
-                print("⚠️ Quiz: No channel configured, skipping round")
-                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                await asyncio.sleep(15)
+                continue
+
+            # Has enough time passed since the last question?
+            now = _time.time()
+            if _quiz_last_question_time and (now - _quiz_last_question_time) < interval_secs:
+                await asyncio.sleep(15)
+                continue
+
+            # Clean up stale active questions (older than 10 minutes)
+            stale_keys = [
+                k for k, v in quiz_active_questions.items()
+                if (now - v.get("created_at", 0)) > 600
+            ]
+            for k in stale_keys:
+                quiz_active_questions.pop(k, None)
+                print(f"🧹 Quiz: Cleaned up stale question {k}")
+
+            # Check if there's an unanswered active question — don't pile up
+            if quiz_active_questions:
+                print(f"ℹ️ Quiz: {len(quiz_active_questions)} question(s) still active, skipping this round")
+                await asyncio.sleep(15)
                 continue
 
             channel = bot.get_channel(int(channel_id))
             if not channel:
                 print(f"⚠️ Quiz: Cannot find channel {channel_id}")
-                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
-                continue
-
-            # Check if there's an unanswered active question — don't pile up
-            if quiz_active_questions:
-                print(f"ℹ️ Quiz: {len(quiz_active_questions)} question(s) still active, skipping this round")
-                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                await asyncio.sleep(15)
                 continue
 
             # Generate the question
             print("📝 Quiz: Generating new question...")
             quiz_data = await _generate_quiz_question()
             if not quiz_data:
-                print("⚠️ Quiz: Failed to generate question, skipping round")
-                await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+                print("⚠️ Quiz: Failed to generate question, will retry next cycle")
+                _quiz_last_question_time = now  # Reset timer to avoid immediate retry spam
+                await asyncio.sleep(15)
                 continue
 
             # Create embed
             embed = discord.Embed(
                 title="🧠 微國家百科問答",
-                description=f"**{quiz_data['question']}**\n\n快選出正確答案！最先答對得 5 分！",
+                description=f"**{quiz_data['question']}\n\n快選出正確答案！最先答對得 5 分！",
                 color=discord.Color.blurple(),
                 timestamp=discord.utils.utcnow(),
             )
@@ -5287,9 +5309,7 @@ async def quiz_question_loop():
 
             # Send the question
             msg = await channel.send(embed=embed)
-            # Now create the view with buttons (need message ID)
             view = QuizAnswerView(quiz_data, msg.id)
-            # Re-send with buttons (edit the original message)
             await msg.edit(view=view)
 
             # Store the active question
@@ -5303,11 +5323,12 @@ async def quiz_question_loop():
                 "created_at": _time.time(),
             }
 
+            _quiz_last_question_time = _time.time()
             print(f"✅ Quiz: Question posted in #{channel.name} (msg_id={msg.id})")
         except Exception as e:
             print(f"⚠️ Quiz loop error: {e}")
 
-        await asyncio.sleep(quiz_settings.get("interval_minutes", 30) * 60)
+        await asyncio.sleep(15)  # Short poll cycle — interval changes take effect immediately
 
 
 async def quiz_settlement_loop():
