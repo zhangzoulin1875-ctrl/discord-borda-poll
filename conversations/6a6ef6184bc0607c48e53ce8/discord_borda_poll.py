@@ -1504,37 +1504,118 @@ def _clean_wikitext(text: str) -> str:
     return text
 
 
-def _should_search_micropedia(content: str, is_mentioned: bool) -> bool:
-    """Check if a message is likely about micronations and worth a micropedia lookup."""
+def _should_search_micropedia(content: str) -> bool:
+    """Almost always worth attempting a lookup — by the time we're here, the AI has
+    already decided this message deserves a reply, so we just need a non-trivial
+    amount of text to search for. The search itself is cheap (HTTP + cache) and
+    quietly returns nothing when there's no match, so we err on the permissive side
+    rather than trying to keyword-gate every possible topic/proper-noun."""
     if not content:
         return False
-    lower = content.lower()
-    # If explicitly mentions micropedia/micronation keywords, always search
-    for kw in _MICROPEDIA_TRIGGER_KEYWORDS:
-        if kw in lower or kw in content:
-            return True
-    # If mentioned and message is a question, search
-    if is_mentioned and ("?" in content or "？" in content):
-        # But skip very short questions
-        if len(content.strip()) > 10:
-            return True
-    return False
+    stripped = content.strip()
+    # Skip empty/near-empty content (single emoji, punctuation-only, etc.)
+    import re as _re2
+    meaningful = _re2.sub(r"[\s\W_]+", "", stripped)
+    return len(meaningful) >= 2
+
+
+# Question particles/suffixes stripped from the raw message to isolate the actual
+# search subject. Order matters: longer/more specific phrases first.
+_MICROPEDIA_STOPWORDS = [
+    "請問一下", "請問", "你知道嗎", "你知道", "什麼是", "是什麼意思", "是什麼",
+    "叫什麼名字", "叫什麼", "是誰啊", "是誰", "是什麼樣的", "的身份", "的資料",
+    "有什麼資料", "有哪些資料", "有哪些", "有什麼", "在哪裡", "在哪", "怎麼樣",
+    "怎麼回事", "為什麼", "為何", "如何", "怎麼", "嗎？", "嗎", "呢？", "呢",
+    "吧？", "吧", "啊？", "啊", "？", "?", "告訴我", "介紹一下", "介紹",
+    "說一下", "查一下", "搜尋一下", "搜尋", "查詢", "幫我查", "幫我", "可以嗎",
+    "可以", "麻煩", "請", "你覺得", "你", "喔", "欸", "誒", "哦",
+]
 
 
 def _extract_search_query(content: str, bot_id: int) -> str:
     """Extract a search query from the message content."""
-    # Remove bot mentions
+    import re as _re2
     query = content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
-    # Remove common question words and particles
-    for word in ["請問", "你知道", "什麼是", "什麼", "嗎", "呢", "吧", "啊", "嗎？", "？",
-                 "告訴我", "介紹", "一下", "如何", "為什麼", "怎麼", "有哪些", "有哪些",
-                 "查一下", "搜尋", "查詢", "幫我", "可以", "請", "你"]:
+    for word in _MICROPEDIA_STOPWORDS:
         query = query.replace(word, "")
+    # Strip leftover punctuation
+    query = _re2.sub(r"[!！,，。.、~～\s]+$", "", query).strip()
     query = query.strip()
-    # If query is too long, truncate
     if len(query) > 50:
         query = query[:50]
     return query
+
+
+async def _search_micropedia_titles(session, query: str, max_results: int, skip_prefixes: tuple) -> list:
+    """Run one search attempt against micropedia.site and return a list of article
+    titles (empty list if nothing matched). Handles both MediaWiki behaviors:
+    exact-title redirect straight to the article, or a real results list page."""
+    import urllib.parse as _up
+    import re as _re
+
+    timeout = aiohttp.ClientTimeout(total=15, connect=8)
+    search_url = f"https://www.micropedia.site/wiki/{_up.quote('特殊:搜尋')}?search={_up.quote(query)}"
+
+    async with session.get(
+        search_url,
+        headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"},
+        timeout=timeout,
+    ) as resp:
+        if resp.status != 200:
+            print(f"📚 Micropedia: 搜尋頁回傳 {resp.status}")
+            return []
+        html = await resp.text()
+        final_url = str(resp.url)
+
+    redirected_to_article = "特殊:搜尋" not in _up.unquote(final_url) and "Special:Search" not in final_url
+
+    article_titles = []
+    if redirected_to_article and "mw-search-results" not in html:
+        # Exact-title match, we landed directly on the article.
+        m = _re.search(r'<h1[^>]*id="firstHeading"[^>]*>(?:<span[^>]*>)?([^<]+)', html)
+        if m:
+            article_titles = [m.group(1).strip()]
+        else:
+            path = _up.unquote(final_url).rsplit("/wiki/", 1)[-1]
+            if path and not any(path.startswith(p) for p in skip_prefixes):
+                article_titles = [path]
+    else:
+        # Real search-result list markup.
+        raw_links = _re.findall(
+            r'<div class="mw-search-result-heading"><a href="([^"]*)" title="([^"]*)"',
+            html,
+        )
+        seen = set()
+        for href, title in raw_links:
+            title = _up.unquote(title)
+            if any(title.startswith(p) for p in skip_prefixes):
+                continue
+            if title in seen or not title:
+                continue
+            seen.add(title)
+            article_titles.append(title)
+            if len(article_titles) >= max_results:
+                break
+
+    return article_titles
+
+
+def _micropedia_backoff_queries(query: str) -> list:
+    """Generate progressively shorter variants of a query for retrying a failed
+    search. MediaWiki's default search ANDs all terms together, so leftover
+    question-particle noise (that our stopword stripping missed) can make an
+    otherwise-good query return zero hits. Trimming from the end tends to shed
+    that noise while keeping the actual subject (which usually comes first in
+    Chinese phrasing, e.g. '琉璃是誰' -> '琉璃')."""
+    import re as _re
+    variants = []
+    # Trim trailing characters progressively, keeping at least 2 chars.
+    for cut in range(1, min(6, len(query) - 1)):
+        candidate = query[:-cut].strip()
+        candidate = _re.sub(r"[!！,，。.、~～\s]+$", "", candidate).strip()
+        if len(candidate) >= 2 and candidate not in variants:
+            variants.append(candidate)
+    return variants[:4]  # cap attempts to avoid hammering the site
 
 
 async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
@@ -1551,73 +1632,33 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
             print(f"📚 Micropedia: 使用快取結果 for '{query}'")
             return cached_content
 
-    timeout = aiohttp.ClientTimeout(total=15, connect=8)
     import urllib.parse as _up
-    import re as _re
 
     skip_prefixes = ("特殊:", "File:", "Category:", "Template:", "Help:",
                      "Special:", "MediaWiki:", "User:", "Talk:", "Project:", "分類:")
 
     try:
         async with aiohttp.ClientSession() as session:
-            article_titles = []
+            print(f"📚 Micropedia: 搜尋 '{query}'")
+            article_titles = await _search_micropedia_titles(session, query, max_results, skip_prefixes)
 
-            # ── Step 1: Hit the search page. MediaWiki behaves two ways:
-            #   a) Exact single-title match -> redirects straight to the article page.
-            #   b) Multiple/fuzzy matches -> stays on 特殊:搜尋 with a real results list
-            #      (<div class="mw-search-result-heading"><a href="..." title="...">).
-            search_url = f"https://www.micropedia.site/wiki/{_up.quote('特殊:搜尋')}?search={_up.quote(query)}"
-            print(f"📚 Micropedia: 搜尋 '{query}' -> {search_url}")
-
-            async with session.get(
-                search_url,
-                headers={"User-Agent": "DiscordBot (micropedia-integration/1.0)"},
-                timeout=timeout,
-            ) as resp:
-                if resp.status != 200:
-                    print(f"📚 Micropedia: 搜尋頁回傳 {resp.status}")
-                    return ""
-                html = await resp.text()
-                final_url = str(resp.url)
-
-            redirected_to_article = "特殊:搜尋" not in _up.unquote(final_url) and "Special:Search" not in final_url
-
-            if redirected_to_article and "mw-search-results" not in html:
-                # Case (a): exact-title match, we landed directly on the article.
-                m = _re.search(r'<h1[^>]*id="firstHeading"[^>]*>(?:<span[^>]*>)?([^<]+)', html)
-                if m:
-                    article_titles = [m.group(1).strip()]
-                else:
-                    # Fallback: derive title from the final URL path
-                    path = _up.unquote(final_url).rsplit("/wiki/", 1)[-1]
-                    if path and not any(path.startswith(p) for p in skip_prefixes):
-                        article_titles = [path]
-            else:
-                # Case (b): parse the real search-result list markup.
-                raw_links = _re.findall(
-                    r'<div class="mw-search-result-heading"><a href="([^"]*)" title="([^"]*)"',
-                    html,
-                )
-                seen = set()
-                for href, title in raw_links:
-                    title = _up.unquote(title)
-                    if any(title.startswith(p) for p in skip_prefixes):
-                        continue
-                    if title in seen or not title:
-                        continue
-                    seen.add(title)
-                    article_titles.append(title)
-                    if len(article_titles) >= max_results:
+            # ── Backoff: if the full query missed, retry with trimmed variants ──
+            if not article_titles:
+                for variant in _micropedia_backoff_queries(query):
+                    print(f"📚 Micropedia: 原始查詢無結果，改試 '{variant}'")
+                    article_titles = await _search_micropedia_titles(session, variant, max_results, skip_prefixes)
+                    if article_titles:
                         break
 
             if not article_titles:
-                print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果")
+                print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果（含退避重試）")
                 _micropedia_cache[cache_key] = (_time.time(), "")
                 return ""
 
             print(f"📚 Micropedia: 找到 {len(article_titles)} 篇相關文章: {article_titles[:5]}")
 
-            # ── Step 2: Fetch content for each article via the MediaWiki API ──
+            # ── Fetch content for each article via the MediaWiki API ──
+            timeout = aiohttp.ClientTimeout(total=15, connect=8)
             titles_param = "|".join(_up.quote(t) for t in article_titles)
             api_url = (
                 f"https://www.micropedia.site/api.php?action=query"
@@ -1758,7 +1799,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     micropedia_context = ""
     if settings.get("micropedia_enabled", True):
         bot_id = bot.user.id
-        if _should_search_micropedia(clean_content, False):
+        if _should_search_micropedia(clean_content):
             search_query = _extract_search_query(message.content, bot_id)
             if search_query:
                 max_results = settings.get("micropedia_max_results", 5)
