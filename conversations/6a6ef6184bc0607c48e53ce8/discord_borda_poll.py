@@ -1486,6 +1486,10 @@ async def on_ready():
     bot.tree.add_command(MeetingGroup())
     bot.tree.add_command(BriefingGroup())
     bot.tree.add_command(ChatGroup())
+    # Check message_content intent
+    if not bot.intents.message_content:
+        print("⚠️  message_content intent 未啟用！AI 聊天功能無法讀取訊息內容。")
+        print("    請到 Discord Developer Portal → Bot → Privileged Gateway Intents → 開啟 MESSAGE CONTENT INTENT")
     try:
         synced = await bot.tree.sync()
         print(f"✅ Bot 上線：{bot.user}（已同步 {len(synced)} 個 slash commands）")
@@ -1522,30 +1526,51 @@ async def on_message(message):
     if message.content.startswith("/") or message.content.startswith("!"):
         return
 
+    # Debug: log all human messages
+    content_preview = message.content[:80].replace("\n", " ") if message.content else "(empty)"
+    is_mentioned = bot.user in message.mentions
+    print(f"📩 on_message: #{message.channel} | {message.author.display_name}: {content_preview}")
+    print(f"   enabled={chat_ai_settings.get('enabled')}, key={'✅' if chat_ai_settings.get('api_key') else '❌'}, mentioned={is_mentioned}")
+
     # Check if chat AI is enabled and has API key
-    if not chat_ai_settings.get("enabled") or not chat_ai_settings.get("api_key"):
+    if not chat_ai_settings.get("enabled"):
+        print(f"   ⏭️ Chat AI is disabled. Run /chat toggle to enable.")
+        return
+    if not chat_ai_settings.get("api_key"):
+        print(f"   ⏭️ No API key set.")
+        return
+
+    # Check if message content is empty (intent not enabled)
+    if not message.content or len(message.content.strip()) == 0:
+        print(f"   ⚠️ message.content is empty! Message Content Intent may not be enabled in Discord Developer Portal.")
         return
 
     # Check channel whitelist
     whitelist = chat_ai_settings.get("channels_whitelist", [])
     if whitelist and message.channel.id not in whitelist:
+        print(f"   ⏭️ Channel not in whitelist.")
         return
 
     # Skip if already generating in this channel
     if message.channel.id in chat_generating:
+        print(f"   ⏭️ Already generating in this channel.")
         return
 
     # Check cooldown (skip for @mentions)
-    is_mentioned = bot.user in message.mentions
     if not is_mentioned:
         last_reply = chat_cooldowns.get(message.channel.id, 0)
-        if _time.time() - last_reply < chat_ai_settings.get("cooldown_seconds", 60):
+        cooldown = chat_ai_settings.get("cooldown_seconds", 60)
+        remaining = cooldown - (_time.time() - last_reply)
+        if remaining > 0:
+            print(f"   ⏭️ Cooldown: {remaining:.0f}s remaining.")
             return
 
     # Worthiness check
     worth, clean = _is_worth_replying(message.content, is_mentioned, bot.user.id)
     if not worth:
+        print(f"   ⏭️ Not worth replying (content too short/low-value).")
         return
+    print(f"   ✅ Worth replying! Generating...")
 
     # Generate reply
     chat_generating.add(message.channel.id)
@@ -2653,6 +2678,52 @@ class ChatGroup(app_commands.Group):
             await interaction.followup.send(f"✅ AI 回覆：\n{reply}", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"❌ AI 聊天測試失敗：{e}", ephemeral=True)
+
+    @app_commands.command(name="debug", description="診斷 AI 聊天問題（管理員限定）")
+    async def chat_debug(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        lines = []
+        lines.append(f"**AI 聊天診斷**")
+        lines.append(f"")
+        lines.append(f"**1. 功能狀態**")
+        lines.append(f"  enabled: {'✅ 開啟' if chat_ai_settings.get('enabled') else '❌ 關閉'}")
+        lines.append(f"  → 如果關閉，請執行 `/chat toggle`")
+        lines.append(f"")
+        lines.append(f"**2. API 設定**")
+        lines.append(f"  API Key: {'✅ 已設定' if chat_ai_settings.get('api_key') else '❌ 未設定'}")
+        lines.append(f"  API URL: `{chat_ai_settings.get('api_url', '未設定')}`")
+        lines.append(f"  Model: `{chat_ai_settings.get('model', '未設定')}`")
+        lines.append(f"")
+        lines.append(f"**3. Message Content Intent**")
+        has_intent = bot.intents.message_content
+        lines.append(f"  程式碼: {'✅ 已啟用' if has_intent else '❌ 未啟用'}")
+        lines.append(f"  → 如果上面是 ✅ 但 bot 仍不回覆，請到 Discord Developer Portal")
+        lines.append(f"  → Bot → Privileged Gateway Intents → 開啟 MESSAGE CONTENT INTENT")
+        lines.append(f"")
+        lines.append(f"**4. 頻道白名單**")
+        wl = chat_ai_settings.get("channels_whitelist", [])
+        if wl:
+            lines.append(f"  {'、'.join(f'<#{cid}>' for cid in wl)}")
+            lines.append(f"  → 只有以上頻道會回覆，其他頻道被忽略")
+        else:
+            lines.append(f"  所有頻道（無限制）")
+        lines.append(f"")
+        lines.append(f"**5. 冷卻時間**")
+        lines.append(f"  {chat_ai_settings.get('cooldown_seconds', 60)} 秒（@提及不受限）")
+        lines.append(f"")
+        lines.append(f"**6. 判斷邏輯**")
+        lines.append(f"  @提及：需要 >10 字實質內容才回")
+        lines.append(f"  一般訊息：問題(?)或關鍵字才回，3% 隨機機率")
+        lines.append(f"  → 太短的訊息（<5字）、問候語、連結不回")
+        lines.append(f"")
+        lines.append(f"**7. 測試**")
+        lines.append(f"  請在這個頻道發一則 >15 字的訊息，然後查看 Render logs")
+        lines.append(f"  應該能看到 `📩 on_message: ...` 的日誌")
+        lines.append(f"")
+        embed = discord.Embed(title="🔍 AI 聊天診斷", description="\n".join(lines), color=discord.Color.orange())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="status", description="查看 AI 聊天設定")
     async def chat_status(self, interaction: discord.Interaction):
