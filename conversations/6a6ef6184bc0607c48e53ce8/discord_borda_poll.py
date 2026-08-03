@@ -868,6 +868,7 @@ chat_ai_settings = {
     "abuse_detection_enabled": False,
     "abuse_detection_strictness": "medium",  # low / medium / high
     "abuse_mute_admins": False,
+    "log_channel_id": None,  # channel ID for AI action logs (mute, warnings, etc.)
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -962,6 +963,8 @@ def load_chat_ai_settings():
                 loaded["abuse_detection_strictness"] = "medium"
             if "abuse_mute_admins" not in loaded:
                 loaded["abuse_mute_admins"] = False
+            if "log_channel_id" not in loaded:
+                loaded["log_channel_id"] = None
             chat_ai_settings.update(loaded)
             print("✅ 載入 AI 聊天設定")
     except Exception as e:
@@ -1342,6 +1345,32 @@ async def _execute_mute(message, duration: int, reason: str):
             mod_action_log[:] = mod_action_log[-MOD_LOG_MAX:]
 
         print(f"🛡️ 濫用偵測：已禁言 {member.display_name} {duration}秒，原因：{reason}")
+
+        # Send log to designated channel if configured
+        log_ch_id = chat_ai_settings.get("log_channel_id")
+        if log_ch_id:
+            try:
+                log_ch = guild.get_channel(log_ch_id)
+                if log_ch:
+                    log_embed = discord.Embed(
+                        title="🛡️ AI 自動禁言",
+                        color=discord.Color.red(),
+                        timestamp=discord.utils.utcnow(),
+                    )
+                    log_embed.add_field(name="使用者", value=f"{member.mention} ({member.display_name})", inline=False)
+                    log_embed.add_field(name="禁言時長", value=f"{duration // 60} 分鐘 ({duration} 秒)", inline=True)
+                    log_embed.add_field(name="頻道", value=f"#{message.channel.name}" if hasattr(message.channel, "name") else "?", inline=True)
+                    log_embed.add_field(name="原因", value=reason, inline=False)
+                    log_embed.add_field(name="違規次數", value=f"第 {tracker['total_mutes']} 次", inline=True)
+                    offense_text = message.content[:200]
+                    if len(message.content) > 200:
+                        offense_text += "..."
+                    log_embed.add_field(name="觸發訊息", value=f"> {offense_text}", inline=False)
+                    log_embed.set_footer(text=f"User ID: {member.id}")
+                    await log_ch.send(embed=log_embed)
+            except Exception as log_err:
+                print(f"⚠️ Log 頻道發送失敗：{log_err}")
+
         return True
     except Exception as e:
         print(f"🛡️ 濫用偵測：禁言失敗：{e}")
@@ -3660,6 +3689,31 @@ class ChatGroup(app_commands.Group):
         except Exception as e:
             await interaction.response.send_message(f"❌ 解除禁言失敗：{e}", ephemeral=True)
 
+    @app_commands.command(name="log_channel", description="設定/清除 AI 紀錄頻道（管理員限定）")
+    @app_commands.describe(action="設定或清除", channel="要設為 log 頻道的頻道（清除時不填）")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="設定", value="set"),
+        app_commands.Choice(name="清除", value="clear"),
+    ])
+    async def chat_log_channel(self, interaction: discord.Interaction, action: app_commands.Choice[str], channel: discord.TextChannel = None):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        if action.value == "clear":
+            chat_ai_settings["log_channel_id"] = None
+            save_chat_ai_settings()
+            await interaction.response.send_message("✅ AI 紀錄頻道已清除。", ephemeral=True)
+        elif action.value == "set" and channel:
+            chat_ai_settings["log_channel_id"] = channel.id
+            save_chat_ai_settings()
+            await interaction.response.send_message(
+                f"✅ AI 紀錄頻道已設為 {channel.mention}\n"
+                f"AI 自動禁言、警告等紀錄將發送到此頻道。",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message("⚠️ 請選擇動作和頻道。", ephemeral=True)
+
     @app_commands.command(name="test", description="測試 AI 聊天回覆（管理員限定）")
     @app_commands.describe(message="要測試的訊息")
     async def chat_test(self, interaction: discord.Interaction, message: str):
@@ -3790,6 +3844,15 @@ class ChatGroup(app_commands.Group):
             lines.append(f"  累計禁言次數：{len(mod_action_log)}")
         lines.append(f"  → `/chat abuse_toggle` 開關 | `/chat abuse_level` 調整 | `/chat abuse_log` 查看記錄")
         lines.append(f"")
+        lines.append(f"**9. AI 紀錄頻道**")
+        log_ch_id = chat_ai_settings.get("log_channel_id")
+        if log_ch_id:
+            lines.append(f"  ✅ 已設定：<#{log_ch_id}>")
+            lines.append(f"  禁言、警告等 AI 動作會自動記錄到此頻道")
+        else:
+            lines.append(f"  ❌ 未設定")
+            lines.append(f"  → 用 `/chat log_channel` 設定")
+        lines.append(f"")
         lines.append(f"**7. 測試**")
         lines.append(f"  請在這個頻道發一則 >15 字的訊息，然後查看 Render logs")
         lines.append(f"  應該能看到 `📩 on_message: ...` 的日誌")
@@ -3823,7 +3886,10 @@ class ChatGroup(app_commands.Group):
         abuse_on = chat_ai_settings.get("abuse_detection_enabled", False)
         abuse_strict = chat_ai_settings.get("abuse_detection_strictness", "medium")
         embed.add_field(name="濫用偵測", value=f"{'✅' if abuse_on else '❌'} {abuse_strict}", inline=True)
-        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat memory | /chat debug")
+        log_ch_id = chat_ai_settings.get("log_channel_id")
+        log_ch_val = f"<#{log_ch_id}>" if log_ch_id else "未設定"
+        embed.add_field(name="紀錄頻道", value=log_ch_val, inline=True)
+        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat debug")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
