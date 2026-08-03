@@ -1225,6 +1225,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         # this endpoint doesn't support function calling and never try again.
         print(f"⚠️ Chat AI 端點帶 tools 參數呼叫失敗（status={status}），之後略過 tools：{body_text[:200]}")
         _tools_unsupported_apis.add(api_url)
+        save_tools_unsupported()
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
         status, body_text = await _post(payload)
@@ -1394,6 +1395,23 @@ async def server_context_refresh_loop():
         except Exception as e:
             print(f"⚠️ 伺服器結構背景更新失敗：{e}")
         await asyncio.sleep(_SERVER_CONTEXT_TTL)
+
+
+async def forum_index_refresh_loop():
+    """Background task: refresh the forum-post search index every 15 minutes.
+    Runs fully decoupled from any single user query's time budget — a query
+    just reads whatever is cached (bigram matching only, no network calls),
+    so this refresh can take as long as it needs without ever risking a
+    reply-pipeline timeout."""
+    await asyncio.sleep(90)  # Wait for bot to be ready, after server context
+    while True:
+        try:
+            for guild in bot.guilds:
+                await _refresh_forum_index(guild)
+                await asyncio.sleep(1)  # stagger to avoid rate limits
+        except Exception as e:
+            print(f"⚠️ Forum 索引背景更新失敗：{e}")
+        await asyncio.sleep(_FORUM_INDEX_TTL)
 
 
 # ──────────────────────────────────────────────
@@ -1642,7 +1660,30 @@ _MICROPEDIA_CACHE_TTL = 600  # 10 minutes
 # Per api_url: whether the endpoint has confirmed to reject the "tools" field.
 # Once we learn a given endpoint doesn't support function calling, we stop
 # paying the cost of trying (and failing) on every single message.
+# Persisted to disk — without this, EVERY hot restart re-pays the double
+# network round-trip (try-with-tools, fail, retry-without-tools) on the very
+# next message, which is a major source of the reply pipeline timing out.
 _tools_unsupported_apis: set = set()
+TOOLS_UNSUPPORTED_FILE = os.path.join(DATA_DIR, "tools_unsupported_apis.json")
+
+def save_tools_unsupported():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        with open(TOOLS_UNSUPPORTED_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(list(_tools_unsupported_apis), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ tools_unsupported_apis save failed: {e}")
+
+def load_tools_unsupported():
+    global _tools_unsupported_apis
+    try:
+        if os.path.exists(TOOLS_UNSUPPORTED_FILE):
+            with open(TOOLS_UNSUPPORTED_FILE, "r", encoding="utf-8") as f:
+                _tools_unsupported_apis = set(json_module.load(f))
+            if _tools_unsupported_apis:
+                print(f"✅ tools_unsupported_apis 載入：{_tools_unsupported_apis}（略過 tools 參數，直接用純文字呼叫）")
+    except Exception as e:
+        print(f"⚠️ tools_unsupported_apis load failed: {e}")
 
 _MICROPEDIA_SKIP_PREFIXES = ("特殊:", "File:", "Category:", "Template:", "Help:",
                              "Special:", "MediaWiki:", "User:", "Talk:", "Project:", "分類:")
@@ -1932,71 +1973,226 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
         return ""
 
 
-# Tool schema exposed to the AI so it can search micropedia.site itself,
-# instead of us guessing the query with regex heuristics.
 # ── Discord 歷史搜尋工具 ──
-# 使用 Discord 的 guild search API，讓 AI 能搜尋伺服器內所有頻道的歷史訊息
-# 不受時間限制，有史以來的訊息都能搜尋
+# 兩個資料來源，平行查詢後合併結果：
+# 1. 論壇貼文本地索引 — Discord 論壇頻道的貼文（例如提案、罷免案）常常是用
+#    表單/webhook 送出，內文其實是空的，真正的文字內容全部塞在 Embed 裡。
+#    Discord 官方 guild search API 只比對純文字 content 欄位，比對不到
+#    embed 內容，所以這類貼文永遠搜不到——這正是黃綠燈罷免案搜不到的原因。
+#    我們自己把每個論壇貼文的標題、標籤、內文、embed 全部串起來做本地索引，
+#    用跟 micropedia 一樣的 bigram 比對法搜尋，快取在記憶體，即時比對零延遲。
+# 2. Discord guild search API — 一般文字頻道的純文字訊息歷史搜尋。
+# 不受時間限制，有史以來的訊息/貼文都能搜到。
 
-async def _search_discord_history(guild, query: str, limit: int = 10) -> str:
-    """Search Discord guild message history for a keyword.
-    Uses Discord's guild search API endpoint. Returns formatted results.
-    No time limit — searches all of history."""
+_forum_index_cache: dict = {}  # {guild_id: {"posts": [...], "updated": ts}}
+_FORUM_INDEX_TTL = 900  # 15 分鐘快取
+
+
+async def _refresh_forum_index(guild) -> list:
+    """Scan every Forum channel in the guild and build a searchable index of
+    every post (thread): title + tags + OP text content + OP embed text.
+    Embeds are critical — many proposal/policy forums are submitted via a
+    bot/webhook that posts a pure embed with EMPTY message content, so
+    without reading embeds these posts are invisible to any text search."""
+    posts = []
+    try:
+        for forum in guild.forums:
+            threads = list(forum.threads)  # active posts (already cached)
+            try:
+                async for t in forum.archived_threads(limit=100):
+                    threads.append(t)
+            except Exception as e:
+                print(f"⚠️ 無法取得「{forum.name}」的封存貼文：{e}")
+
+            for thread in threads:
+                try:
+                    starter = thread.starter_message
+                    if starter is None:
+                        try:
+                            starter = await thread.fetch_message(thread.id)
+                        except Exception:
+                            starter = None
+
+                    tags = [t.name for t in thread.applied_tags]
+                    text_parts = [thread.name]
+                    if tags:
+                        text_parts.append(" ".join(tags))
+                    if starter:
+                        if starter.content:
+                            text_parts.append(starter.content)
+                        for embed in starter.embeds:
+                            if embed.title:
+                                text_parts.append(str(embed.title))
+                            if embed.description:
+                                text_parts.append(str(embed.description))
+                            for field in embed.fields:
+                                text_parts.append(f"{field.name} {field.value}")
+
+                    posts.append({
+                        "title": thread.name,
+                        "tags": tags,
+                        "channel_name": forum.name,
+                        "text": "\n".join(str(p) for p in text_parts if p),
+                        "url": thread.jump_url,
+                        "author": (starter.author.display_name if starter and starter.author else "未知"),
+                        "created_at": thread.created_at.strftime("%Y-%m-%d") if thread.created_at else "",
+                    })
+                except Exception as e:
+                    print(f"⚠️ 索引貼文失敗（{getattr(thread, 'name', '?')}）：{e}")
+                    continue
+    except Exception as e:
+        print(f"⚠️ Forum 索引刷新失敗：{e}")
+
+    _forum_index_cache[guild.id] = {"posts": posts, "updated": _time.time()}
+    forum_count = len(list(guild.forums)) if hasattr(guild, "forums") else 0
+    print(f"🗂️ Forum 索引已更新：{guild.name} — {len(posts)} 篇貼文（{forum_count} 個論壇頻道）")
+    return posts
+
+
+async def _get_forum_index(guild) -> list:
+    """Read the cached forum index. The background forum_index_refresh_loop
+    keeps this warm every 15 minutes, so this is just a cheap dict read in
+    the common case. Only does a live (blocking) refresh if the cache is
+    completely empty — e.g. a query arrives before the bot's first
+    background refresh pass has completed after startup."""
+    cached = _forum_index_cache.get(guild.id)
+    if cached is not None:
+        return cached["posts"]
+    return await _refresh_forum_index(guild)
+
+
+def _search_forum_posts(query: str, posts: list, top_n: int = 5) -> list:
+    """Fuzzy-match a query against indexed forum posts using bigram
+    containment (same technique as micropedia title matching), scored by how
+    much of the QUERY's bigrams are found in the post's combined text —
+    plus a direct substring check, since forum text is long/noisy and a
+    short exact term (e.g. a proper noun) should always count as a hit."""
+    query = query.strip()
+    query_bg = _bigrams(query)
+    if not query_bg or not posts:
+        return []
+    scored = []
+    for p in posts:
+        text = p["text"]
+        text_bg = _bigrams(text)
+        if not text_bg:
+            continue
+        overlap = query_bg & text_bg
+        substring_hit = bool(query) and query in text
+        if not overlap and not substring_hit:
+            continue
+        containment = len(overlap) / len(query_bg) if query_bg else 0
+        if not substring_hit and containment < 0.5:
+            continue
+        scored.append((p, containment, substring_hit))
+    scored.sort(key=lambda x: (-x[2], -x[1]))
+    return [p for p, _, _ in scored[:top_n]]
+
+
+async def _live_guild_message_search(guild, query: str, limit: int = 10) -> str:
+    """Search Discord guild message history (plain-text content only) via
+    Discord's guild search API endpoint. No time limit — searches all of
+    history. Does NOT see embed content — that's what the forum index above
+    covers separately."""
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token or not guild or not query.strip():
-        return "搜尋條件不足"
+        return ""
 
     query = query.strip()
     headers = {"Authorization": f"Bot {token}"}
+    timeout = aiohttp.ClientTimeout(total=7, connect=3)
 
     try:
-        async with aiohttp.ClientSession() as session:
-            # Discord search API: GET /guilds/{id}/messages/search?content=keyword
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             search_url = (
                 f"https://discord.com/api/v9/guilds/{guild.id}/messages/search"
                 f"?content={urllib.parse.quote(query)}&limit={limit}"
             )
             async with session.get(search_url, headers=headers) as resp:
                 if resp.status == 429:
-                    # Rate limited — read retry-after header
                     retry_after = resp.headers.get("Retry-After", "5")
                     print(f"⏳ Discord search rate limited, retry after {retry_after}s")
-                    return f"搜尋頻率受限，請稍後再試（Discord 限制 {retry_after} 秒）"
+                    return ""
                 if resp.status != 200:
                     err = await resp.text()
                     print(f"⚠️ Discord search failed ({resp.status}): {err[:300]}")
-                    return f"搜尋失敗（HTTP {resp.status}）"
-
+                    return ""
                 data = await resp.json()
 
-            # Discord search returns {"messages": [[{message, ...}, ...], ...]}
-            # Each element is an array of messages in the same context (threads etc.)
             messages = []
             for group in data.get("messages", []):
                 for msg in group:
                     messages.append(msg)
-
             if not messages:
-                return f"沒有找到包含「{query}」的訊息"
+                return ""
 
-            # Format results
-            lines = [f"🔍 Discord 搜尋「{query}」的結果（{len(messages)} 則相關訊息）："]
+            lines = [f"🔍 頻道訊息搜尋「{query}」的結果（{len(messages)} 則）："]
             for i, msg in enumerate(messages[:limit], 1):
                 author = msg.get("author", {}).get("username", "未知")
-                channel_id = msg.get("channel_id", "")
                 content = msg.get("content", "").strip()
                 timestamp = msg.get("timestamp", "")
-                # Clean up content: remove bot mentions, limit length
-                content = re.sub(r"<@!?\d+>", "@用戶", content)
-                content = content[:300]
+                content = re.sub(r"<@!?\d+>", "@用戶", content)[:300]
                 lines.append(f"\n[{i}] {author} ({timestamp[:10] if timestamp else '?'}): {content}")
-
-            result = "\n".join(lines)
-            return result[:3000]  # Cap for tool context
-
+            return "\n".join(lines)[:2000]
+    except asyncio.TimeoutError:
+        print(f"⚠️ Discord 訊息搜尋逾時 for '{query}'")
+        return ""
     except Exception as e:
         print(f"⚠️ Discord search error: {e}")
-        return f"搜尋時發生錯誤：{e}"
+        return ""
+
+
+async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> str:
+    """Runs the forum-index search and the live message search CONCURRENTLY
+    and merges both into one result string for the AI."""
+    if not guild or not query.strip():
+        return "搜尋條件不足"
+    query = query.strip()
+
+    async def _forum_part():
+        try:
+            posts = await _get_forum_index(guild)
+            matched = _search_forum_posts(query, posts, top_n=5)
+            if not matched:
+                return ""
+            parts = [f"📋 論壇貼文搜尋「{query}」的結果（{len(matched)} 篇）："]
+            for p in matched:
+                snippet = p["text"][:500]
+                tag_str = f"［{'/'.join(p['tags'])}］" if p["tags"] else ""
+                parts.append(
+                    f"\n【{p['channel_name']}】{tag_str}《{p['title']}》"
+                    f"— {p['author']}, {p['created_at']}\n{snippet}\n連結：{p['url']}"
+                )
+            return "\n".join(parts)
+        except Exception as e:
+            print(f"⚠️ Forum 索引搜尋失敗：{e}")
+            return ""
+
+    forum_result, live_result = await asyncio.gather(
+        asyncio.wait_for(_forum_part(), timeout=3),  # cache read + in-memory bigram match — should be instant
+        asyncio.wait_for(_live_guild_message_search(guild, query, limit), timeout=8),
+        return_exceptions=True,
+    )
+    if isinstance(forum_result, Exception):
+        forum_result = ""
+    if isinstance(live_result, Exception):
+        live_result = ""
+
+    combined = "\n\n".join(r for r in (forum_result, live_result) if r)
+    if not combined:
+        return f"沒有找到包含「{query}」的訊息或論壇貼文"
+    return combined[:3500]
+
+
+async def _search_discord_history(guild, query: str, limit: int = 10) -> str:
+    """Thin wrapper enforcing a hard overall time budget (10s) regardless of
+    network conditions — guarantees this tool call never meaningfully stalls
+    the reply pipeline (same pattern as _fetch_micropedia)."""
+    try:
+        return await asyncio.wait_for(_search_discord_history_inner(guild, query, limit), timeout=10)
+    except asyncio.TimeoutError:
+        print(f"⚠️ Discord 搜尋整體逾時（>10s），放棄 for '{query}'")
+        return "搜尋逾時，換個關鍵字試試看"
 
 
 _DISCORD_SEARCH_TOOL_SCHEMA = {
@@ -2004,19 +2200,20 @@ _DISCORD_SEARCH_TOOL_SCHEMA = {
     "function": {
         "name": "search_discord",
         "description": (
-            "搜尋這個 Discord 伺服器的歷史訊息，找出包含指定關鍵字的對話記錄。"
-            "可以搜尋所有頻道、有史以來的訊息，沒有時間限制。"
-            "當使用者問到過去發生的事、歷史事件、某人說過什麼、之前的決定或討論時，"
-            "呼叫這個工具搜尋相關歷史訊息。"
-            "建議用簡短的核心關鍵字（人名、事件名、關鍵詞），不要太長的句子。"
-            "可以呼叫多次嘗試不同關鍵字。"
+            "搜尋這個 Discord 伺服器的歷史紀錄，找出包含指定關鍵字的內容，包含兩種來源："
+            "(1) 論壇頻道的貼文（提案、罷免案、政策討論等——含標題、標籤、內文），"
+            "(2) 一般文字頻道的訊息歷史。可以搜尋所有頻道、有史以來的內容，沒有時間限制。"
+            "當使用者問到過去發生的事、歷史事件、某個提案/罷免案、某人說過什麼、"
+            "之前的決定或討論時，呼叫這個工具搜尋。"
+            "建議用簡短的核心關鍵字（人名、事件名、提案名稱關鍵詞），不要太長的句子。"
+            "可以呼叫多次嘗試不同關鍵字（例如完整名稱查不到就拆成更短的核心詞）。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "搜尋關鍵字，建議用簡短的核心詞（人名、事件核心詞等），不要整句問句"
+                    "description": "搜尋關鍵字，建議用簡短的核心詞（人名、事件核心詞、提案關鍵詞等），不要整句問句"
                 }
             },
             "required": ["query"],
@@ -2234,16 +2431,22 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
 
     # search_discord tool — always available
     system_prompt += (
-        f"\n\n─── search_discord 工具（搜尋伺服器歷史）───\n"
-        f"你有一個 search_discord 工具，可以搜尋這個 Discord 伺服器所有頻道的歷史訊息。"
-        f"搜尋沒有時間限制，有史以來的訊息都能找到。"
+        f"\n\n─── search_discord 工具（搜尋伺服器歷史：論壇貼文 + 訊息）───\n"
+        f"你有一個 search_discord 工具，會同時搜尋兩種內容：\n"
+        f"1. 論壇頻道的貼文（提案、罷免案、政策/規範討論等）——這些內容微國家百科"
+        f"通常不會記載，只存在於 Discord 伺服器裡\n"
+        f"2. 一般文字頻道的訊息歷史\n"
+        f"搜尋沒有時間限制，有史以來的內容都能找到。"
         f"當使用者問到：\n"
         f"- 過去發生過的事、歷史事件\n"
+        f"- 任何提案、罷免案、政策討論（這些很可能只存在論壇貼文，百科查不到）\n"
         f"- 某人之前說過什麼、做過什麼\n"
         f"- 之前的決定、投票、討論\n"
         f"- 任何「以前」、「之前」、「上次」相關的問題\n"
-        f"請呼叫這個工具搜尋相關關鍵字。建議用簡短的核心詞搜尋，可以多次呼叫嘗試不同關鍵字。"
-        f"找到的歷史訊息會顯示發言者、日期和內容，你可以據此回答使用者的問題。"
+        f"請呼叫這個工具搜尋相關關鍵字。如果完整名稱查不到，試試看拆成更短的核心詞再查一次"
+        f"（例如「黃綠燈罷免案」查不到就試「黃綠燈」或「罷免」）。可以多次呼叫嘗試不同關鍵字。"
+        f"找到的內容會標示來源（論壇貼文或頻道訊息）、發言者/提案人、日期和內容，"
+        f"你可以據此回答使用者的問題；如果兩個管道都真的找不到，才誠實告知使用者。"
     )
 
     messages = [
@@ -2313,9 +2516,9 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # so no matter how many searches happen the reply pipeline never stalls
     # indefinitely — this is the outer safety net on top of each call's own timeout.
     try:
-        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=45)
+        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=60)
     except asyncio.TimeoutError:
-        print(f"⚠️ AI 回覆流程整體逾時（>45s）")
+        print(f"⚠️ AI 回覆流程整體逾時（>60s）")
         raise
     except Exception as e:
         # Something about the tool-calling machinery itself broke (bad response
@@ -3174,6 +3377,7 @@ async def setup_hook():
     save_token_usage()  # Create file if not exists
     load_user_memories()
     load_emoji_aliases()
+    load_tools_unsupported()
     await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
     asyncio.ensure_future(auto_save_loop())
@@ -3181,6 +3385,7 @@ async def setup_hook():
     asyncio.ensure_future(weekly_briefing_scheduler())
     asyncio.ensure_future(drive_sync_loop())
     asyncio.ensure_future(server_context_refresh_loop())
+    asyncio.ensure_future(forum_index_refresh_loop())
     asyncio.ensure_future(quiz_question_loop())
     asyncio.ensure_future(quiz_settlement_loop())
     asyncio.ensure_future(token_log_loop())
@@ -5113,6 +5318,33 @@ class ChatGroup(app_commands.Group):
         if len(text) > 1900:
             text = text[:1900] + "\n..."
         await interaction.response.send_message(text, ephemeral=True)
+
+
+    @app_commands.command(name="forum_index", description="查看/刷新論壇貼文搜尋索引（機器人擁有者限定）")
+    async def system_forum_index(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        posts = await _refresh_forum_index(interaction.guild)
+        forum_count = len(list(interaction.guild.forums))
+
+        embed = discord.Embed(
+            title="🗂️ 論壇貼文搜尋索引",
+            description=(
+                f"論壇頻道數：{forum_count}\n"
+                f"已索引貼文數：{len(posts)}\n"
+                f"快取有效期：每 15 分鐘自動刷新（此指令可手動立即刷新）"
+            ),
+            color=discord.Color.blue(),
+        )
+        if posts:
+            sample = "\n".join(f"• 【{p['channel_name']}】{p['title']}" for p in posts[:15])
+            if len(posts) > 15:
+                sample += f"\n...還有 {len(posts) - 15} 篇"
+            embed.add_field(name="已索引的貼文（部分）", value=sample[:1024] or "無", inline=False)
+        embed.set_footer(text="這個索引讓 AI 的 search_discord 工具能找到論壇貼文內容（含 Embed），不只是純文字訊息")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ──────────────────────────────────────────────
