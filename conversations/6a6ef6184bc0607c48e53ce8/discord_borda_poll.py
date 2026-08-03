@@ -1934,6 +1934,97 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
 
 # Tool schema exposed to the AI so it can search micropedia.site itself,
 # instead of us guessing the query with regex heuristics.
+# ── Discord 歷史搜尋工具 ──
+# 使用 Discord 的 guild search API，讓 AI 能搜尋伺服器內所有頻道的歷史訊息
+# 不受時間限制，有史以來的訊息都能搜尋
+
+async def _search_discord_history(guild, query: str, limit: int = 10) -> str:
+    """Search Discord guild message history for a keyword.
+    Uses Discord's guild search API endpoint. Returns formatted results.
+    No time limit — searches all of history."""
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token or not guild or not query.strip():
+        return "搜尋條件不足"
+
+    query = query.strip()
+    headers = {"Authorization": f"Bot {token}"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Discord search API: GET /guilds/{id}/messages/search?content=keyword
+            search_url = (
+                f"https://discord.com/api/v9/guilds/{guild.id}/messages/search"
+                f"?content={urllib.parse.quote(query)}&limit={limit}"
+            )
+            async with session.get(search_url, headers=headers) as resp:
+                if resp.status == 429:
+                    # Rate limited — read retry-after header
+                    retry_after = resp.headers.get("Retry-After", "5")
+                    print(f"⏳ Discord search rate limited, retry after {retry_after}s")
+                    return f"搜尋頻率受限，請稍後再試（Discord 限制 {retry_after} 秒）"
+                if resp.status != 200:
+                    err = await resp.text()
+                    print(f"⚠️ Discord search failed ({resp.status}): {err[:300]}")
+                    return f"搜尋失敗（HTTP {resp.status}）"
+
+                data = await resp.json()
+
+            # Discord search returns {"messages": [[{message, ...}, ...], ...]}
+            # Each element is an array of messages in the same context (threads etc.)
+            messages = []
+            for group in data.get("messages", []):
+                for msg in group:
+                    messages.append(msg)
+
+            if not messages:
+                return f"沒有找到包含「{query}」的訊息"
+
+            # Format results
+            lines = [f"🔍 Discord 搜尋「{query}」的結果（{len(messages)} 則相關訊息）："]
+            for i, msg in enumerate(messages[:limit], 1):
+                author = msg.get("author", {}).get("username", "未知")
+                channel_id = msg.get("channel_id", "")
+                content = msg.get("content", "").strip()
+                timestamp = msg.get("timestamp", "")
+                # Clean up content: remove bot mentions, limit length
+                content = re.sub(r"<@!?\d+>", "@用戶", content)
+                content = content[:300]
+                lines.append(f"\n[{i}] {author} ({timestamp[:10] if timestamp else '?'}): {content}")
+
+            result = "\n".join(lines)
+            return result[:3000]  # Cap for tool context
+
+    except Exception as e:
+        print(f"⚠️ Discord search error: {e}")
+        return f"搜尋時發生錯誤：{e}"
+
+
+_DISCORD_SEARCH_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_discord",
+        "description": (
+            "搜尋這個 Discord 伺服器的歷史訊息，找出包含指定關鍵字的對話記錄。"
+            "可以搜尋所有頻道、有史以來的訊息，沒有時間限制。"
+            "當使用者問到過去發生的事、歷史事件、某人說過什麼、之前的決定或討論時，"
+            "呼叫這個工具搜尋相關歷史訊息。"
+            "建議用簡短的核心關鍵字（人名、事件名、關鍵詞），不要太長的句子。"
+            "可以呼叫多次嘗試不同關鍵字。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜尋關鍵字，建議用簡短的核心詞（人名、事件核心詞等），不要整句問句"
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
 _MICROPEDIA_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -2141,11 +2232,30 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"如果自動比對和你的查詢都找不到資料，才誠實告知使用者你沒有找到相關資料。"
         )
 
+    # search_discord tool — always available
+    system_prompt += (
+        f"\n\n─── search_discord 工具（搜尋伺服器歷史）───\n"
+        f"你有一個 search_discord 工具，可以搜尋這個 Discord 伺服器所有頻道的歷史訊息。"
+        f"搜尋沒有時間限制，有史以來的訊息都能找到。"
+        f"當使用者問到：\n"
+        f"- 過去發生過的事、歷史事件\n"
+        f"- 某人之前說過什麼、做過什麼\n"
+        f"- 之前的決定、投票、討論\n"
+        f"- 任何「以前」、「之前」、「上次」相關的問題\n"
+        f"請呼叫這個工具搜尋相關關鍵字。建議用簡短的核心詞搜尋，可以多次呼叫嘗試不同關鍵字。"
+        f"找到的歷史訊息會顯示發言者、日期和內容，你可以據此回答使用者的問題。"
+    )
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": full_prompt},
     ]
-    tools = [_MICROPEDIA_TOOL_SCHEMA] if micropedia_enabled else None
+    # Build tool list: micropedia + discord history search
+    tools = []
+    if micropedia_enabled:
+        tools.append(_MICROPEDIA_TOOL_SCHEMA)
+    tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)  # Always available when AI chat is on
+    tools = tools if tools else None
 
     async def _run_tool_loop():
         """Drive the tool-calling round-trip. Bounded to a few rounds so a
@@ -2176,6 +2286,18 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                     print(f"🔧 AI 呼叫 search_micropedia('{query}')")
                     result = await _fetch_micropedia(query, max_results) if query else ""
                     tool_content = result if result else "沒有找到相關資料，試試看換一個更短或不同的關鍵字。"
+                elif name == "search_discord":
+                    try:
+                        args = json_module.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        args = {}
+                    query = (args.get("query") or "").strip()
+                    print(f"🔧 AI 呼叫 search_discord('{query}')")
+                    if query and message.guild:
+                        result = await _search_discord_history(message.guild, query, limit=10)
+                    else:
+                        result = "無法搜尋（沒有 guild 或搜尋詞為空）"
+                    tool_content = result if result else "沒有找到相關訊息，試試看換一個不同的關鍵字。"
                 else:
                     tool_content = f"未知工具：{name}"
                 msgs = msgs + [{
