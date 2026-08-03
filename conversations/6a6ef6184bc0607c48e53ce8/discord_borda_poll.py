@@ -161,6 +161,7 @@ async def keep_alive_server():
     app.router.add_delete("/api/guilds/{gid}/polls/{pid}", api_delete_poll)
     app.router.add_post("/api/guilds/{gid}/polls/{pid}/options", api_add_option)
     app.router.add_put("/api/guilds/{gid}/polls/{pid}/roles", api_set_roles)
+    app.router.add_get("/oauth/drive/callback", oauth_drive_callback)
     print(f"📊 Dashboard routes registered")
 
 
@@ -298,6 +299,110 @@ async def dashboard_logout(request):
     r = web.HTTPFound("/dashboard")
     r.del_cookie("session")
     return r
+
+
+# ──────────────────────────────────────────────
+# Google Drive OAuth（個人帳號授權，取得有儲存配額的 refresh token）
+# ──────────────────────────────────────────────
+
+def _sign_drive_oauth_state(admin_id: int) -> str:
+    payload = f"{admin_id}:{int(_time.time())}"
+    sig = hmac.new(COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+    return base64.urlsafe_b64encode(f"{payload}:{sig}".encode()).decode()
+
+
+def _verify_drive_oauth_state(state: str) -> bool:
+    try:
+        decoded = base64.urlsafe_b64decode(state.encode()).decode()
+        admin_id, ts, sig = decoded.rsplit(":", 2)
+        payload = f"{admin_id}:{ts}"
+        expected = hmac.new(COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+        if not hmac.compare_digest(sig, expected):
+            return False
+        # State valid for 10 minutes
+        return (_time.time() - int(ts)) < 600
+    except Exception:
+        return False
+
+
+def _drive_oauth_redirect_uri() -> str:
+    base_url = os.getenv("SELF_URL") or os.getenv("RENDER_EXTERNAL_URL") or ""
+    return base_url.rstrip("/") + "/oauth/drive/callback"
+
+
+async def oauth_drive_callback(request):
+    code = request.query.get("code")
+    state = request.query.get("state", "")
+    error = request.query.get("error")
+
+    if error:
+        return web.Response(
+            text=f"<h2>❌ 授權被拒絕或取消</h2><p>{error}</p>",
+            content_type="text/html", status=400
+        )
+    if not code:
+        return web.Response(text="<h2>❌ 缺少 code 參數</h2>", content_type="text/html", status=400)
+    if not _verify_drive_oauth_state(state):
+        return web.Response(
+            text="<h2>❌ state 驗證失敗或已過期（10 分鐘內有效）</h2><p>請重新執行 /system drive_authorize 取得新連結。</p>",
+            content_type="text/html", status=400
+        )
+
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    redirect_uri = _drive_oauth_redirect_uri()
+
+    if not client_id or not client_secret:
+        return web.Response(
+            text="<h2>❌ 伺服器未設定 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET</h2>",
+            content_type="text/html", status=500
+        )
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code,
+                "grant_type": "authorization_code",
+                "redirect_uri": redirect_uri,
+            },
+        ) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                return web.Response(
+                    text=f"<h2>❌ 換取 token 失敗（HTTP {resp.status}）</h2><pre>{text[:1000]}</pre>",
+                    content_type="text/html", status=400
+                )
+            result = json_module.loads(text)
+
+    refresh_token = result.get("refresh_token")
+    if not refresh_token:
+        return web.Response(
+            text=(
+                "<h2>⚠️ 沒有拿到 refresh_token</h2>"
+                "<p>通常是因為你之前已經授權過這個應用程式。"
+                "請到 <a href='https://myaccount.google.com/permissions' target='_blank'>"
+                "Google 帳號權限頁面</a> 移除這個應用程式的授權，然後重新執行 /system drive_authorize。</p>"
+            ),
+            content_type="text/html", status=400
+        )
+
+    html = f"""
+    <html><body style="font-family: sans-serif; max-width: 700px; margin: 40px auto; line-height: 1.6;">
+    <h2>✅ 授權成功！</h2>
+    <p>把下面這串值複製起來，到 Render → Environment 新增一個變數：</p>
+    <p><b>GOOGLE_DRIVE_REFRESH_TOKEN</b> = </p>
+    <textarea readonly style="width:100%; height:80px; font-family: monospace; padding:8px;">{refresh_token}</textarea>
+    <p>⚠️ 這是敏感資訊，請勿分享給他人。設定完成後 Render 會自動重新部署，之後可以關閉這個分頁。</p>
+    <p>設定完後，記得也要確認 GOOGLE_CLIENT_ID 和 GOOGLE_CLIENT_SECRET 這兩個變數也已經加到 Render。</p>
+    </body></html>
+    """
+    return web.Response(text=html, content_type="text/html")
+
+
+
 
 
 async def _fetch_guilds(access_token):
@@ -989,16 +1094,52 @@ _drive_token_cache = {"token": None, "expires": 0.0}
 
 
 async def _get_drive_access_token():
-    """Get Google API access token from service account JWT (cached 50 min)."""
-    if not pyjwt:
-        print("⚠️ Drive: PyJWT 未安裝，無法產生存取權杖。")
-        return None
+    """Get a Google API access token.
+    Prefers OAuth refresh token (personal Drive quota — works with free Gmail).
+    Falls back to service account JWT (only works with Shared Drives / Workspace)."""
     if _drive_token_cache["token"] and _time.time() < _drive_token_cache["expires"]:
         return _drive_token_cache["token"]
 
+    # ── Method 1: OAuth refresh token (personal account, has real storage quota) ──
+    refresh_token = os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN", "")
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+    if refresh_token and client_id and client_secret:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": refresh_token,
+                        "grant_type": "refresh_token",
+                    },
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    text = await resp.text()
+                    if resp.status == 200:
+                        result = json_module.loads(text)
+                        _drive_token_cache["token"] = result["access_token"]
+                        _drive_token_cache["expires"] = _time.time() + result.get("expires_in", 3600) - 60
+                        return _drive_token_cache["token"]
+                    print(f"⚠️ Drive OAuth refresh 失敗（{resp.status}）：{text[:400]}")
+        except Exception as e:
+            print(f"⚠️ Drive OAuth refresh 例外：{e}")
+        # Don't fall through silently if OAuth was configured but failed —
+        # still try service account below in case it's also set up.
+
+    # ── Method 2: Service account JWT (needs Shared Drive / Workspace to actually store files) ──
+    if not pyjwt:
+        if not (refresh_token and client_id and client_secret):
+            print("⚠️ Drive: 未設定 OAuth（GOOGLE_DRIVE_REFRESH_TOKEN）且 PyJWT 未安裝，無法使用服務帳號備援。")
+        return None
+
     creds_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
     if not creds_b64:
-        print("⚠️ Drive: GOOGLE_SERVICE_ACCOUNT_B64 環境變數未設定。")
+        if not (refresh_token and client_id and client_secret):
+            print("⚠️ Drive: 未設定 GOOGLE_DRIVE_REFRESH_TOKEN（OAuth）也未設定 GOOGLE_SERVICE_ACCOUNT_B64（服務帳號）。")
         return None
 
     try:
@@ -2576,6 +2717,59 @@ class SystemGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="system", description="系統診斷工具")
 
+    @app_commands.command(name="drive_authorize", description="用你的 Google 帳號授權 Drive 存取（管理員限定，解決服務帳號無配額問題）")
+    async def drive_authorize(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+
+        client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+        if not client_id:
+            await interaction.response.send_message(
+                "❌ 尚未設定 `GOOGLE_CLIENT_ID` 環境變數。\n"
+                "請先到 Render Environment 新增 `GOOGLE_CLIENT_ID` 和 `GOOGLE_CLIENT_SECRET`（來自你的 Google Cloud OAuth 用戶端）。",
+                ephemeral=True
+            )
+            return
+
+        base_url = os.getenv("SELF_URL") or os.getenv("RENDER_EXTERNAL_URL") or ""
+        if not base_url:
+            await interaction.response.send_message(
+                "❌ 尚未設定 `SELF_URL` 環境變數，無法產生回調網址。",
+                ephemeral=True
+            )
+            return
+
+        redirect_uri = _drive_oauth_redirect_uri()
+        state = _sign_drive_oauth_state(interaction.user.id)
+
+        auth_url = (
+            "https://accounts.google.com/o/oauth2/v2/auth"
+            f"?client_id={urllib.parse.quote(client_id)}"
+            f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+            "&response_type=code"
+            "&scope=" + urllib.parse.quote("https://www.googleapis.com/auth/drive")
+            + "&access_type=offline"
+            "&prompt=consent"
+            f"&state={urllib.parse.quote(state)}"
+        )
+
+        embed = discord.Embed(
+            title="🔑 Google Drive 個人帳號授權",
+            description=(
+                "**點下面連結，用你要拿來存放資料的 Google 帳號登入並同意授權：**\n"
+                f"{auth_url}\n\n"
+                "**⚠️ 重要：在點擊前，請先確認這個回調網址已加到 Google Cloud Console 的「已授權的重新導向 URI」：**\n"
+                f"`{redirect_uri}`\n\n"
+                "位置：Google Cloud Console → API 和服務 → 憑證 → 你的 OAuth 用戶端 ID → 編輯\n\n"
+                "授權成功後，網頁會顯示一組 `refresh_token`，把它複製到 Render 環境變數 "
+                "`GOOGLE_DRIVE_REFRESH_TOKEN`。\n\n"
+                "此連結 10 分鐘內有效。"
+            ),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="drive_test", description="測試 Google Drive 連線並顯示詳細錯誤（管理員限定）")
     async def drive_test(self, interaction: discord.Interaction):
         if not is_admin(interaction):
@@ -2588,34 +2782,47 @@ class SystemGroup(app_commands.Group):
         # 1. Check env vars
         creds_b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64", "")
         folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+        refresh_token = os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN", "")
+        g_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+        g_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
         lines.append(f"**1. 環境變數**")
-        lines.append(f"  GOOGLE_SERVICE_ACCOUNT_B64: {'✅ 已設定 (' + str(len(creds_b64)) + ' 字元)' if creds_b64 else '❌ 未設定'}")
+        lines.append(f"  認證方式：{'🟢 OAuth 個人帳號（推薦）' if refresh_token else ('🟡 服務帳號（需 Shared Drive）' if creds_b64 else '❌ 未設定任何認證')}")
+        lines.append(f"  GOOGLE_DRIVE_REFRESH_TOKEN: {'✅ 已設定' if refresh_token else '❌ 未設定'}")
+        lines.append(f"  GOOGLE_CLIENT_ID: {'✅ 已設定' if g_client_id else '❌ 未設定'}")
+        lines.append(f"  GOOGLE_CLIENT_SECRET: {'✅ 已設定' if g_client_secret else '❌ 未設定'}")
+        lines.append(f"  GOOGLE_SERVICE_ACCOUNT_B64: {'✅ 已設定 (' + str(len(creds_b64)) + ' 字元)' if creds_b64 else '❌ 未設定（備援方案）'}")
         lines.append(f"  GOOGLE_DRIVE_FOLDER_ID: {'✅ `' + folder_id + '`' if folder_id else '❌ 未設定'}")
 
-        if not creds_b64:
+        if not refresh_token and not creds_b64:
             lines.append("")
-            lines.append("→ 請在 Render 設定 GOOGLE_SERVICE_ACCOUNT_B64")
+            lines.append("→ 尚未設定任何認證方式。建議執行 `/system drive_authorize` 用你的個人 Google 帳號授權（有真正的儲存配額）。")
             await interaction.followup.send("\n".join(lines), ephemeral=True)
             return
 
-        # 2. Decode and validate JSON
-        lines.append("")
-        lines.append(f"**2. 服務帳號金鑰解析**")
-        try:
-            creds_info = json_module.loads(base64.b64decode(creds_b64).decode())
-            lines.append(f"  ✅ Base64 + JSON 解析成功")
-            lines.append(f"  type: `{creds_info.get('type', '(缺少)')}`")
-            lines.append(f"  client_email: `{creds_info.get('client_email', '(缺少)')}`")
-            has_key = "private_key" in creds_info
-            lines.append(f"  private_key: {'✅ 存在' if has_key else '❌ 缺少'}")
-            if creds_info.get("type") != "service_account":
-                lines.append(f"  ⚠️ type 不是 service_account！你可能上傳了錯誤的金鑰類型（例如 OAuth 用戶端）")
-        except Exception as e:
-            lines.append(f"  ❌ 解析失敗：{e}")
+        # 2. Decode and validate service account JSON (only relevant if OAuth isn't set up)
+        if refresh_token:
             lines.append("")
-            lines.append("→ GOOGLE_SERVICE_ACCOUNT_B64 內容有誤，請重新 base64 編碼服務帳號 JSON")
-            await interaction.followup.send("\n".join(lines), ephemeral=True)
-            return
+            lines.append(f"**2. 服務帳號金鑰解析**")
+            lines.append(f"  ⏭️ 已使用 OAuth 個人帳號認證，跳過服務帳號檢查。")
+        elif creds_b64:
+            lines.append("")
+            lines.append(f"**2. 服務帳號金鑰解析**")
+            try:
+                creds_info = json_module.loads(base64.b64decode(creds_b64).decode())
+                lines.append(f"  ✅ Base64 + JSON 解析成功")
+                lines.append(f"  type: `{creds_info.get('type', '(缺少)')}`")
+                lines.append(f"  client_email: `{creds_info.get('client_email', '(缺少)')}`")
+                has_key = "private_key" in creds_info
+                lines.append(f"  private_key: {'✅ 存在' if has_key else '❌ 缺少'}")
+                if creds_info.get("type") != "service_account":
+                    lines.append(f"  ⚠️ type 不是 service_account！你可能上傳了錯誤的金鑰類型（例如 OAuth 用戶端）")
+            except Exception as e:
+                lines.append(f"  ❌ 解析失敗：{e}")
+                lines.append("")
+                lines.append("→ GOOGLE_SERVICE_ACCOUNT_B64 內容有誤，請重新 base64 編碼服務帳號 JSON")
+                await interaction.followup.send("\n".join(lines), ephemeral=True)
+                return
 
         # 3. Get access token
         lines.append("")
