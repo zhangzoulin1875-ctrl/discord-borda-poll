@@ -2768,6 +2768,11 @@ def is_admin(interaction: discord.Interaction) -> bool:
     return interaction.user.guild_permissions.manage_guild
 
 
+def is_owner(interaction: discord.Interaction) -> bool:
+    """Only the server (guild) owner can change bot settings."""
+    return interaction.guild.owner_id == interaction.user.id
+
+
 def check_role_permission(interaction: discord.Interaction, poll: Poll) -> bool:
     """檢查使用者是否有權限投票（基於身分組限制）。"""
     if not poll.allowed_roles:
@@ -3877,10 +3882,10 @@ class SystemGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="system", description="系統診斷工具")
 
-    @app_commands.command(name="drive_authorize", description="用你的 Google 帳號授權 Drive 存取（管理員限定，解決服務帳號無配額問題）")
+    @app_commands.command(name="drive_authorize", description="用你的 Google 帳號授權 Drive 存取（伺服器擁有者限定）")
     async def drive_authorize(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
 
         client_id = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
@@ -3930,10 +3935,10 @@ class SystemGroup(app_commands.Group):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="drive_test", description="測試 Google Drive 連線並顯示詳細錯誤（管理員限定）")
+    @app_commands.command(name="drive_test", description="測試 Google Drive 連線並顯示詳細錯誤（伺服器擁有者限定）")
     async def drive_test(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
@@ -4163,10 +4168,10 @@ class MeetingGroup(app_commands.Group):
             except Exception:
                 await interaction.followup.send(f"❌ AI 整理失敗：{e}")
 
-    @app_commands.command(name="test", description="測試 AI API 連線（管理員限定）")
+    @app_commands.command(name="test", description="測試 AI API 連線（伺服器擁有者限定）")
     async def test_ai(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         if not ai_settings["api_key"]:
             await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定 中設定。", ephemeral=True)
@@ -4187,47 +4192,47 @@ class ChatGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="chat", description="AI 聊天設定")
 
-    @app_commands.command(name="toggle", description="開啟/關閉 AI 聊天功能（管理員限定）")
+    @app_commands.command(name="toggle", description="開啟/關閉 AI 聊天功能（伺服器擁有者限定）")
     async def chat_toggle(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         chat_ai_settings["enabled"] = not chat_ai_settings["enabled"]
         save_chat_ai_settings()
         status = "✅ 開啟" if chat_ai_settings["enabled"] else "❌ 關閉"
         await interaction.response.send_message(f"AI 聊天功能已{status}", ephemeral=True)
 
-    @app_commands.command(name="model", description="設定 AI 聊天模型（管理員限定）")
+    @app_commands.command(name="model", description="設定 AI 聊天模型（伺服器擁有者限定）")
     @app_commands.describe(model="模型名稱（例如：gpt-4o-mini, gemini-1.5-flash）")
     async def chat_model(self, interaction: discord.Interaction, model: str):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         chat_ai_settings["model"] = model
         save_chat_ai_settings()
         await interaction.response.send_message(f"✅ AI 聊天模型已設為 `{model}`", ephemeral=True)
 
-    @app_commands.command(name="prompt", description="設定 AI 聊天人設（管理員限定）")
+    @app_commands.command(name="prompt", description="設定 AI 聊天人設（伺服器擁有者限定）")
     @app_commands.describe(prompt="系統提示詞（人設描述）")
     async def chat_prompt(self, interaction: discord.Interaction, prompt: str):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         chat_ai_settings["system_prompt"] = prompt
         save_chat_ai_settings()
         await interaction.response.send_message("✅ AI 聊天人設已更新", ephemeral=True)
 
-    @app_commands.command(name="cooldown", description="設定 AI 聊天冷卻時間（管理員限定）")
+    @app_commands.command(name="cooldown", description="設定 AI 聊天冷卻時間（伺服器擁有者限定）")
     @app_commands.describe(seconds="冷卻秒數（自動回覆間隔，@提及不受限）")
     async def chat_cooldown(self, interaction: discord.Interaction, seconds: int):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         chat_ai_settings["cooldown_seconds"] = max(0, seconds)
         save_chat_ai_settings()
         await interaction.response.send_message(f"✅ 冷卻時間已設為 {seconds} 秒", ephemeral=True)
 
-    @app_commands.command(name="channel", description="新增/移除頻道白名單（管理員限定）")
+    @app_commands.command(name="channel", description="新增/移除頻道白名單（伺服器擁有者限定）")
     @app_commands.describe(action="新增或移除", channel="要設定的頻道")
     @app_commands.choices(action=[
         app_commands.Choice(name="新增", value="add"),
@@ -4235,8 +4240,8 @@ class ChatGroup(app_commands.Group):
         app_commands.Choice(name="清空（所有頻道）", value="clear"),
     ])
     async def chat_channel(self, interaction: discord.Interaction, action: app_commands.Choice[str], channel: discord.TextChannel = None):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         wl = chat_ai_settings.get("channels_whitelist", [])
         act = action.value
@@ -4258,7 +4263,7 @@ class ChatGroup(app_commands.Group):
             else:
                 await interaction.response.send_message("⚠️ 頻道已在/不在白名單中", ephemeral=True)
 
-    @app_commands.command(name="filter", description="設定垃圾話過濾強度（管理員限定）")
+    @app_commands.command(name="filter", description="設定垃圾話過濾強度（伺服器擁有者限定）")
     @app_commands.describe(level="過濾強度等級")
     @app_commands.choices(level=[
         app_commands.Choice(name="僅@提及和回覆（推薦）", value="mention"),
@@ -4268,8 +4273,8 @@ class ChatGroup(app_commands.Group):
         app_commands.Choice(name="高（嚴格，只回問題和關鍵字）", value="high"),
     ])
     async def chat_filter(self, interaction: discord.Interaction, level: app_commands.Choice[str]):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         chat_ai_settings["filter_strength"] = level.value
         save_chat_ai_settings()
@@ -4285,10 +4290,10 @@ class ChatGroup(app_commands.Group):
             ephemeral=True
         )
 
-    @app_commands.command(name="server_info", description="查看/更新伺服器結構快取（管理員限定）")
+    @app_commands.command(name="server_info", description="查看/更新伺服器結構快取（伺服器擁有者限定）")
     async def chat_server_info(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         # Force refresh
@@ -4326,17 +4331,17 @@ class ChatGroup(app_commands.Group):
         embed.set_footer(text="每 10 分鐘自動更新。此指令可手動刷新。")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="abuse_toggle", description="開關濫用偵測系統（管理員限定）")
+    @app_commands.command(name="abuse_toggle", description="開關濫用偵測系統（伺服器擁有者限定）")
     async def chat_abuse_toggle(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         chat_ai_settings["abuse_detection_enabled"] = not chat_ai_settings.get("abuse_detection_enabled", False)
         save_chat_ai_settings()
         status = "✅ 開啟" if chat_ai_settings["abuse_detection_enabled"] else "❌ 關閉"
         await interaction.response.send_message(f"🛡️ 濫用偵測系統已{status}", ephemeral=True)
 
-    @app_commands.command(name="abuse_level", description="設定濫用偵測嚴格度（管理員限定）")
+    @app_commands.command(name="abuse_level", description="設定濫用偵測嚴格度（伺服器擁有者限定）")
     @app_commands.describe(level="偵測嚴格度等級")
     @app_commands.choices(level=[
         app_commands.Choice(name="低（寬容，嚴重違規才禁言）", value="low"),
@@ -4344,18 +4349,18 @@ class ChatGroup(app_commands.Group):
         app_commands.Choice(name="高（嚴格，輕微挑釁也禁）", value="high"),
     ])
     async def chat_abuse_level(self, interaction: discord.Interaction, level: app_commands.Choice[str]):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         chat_ai_settings["abuse_detection_strictness"] = level.value
         save_chat_ai_settings()
         await interaction.response.send_message(f"✅ 濫用偵測嚴格度已設為**{level.name}**", ephemeral=True)
 
-    @app_commands.command(name="abuse_admins", description="設定是否允許禁言管理員（管理員限定）")
+    @app_commands.command(name="abuse_admins", description="設定是否允許禁言管理員（伺服器擁有者限定）")
     @app_commands.describe(enabled="True=可以禁言管理員, False=跳過管理員")
     async def chat_abuse_admins(self, interaction: discord.Interaction, enabled: bool):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         chat_ai_settings["abuse_mute_admins"] = enabled
         save_chat_ai_settings()
@@ -4364,10 +4369,10 @@ class ChatGroup(app_commands.Group):
             ephemeral=True
         )
 
-    @app_commands.command(name="abuse_log", description="查看最近的禁言記錄（管理員限定）")
+    @app_commands.command(name="abuse_log", description="查看最近的禁言記錄（伺服器擁有者限定）")
     async def chat_abuse_log(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         if not mod_action_log:
             await interaction.response.send_message("📋 目前沒有任何禁言記錄。", ephemeral=True)
@@ -4379,11 +4384,11 @@ class ChatGroup(app_commands.Group):
             lines.append(f"• `{ts}` **{entry['user_name']}** — {mins}分鐘\n  原因：{entry['reason']}（#{entry['channel']}）")
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="abuse_unmute", description="手動解除禁言（管理員限定）")
+    @app_commands.command(name="abuse_unmute", description="手動解除禁言（伺服器擁有者限定）")
     @app_commands.describe(user="要解除禁言的用戶")
     async def chat_abuse_unmute(self, interaction: discord.Interaction, user: discord.Member):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         try:
             await user.timeout(None, reason=f"由 {interaction.user.display_name} 手動解除禁言")
@@ -4391,15 +4396,15 @@ class ChatGroup(app_commands.Group):
         except Exception as e:
             await interaction.response.send_message(f"❌ 解除禁言失敗：{e}", ephemeral=True)
 
-    @app_commands.command(name="log_channel", description="設定/清除 AI 紀錄頻道（禁言+對話紀錄，管理員限定）")
+    @app_commands.command(name="log_channel", description="設定/清除 AI 紀錄頻道（禁言+對話紀錄，伺服器擁有者限定）")
     @app_commands.describe(action="設定或清除", channel="要設為 log 頻道的頻道（清除時不填）")
     @app_commands.choices(action=[
         app_commands.Choice(name="設定", value="set"),
         app_commands.Choice(name="清除", value="clear"),
     ])
     async def chat_log_channel(self, interaction: discord.Interaction, action: app_commands.Choice[str], channel: discord.TextChannel = None):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         if action.value == "clear":
             chat_ai_settings["log_channel_id"] = None
@@ -4416,10 +4421,10 @@ class ChatGroup(app_commands.Group):
         else:
             await interaction.response.send_message("⚠️ 請選擇動作和頻道。", ephemeral=True)
 
-    @app_commands.command(name="log_test", description="發送測試訊息到 AI 紀錄頻道，驗證設定是否正常（管理員限定）")
+    @app_commands.command(name="log_test", description="發送測試訊息到 AI 紀錄頻道，驗證設定是否正常（伺服器擁有者限定）")
     async def chat_log_test(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         log_ch_id = chat_ai_settings.get("log_channel_id")
         if not log_ch_id:
@@ -4455,11 +4460,11 @@ class ChatGroup(app_commands.Group):
         except Exception as e:
             await interaction.followup.send(f"❌ 發送失敗：{e}", ephemeral=True)
 
-    @app_commands.command(name="test", description="測試 AI 聊天回覆（管理員限定）")
+    @app_commands.command(name="test", description="測試 AI 聊天回覆（伺服器擁有者限定）")
     @app_commands.describe(message="要測試的訊息")
     async def chat_test(self, interaction: discord.Interaction, message: str):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         if not chat_ai_settings.get("api_key"):
             await interaction.response.send_message("❌ 尚未設定 AI 聊天 API Key。請到 Dashboard 設定。", ephemeral=True)
@@ -4504,11 +4509,11 @@ class ChatGroup(app_commands.Group):
             lines.append(f"{i}. {f}")
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="memory_clear", description="清除 AI 對你的記憶（管理員可清除指定用戶）")
+    @app_commands.command(name="memory_clear", description="清除 AI 對你的記憶（擁有者可清除指定用戶）")
     @app_commands.describe(user="要清除記憶的用戶（不填則清除自己的）")
     async def chat_memory_clear(self, interaction: discord.Interaction, user: discord.Member = None):
         target = user or interaction.user
-        if user and not is_admin(interaction):
+        if user and not is_owner(interaction):
             await interaction.response.send_message("❌ 只有管理員能清除他人的記憶。", ephemeral=True)
             return
         target_id = str(target.id)
@@ -4523,10 +4528,10 @@ class ChatGroup(app_commands.Group):
         else:
             await interaction.response.send_message(f"ℹ️ {target.mention} 沒有任何記憶。", ephemeral=True)
 
-    @app_commands.command(name="debug", description="診斷 AI 聊天問題（管理員限定）")
+    @app_commands.command(name="debug", description="診斷 AI 聊天問題（伺服器擁有者限定）")
     async def chat_debug(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         lines = []
         lines.append(f"**AI 聊天診斷**")
@@ -4641,15 +4646,15 @@ class ChatGroup(app_commands.Group):
         embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat micropedia | /chat debug")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="micropedia", description="開關微國家百科查詢功能（管理員限定）")
+    @app_commands.command(name="micropedia", description="開關微國家百科查詢功能（伺服器擁有者限定）")
     @app_commands.describe(action="開啟或關閉", max_results="每次查詢最多抓取幾篇文章（1-10）")
     @app_commands.choices(action=[
         app_commands.Choice(name="開啟", value="on"),
         app_commands.Choice(name="關閉", value="off"),
     ])
     async def chat_micropedia(self, interaction: discord.Interaction, action: app_commands.Choice[str] = None, max_results: int = None):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         if action:
             chat_ai_settings["micropedia_enabled"] = (action.value == "on")
@@ -4665,11 +4670,11 @@ class ChatGroup(app_commands.Group):
             ephemeral=True
         )
 
-    @app_commands.command(name="micropedia_test", description="測試微國家百科查詢（管理員限定）")
+    @app_commands.command(name="micropedia_test", description="測試微國家百科查詢（伺服器擁有者限定）")
     @app_commands.describe(query="要搜尋的關鍵字")
     async def chat_micropedia_test(self, interaction: discord.Interaction, query: str):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         max_r = chat_ai_settings.get("micropedia_max_results", 5)
@@ -4692,11 +4697,11 @@ class BriefingGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="briefing", description="每日快報與每週公報")
 
-    @app_commands.command(name="daily_set", description="設定每日自動快報時間（管理員限定）")
+    @app_commands.command(name="daily_set", description="設定每日自動快報時間（伺服器擁有者限定）")
     @app_commands.describe(time="執行時間 HH:MM（例如：23:00）", channel="發佈快報的頻道")
     async def daily_set(self, interaction: discord.Interaction, time: str, channel: discord.TextChannel):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         # Validate time format
         try:
@@ -4715,20 +4720,20 @@ class BriefingGroup(app_commands.Group):
             ephemeral=True
         )
 
-    @app_commands.command(name="daily_off", description="關閉每日自動快報（管理員限定）")
+    @app_commands.command(name="daily_off", description="關閉每日自動快報（伺服器擁有者限定）")
     async def daily_off(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         briefing_settings["daily_enabled"] = False
         save_briefing_settings()
         await interaction.response.send_message("✅ 每日自動快報已關閉。可用 `/briefing daily_now` 手動執行。", ephemeral=True)
 
-    @app_commands.command(name="daily_now", description="立即生成每日快報（管理員限定）")
+    @app_commands.command(name="daily_now", description="立即生成每日快報（伺服器擁有者限定）")
     @app_commands.describe(channel="發佈快報的頻道（預設：當前頻道）")
     async def daily_now(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         if not ai_settings["api_key"]:
             await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定。", ephemeral=True)
@@ -4737,7 +4742,7 @@ class BriefingGroup(app_commands.Group):
         await interaction.response.send_message(f"📝 每日快報開始生成，請到 {target.mention} 查看。", ephemeral=True)
         await run_briefing(target, hours=24, mode="daily")
 
-    @app_commands.command(name="weekly_set", description="設定每週自動公報時間（管理員限定）")
+    @app_commands.command(name="weekly_set", description="設定每週自動公報時間（伺服器擁有者限定）")
     @app_commands.describe(
         day="星期幾",
         time="執行時間 HH:MM",
@@ -4753,8 +4758,8 @@ class BriefingGroup(app_commands.Group):
         app_commands.Choice(name="週日", value="6"),
     ])
     async def weekly_set(self, interaction: discord.Interaction, day: app_commands.Choice[str], time: str, channel: discord.TextChannel):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         try:
             h, m = time.strip().split(":")
@@ -4774,20 +4779,20 @@ class BriefingGroup(app_commands.Group):
             ephemeral=True
         )
 
-    @app_commands.command(name="weekly_off", description="關閉每週自動公報（管理員限定）")
+    @app_commands.command(name="weekly_off", description="關閉每週自動公報（伺服器擁有者限定）")
     async def weekly_off(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         briefing_settings["weekly_enabled"] = False
         save_briefing_settings()
         await interaction.response.send_message("✅ 每週自動公報已關閉。可用 `/briefing weekly_now` 手動執行。", ephemeral=True)
 
-    @app_commands.command(name="weekly_now", description="立即生成每週公報（管理員限定）")
+    @app_commands.command(name="weekly_now", description="立即生成每週公報（伺服器擁有者限定）")
     @app_commands.describe(channel="發佈公報的頻道（預設：當前頻道）")
     async def weekly_now(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限伺服器擁有者使用。", ephemeral=True)
             return
         if not ai_settings["api_key"]:
             await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定。", ephemeral=True)
