@@ -7116,16 +7116,77 @@ def _search_knowledge_base(query: str, top_n: int = 3) -> list:
     return [s for s, _, _ in scored[:top_n]]
 
 
+# ── 智慧過濾：惡意訊息 / 玩笑 / 噪音偵測 ──
+# 預先過濾明顯的噪音和惡意/玩笑訊息，避免污染知識庫。
+_NOISE_PATTERNS = (
+    "笑死", "假的", "亂講", "唬爛", "幻覺", "幻想", "做夢",
+    "我以為", "我猜", "隨便說", "開玩笑", "說說而已", "鬧的",
+    "北七", "白痴", "智障", "笨蛋",  # 純辱罵，無資訊量
+    "+1", "-1", "111", "www", "WWW", "wwww",  # 純湊字數
+    "https://tenor.com", "https://media.giphy.com",  # GIF 連結
+)
+
+# 信任來源標記：管理員/版主的訊息可信度高，一般成員的可信度低
+def _author_authority_tag(msg) -> str:
+    """Return a trust-level tag for the message author."""
+    if not msg.author:
+        return "?"
+    if msg.author.bot:
+        # Bot messages (official announcements, system messages) — high trust
+        return "[機器人]"
+    perms = msg.author.guild_permissions
+    if perms.administrator or perms.manage_guild:
+        return "[管理員]"
+    # Check for moderator-ish roles
+    role_names = [r.name.lower() for r in msg.author.roles if not r.managed]
+    mod_keywords = ("管理", "版主", "mod", "admin", "行政", "議長", "秘書長", "官員", "部長")
+    if any(kw in rn for rn in role_names for kw in mod_keywords):
+        return "[幹部]"
+    return "[成員]"
+
+def _is_noise_message(text: str) -> bool:
+    """Check if a message is likely noise/joke/spam that should be filtered
+    out before AI summarization."""
+    text_lower = text.lower().strip()
+    if len(text_lower) < 3:
+        return True
+    # Pure emoji / reaction spam
+    import re as _re
+    if _re.fullmatch(r"[\U0001F000-\U0001FFFF\u2600-\u27BF\ufe0f\u200d]+", text):
+        return True
+    # All-same character spam (wwww, 哈哈哈哈, 啊啊啊啊)
+    if len(set(text_lower.replace(" ", ""))) <= 2 and len(text_lower) > 3:
+        return True
+    # Check noise patterns
+    for pattern in _NOISE_PATTERNS:
+        if pattern in text_lower:
+            # But don't filter if the message is long enough to contain real content
+            # alongside the noise word
+            if len(text_lower) < 20:
+                return True
+            # If the noise pattern IS the message, filter it
+            if text_lower.strip() == pattern.lower():
+                return True
+    return False
+
+
 async def _collect_daily_messages(guild, hours=24) -> str:
     """Collect all messages from the past `hours` across all text channels.
     Returns a condensed text dump grouped by channel for AI summarization.
-    Skips very short messages (< 10 chars), bot commands, and empty content.
+
+    Smart filtering:
+    - Skips noise messages (jokes, spam, emoji-only, all-same-char)
+    - Tags each message with author authority level so the AI can weight
+      information by source credibility (admin > officer > member > bot-for-announcements)
+    - Pre-filters obvious misinformation patterns
+    - Skips bot commands and very short messages
     Staggered to respect Discord rate limits."""
     from datetime import datetime, timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     _t0 = _time.time()
     _ch_count = 0
     _msg_count = 0
+    _filtered_count = 0
     channel_chunks = []
 
     text_channels = [
@@ -7138,10 +7199,10 @@ async def _collect_daily_messages(guild, hours=24) -> str:
         ch_lines = []
         try:
             async for msg in ch.history(limit=200, after=cutoff):
-                # Skip empty / very short / command messages
+                # Extract text content
                 text = msg.content.strip()
                 if not text or len(text) < 10:
-                    # Still check embeds
+                    # Check embeds for official announcements
                     embed_parts = []
                     for emb in msg.embeds:
                         if emb.title:
@@ -7153,11 +7214,19 @@ async def _collect_daily_messages(guild, hours=24) -> str:
                     text = "\n".join(embed_parts).strip()
                     if not text or len(text) < 5:
                         continue
+                # Skip slash/prefix commands
                 if text.startswith("/") or text.startswith("!"):
-                    continue  # skip slash/prefix commands
+                    continue
+                # Smart noise filter
+                if _is_noise_message(text):
+                    _filtered_count += 1
+                    continue
+
+                # Tag with author authority level
+                authority_tag = _author_authority_tag(msg)
                 author = msg.author.display_name if msg.author else "未知"
                 time_str = msg.created_at.strftime("%H:%M") if msg.created_at else "??:??"
-                ch_lines.append(f"[{time_str}] {author}: {text[:200]}")
+                ch_lines.append(f"[{time_str}]{authority_tag} {author}: {text[:250]}")
                 _msg_count += 1
         except discord.Forbidden:
             pass
@@ -7167,28 +7236,45 @@ async def _collect_daily_messages(guild, hours=24) -> str:
         if ch_lines:
             channel_chunks.append(f"\n── #{ch.name} ──\n" + "\n".join(ch_lines[-50:]))
 
-        # Stagger every 5 channels
         if _ch_count % 5 == 0:
             await asyncio.sleep(0.5)
 
-    print(f"📚 每日訊息收集：{_ch_count} 頻道，{_msg_count} 則訊息，耗時 {_time.time() - _t0:.1f}s")
+    print(f"📚 每日訊息收集：{_ch_count} 頻道，{_msg_count} 則收錄，{_filtered_count} 則過濾，耗時 {_time.time() - _t0:.1f}s")
     return "\n".join(channel_chunks)
 
 
 async def _generate_daily_summary(messages_text: str, date_str: str) -> str:
-    """Send collected messages to AI and get a structured daily summary."""
+    """Send collected messages to AI and get a structured daily summary.
+
+    The prompt includes strict anti-misinformation rules: the AI must
+    cross-reference claims, weight by author authority tags, and mark
+    unverified rumors as such rather than presenting them as fact."""
     if not messages_text or len(messages_text.strip()) < 50:
         return "本日無顯著活動。"
 
     prompt = (
         f"以下是某微國家組織 Discord 伺服器在 {date_str} 的全天訊息記錄。\n"
-        f"請整理成一份結構化的每日重點摘要，格式如下：\n\n"
+        f"每則訊息前面標有發言者的身份標籤：\n"
+        f"- [管理員] = 伺服器管理員（可信度最高）\n"
+        f"- [幹部] = 具有管理/版主/議長/秘書長/官員等角色（可信度高）\n"
+        f"- [機器人] = 機器人發布的官方公告（可信度高）\n"
+        f"- [成員] = 一般成員（可信度普通，需交叉驗證）\n\n"
+        f"請整理成一份結構化的每日重點摘要。格式如下：\n\n"
         f"## {date_str} 伺服器日報\n\n"
         f"### 重要公告與人事變動\n（選舉結果、任命、罷免、政策發布等，列出人名和具體事件）\n\n"
         f"### 重要討論與決議\n（論壇提案進展、投票結果、會議結論等）\n\n"
         f"### 其他值得記錄的事\n（活動、事件、爭議、值得注意的互動等）\n\n"
-        f"要求：\n"
-        f"- 只記錄有事實根據的內容，不要編造\n"
+        f"### 未經證實的傳聞\n（僅來自[成員]的單方面宣稱，未經管理員或幹部確認的說法，明確標注為未經證實）\n\n"
+        f"⚠️ 資訊可信度判斷規則（極重要）：\n"
+        f"1. 只將[管理員]、[幹部]、[機器人]發布的內容記錄為「已確認事實」\n"
+        f"2. [成員]發布的宣稱（如「某人當選」「某案通過」「某人被罷免」）必須在記錄中看到\n"
+        f"   [管理員]或[幹部]的確認訊息，才能記為事實。否則歸入「未經證實的傳聞」\n"
+        f"3. 如果[成員]宣稱的事實後來被[管理員]或[幹部]否認或更正，以更正後的版本為準\n"
+        f"4. 玩笑話、反串、惡搞訊息一律忽略，不要記錄\n"
+        f"5. 如果某事件只有一個人提到且沒有其他人附和或確認，歸入「未經證實的傳聞」\n"
+        f"6. 同一事件多則訊息有矛盾時，以權威來源（管理員>幹部>成員）為準\n\n"
+        f"其他要求：\n"
+        f"- 只記錄有事實根據的內容，絕不編造或腦補\n"
         f"- 每個條目盡量包含人名和具體事件\n"
         f"- 如果某個分類沒有內容就寫「無」\n"
         f"- 用繁體中文\n"
@@ -7197,7 +7283,7 @@ async def _generate_daily_summary(messages_text: str, date_str: str) -> str:
     )
 
     messages = [
-        {"role": "system", "content": "你是微國家社群的歷史記錄員，負責整理每日重點。用繁體中文，語氣客觀簡潔。"},
+        {"role": "system", "content": "你是微國家社群的歷史記錄員，負責整理每日重點。你非常嚴謹，不會被玩笑話或惡意訊息誤導。用繁體中文，語氣客觀簡潔。"},
         {"role": "user", "content": prompt},
     ]
 
