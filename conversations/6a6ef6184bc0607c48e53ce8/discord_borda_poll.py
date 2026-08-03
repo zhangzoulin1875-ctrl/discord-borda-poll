@@ -72,6 +72,27 @@
 一般投票：每人一票，最高票獲勝。
 """
 
+import sys
+import functools
+
+# ═══ CRITICAL: force unbuffered/line-buffered stdout ═══
+# Python defaults to BLOCK buffering for stdout when it's not attached to a
+# TTY (which is always the case under Render / Docker / any process
+# supervisor). This means print() output sits in an internal buffer and is
+# NOT sent to Render's log collector until the buffer fills (~8KB) or the
+# process exits. The discord.py / aiohttp logging module output you DO see
+# in Render logs goes through logging.StreamHandler, which flushes per
+# record — that's a completely separate mechanism from print(). This is why
+# every diagnostic print() we added was invisible in the logs: it wasn't
+# lost, it just hadn't been flushed yet. Fix: force line buffering so every
+# print() is flushed immediately, same as the logging output.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+print = functools.partial(print, flush=True)
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -5255,7 +5276,11 @@ class ChatGroup(app_commands.Group):
                 result += f"\n\n🧠 記憶更新：{', '.join(new_facts)}"
             await interaction.followup.send(result, ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"❌ AI 聊天測試失敗：{e}", ephemeral=True)
+            import traceback
+            tb = traceback.format_exc()
+            print(f"❌ /chat test 失敗，完整 traceback:\n{tb}")
+            short_tb = tb.strip().split(chr(10))[-1][:200]
+            await interaction.followup.send(f"❌ AI 聊天測試失敗：{type(e).__name__}: {e}\n```{short_tb}```", ephemeral=True)
 
     @app_commands.command(name="memory", description="查看 AI 對你的記憶")
     async def chat_memory(self, interaction: discord.Interaction):
