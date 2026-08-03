@@ -2225,11 +2225,27 @@ async def _refresh_channel_index(guild) -> list:
     _ch_count = 0
     _msg_count = 0
     try:
+        _log_ch_id = chat_ai_settings.get("log_channel_id")
+        _EXCLUDE_NAME_MARKERS = ("測試", "test", "log", "紀錄")
+
+        def _is_excluded_channel(ch) -> bool:
+            """Skip internal testing/log channels — they pollute search
+            results with dummy test messages and, worse, create a feedback
+            loop: the AI-log channel literally quotes back users' search
+            queries (e.g. "查詢了「最新公告」"), so searching for that same
+            term later matches the LOG ENTRY instead of real content,
+            getting noisier every time someone asks a question."""
+            if _log_ch_id and ch.id == _log_ch_id:
+                return True
+            name_lower = ch.name.lower()
+            return any(marker.lower() in name_lower for marker in _EXCLUDE_NAME_MARKERS)
+
         text_channels = [
             ch for ch in guild.text_channels
             if ch.type in (discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.announcement)
+            and not _is_excluded_channel(ch)
         ]
-        print(f"📢 開始頻道訊息索引：{len(text_channels)} 個文字頻道...")
+        print(f"📢 開始頻道訊息索引：{len(text_channels)} 個文字頻道（已排除測試/紀錄頻道）...")
 
         for ch in text_channels:
             _ch_count += 1
@@ -2513,6 +2529,28 @@ async def _live_guild_message_search(guild, query: str, limit: int = 25) -> str:
             if not messages:
                 return ""
 
+            # Filter out internal testing/log channels — they pollute
+            # results with dummy test messages and create a feedback loop
+            # (the AI-log channel literally quotes back users' past search
+            # queries, so a query matches its own previous log entry).
+            _log_ch_id = chat_ai_settings.get("log_channel_id")
+            _EXCLUDE_NAME_MARKERS = ("測試", "test", "log", "紀錄")
+
+            def _is_excluded_ch(channel_id_str):
+                if not channel_id_str or not channel_id_str.isdigit():
+                    return False
+                cid = int(channel_id_str)
+                if _log_ch_id and cid == _log_ch_id:
+                    return True
+                ch = guild.get_channel(cid)
+                if ch and any(m.lower() in ch.name.lower() for m in _EXCLUDE_NAME_MARKERS):
+                    return True
+                return False
+
+            messages = [m for m in messages if not _is_excluded_ch(m.get("channel_id", ""))]
+            if not messages:
+                return ""
+
             # Sort by timestamp (oldest first) so AI sees the timeline
             messages.sort(key=lambda m: m.get("timestamp", ""))
             lines = [f"🔍 全伺服器訊息搜尋「{query}」的結果（{len(messages)} 則，按時間排列）："]
@@ -2754,6 +2792,32 @@ def _fix_emoji_shortcodes(text: str, guild) -> str:
         return f"<{prefix}:{emoji.name}:{emoji.id}>"
 
     return re.sub(r":(\w+):", _replace, text)
+
+
+_TOOL_DUMP_MARKERS = (
+    "🔍 全伺服器訊息搜尋", "📢 頻道訊息搜尋", "📋 論壇貼文搜尋",
+    "📚 微國家百科搜尋", "📚 永久知識庫搜尋", "─── Discord 伺服器歷史資料",
+)
+
+
+def _strip_raw_tool_dump(text: str) -> str:
+    """Defensive safety net: weak/free AI models sometimes echo the raw
+    tool-call search result verbatim as their 'final answer' instead of
+    composing a natural-language summary (observed in production — the
+    reply literally contained '🔍 全伺服器訊息搜尋「...」的結果...[1]...[2]...').
+    Detect known tool-output header markers and cut everything from that
+    point onward, keeping only any natural-language prose that came before
+    it. If nothing meaningful is left, the caller falls back to a generic
+    message rather than showing raw data dumps to the user."""
+    if not text:
+        return text
+    cut_at = len(text)
+    for marker in _TOOL_DUMP_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            cut_at = min(cut_at, idx)
+    cleaned = text[:cut_at].strip()
+    return cleaned
 
 
 async def generate_chat_reply(message, settings: dict) -> tuple:
@@ -3014,7 +3078,17 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"⚠️ 工具回傳的文字內容本身就是完整答案來源，不是網址或連結，"
             f"你不需要、也沒有能力瀏覽任何網頁。絕對不要回覆「我無法查看連結」"
             f"「Discord 訊息需要透過客戶端存取」之類的話——你收到的搜尋結果已經是純文字內容，"
-            f"直接根據內容回答使用者的問題就好，不要提到「連結」或「網址」這件事。"
+            f"直接根據內容回答使用者的問題就好，不要提到「連結」或「網址」這件事。\n"
+            f"⚠️⚠️ 極重要（格式規則）：搜尋結果只是給你看的「原始資料」，"
+            f"絕對禁止把搜尋結果原封不動貼到回覆裡！"
+            f"不要出現「🔍」「📋」「📢」「📚」開頭的搜尋結果標題，"
+            f"不要出現「[1]」「[2]」這種編號列表，不要出現頻道名稱、時間戳記（如 2025-10-19T17:01）、"
+            f"「按時間排列」這類字樣——這些都是程式格式，不是給人看的。"
+            f"你要做的是自己讀懂搜尋結果，然後用自己的話、正常聊天的口語語氣，"
+            f"直接講出結論給使用者聽，就像朋友聊天一樣簡短回答，不要像機器人在報告資料。\n"
+            f"例如搜尋結果顯示「了千勾當選第三任秘書長，8月4日上任」，"
+            f"你應該回答類似：「剛看到公告，新秘書長是了千勾，8/4正式上任喔」"
+            f"這種自然口語，而不是把整段搜尋結果貼上去。"
         )
 
     messages = [
@@ -3103,6 +3177,17 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             call_chat_api(messages, settings, tools=None), timeout=30
         )
         raw_reply = fallback_msg.get("content") or ""
+
+    # Safety net: strip raw tool-output dumps that a weak model sometimes
+    # echoes verbatim instead of composing a natural-language answer.
+    _sanitized = _strip_raw_tool_dump(raw_reply)
+    if _sanitized != raw_reply.strip():
+        print(f"⚠️ 偵測到 AI 原封不動貼上搜尋結果，已清除原始格式（原長度 {len(raw_reply)} → {len(_sanitized)}）")
+    if not _sanitized:
+        # The entire reply was a raw dump with no prose at all — better to
+        # say something honest than show nothing or garbage to the user.
+        _sanitized = "我剛剛查了一下資料，但整理答案時卡住了，你可以換個更具體的問法再問我一次嗎？"
+    raw_reply = _sanitized
 
     # Parse [MEMORY:] and [MOD:] tags from reply
     actual_reply = raw_reply
