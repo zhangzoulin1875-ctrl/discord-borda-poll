@@ -1339,10 +1339,20 @@ async def _get_server_context(guild, user) -> str:
     # Roles (compact)
     lines.append(f"\n🏷️ 身分組：{', '.join(r['name'] for r in d['roles'][:20])}")
 
-    # Emojis (compact — just names, tell AI how to use them)
+    # Emojis (compact — give the AI the ACTUAL Discord render syntax, not bare :name:)
+    # Discord custom emojis only render as images when written as <:name:id> (or
+    # <a:name:id> for animated) — plain ":name:" text (Slack-style) shows up as
+    # literal text, which is the bug this fixes.
     if d["emojis"]:
-        emoji_names = [f":{e['name']}:" for e in d["emojis"][:30]]
-        lines.append(f"\n😀 伺服器 Emoji（名稱列出，可在回覆中提及）：{' '.join(emoji_names)}")
+        emoji_tokens = []
+        for e in d["emojis"][:30]:
+            prefix = "a" if e.get("animated") else ""
+            emoji_tokens.append(f"<{prefix}:{e['name']}:{e['id']}>")
+        lines.append(
+            f"\n😀 伺服器自訂 Emoji（如果要使用，必須「完整照抄」下面整串文字，"
+            f"包含角括號和數字 ID，絕對不能只打 :名稱: ，那樣不會顯示成圖案）：\n"
+            f"{' '.join(emoji_tokens)}"
+        )
 
     # Current user's identity in this server
     user_roles = [r.name for r in user.roles if r.name != "@everyone" and not r.managed]
@@ -1948,6 +1958,41 @@ _MICROPEDIA_TOOL_SCHEMA = {
 
 
 
+def _fix_emoji_shortcodes(text: str, guild) -> str:
+    """Safety net: convert any bare ':name:' shortcode in the AI's reply into
+    the actual Discord custom-emoji render syntax '<:name:id>' (or
+    '<a:name:id>' for animated), for any name that matches a real emoji in
+    this guild. LLMs habitually write emoji as Slack/plain-text shortcodes
+    even when told the real syntax, so this guarantees correct rendering
+    regardless of what the model actually output."""
+    if not text or not guild or not guild.emojis:
+        return text
+
+    emoji_by_name = {e.name: e for e in guild.emojis}
+    if not emoji_by_name:
+        return text
+
+    # Skip anything that's already a proper Discord emoji tag: <:name:id> or <a:name:id>
+    already_tagged_spans = set()
+    for m in re.finditer(r"<a?:\w+:\d+>", text):
+        already_tagged_spans.add((m.start(), m.end()))
+
+    def _replace(m):
+        start, end = m.span()
+        # Don't touch matches that are already inside a full <:name:id> tag
+        for s, e in already_tagged_spans:
+            if s <= start and end <= e:
+                return m.group(0)
+        name = m.group(1)
+        emoji = emoji_by_name.get(name)
+        if not emoji:
+            return m.group(0)  # not a known custom emoji — leave as-is (could be a normal word between colons)
+        prefix = "a" if emoji.animated else ""
+        return f"<{prefix}:{emoji.name}:{emoji.id}>"
+
+    return re.sub(r":(\w+):", _replace, text)
+
+
 async def generate_chat_reply(message, settings: dict) -> tuple:
     """Generate a reply for a chat message with brief context, server awareness, and per-user memory.
     Returns (reply_text, new_facts_or_None, mod_action_or_None)."""
@@ -2165,6 +2210,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         memory_str = parts[1].rstrip("]").strip()
         if memory_str.lower() != "none" and memory_str:
             new_facts = [f.strip() for f in memory_str.split(",") if f.strip()]
+
+    # Fix any bare :name: emoji shortcodes into real Discord render syntax
+    if actual_reply and message.guild:
+        actual_reply = _fix_emoji_shortcodes(actual_reply, message.guild)
 
     # Final safety: if reply is empty after all parsing, return None so caller can handle
     if not actual_reply:
