@@ -842,9 +842,18 @@ async def call_chat_api(messages: list, settings: dict) -> str:
         "temperature": 0.7,
         "max_tokens": 300,
     }
+    # Auto-append /chat/completions if only base URL is provided
+    api_url = settings["api_url"].rstrip("/")
+    if not api_url.endswith("/chat/completions"):
+        if api_url.endswith("/v1"):
+            api_url += "/chat/completions"
+        elif api_url.endswith("/v2"):
+            api_url += "/chat/completions"
+        else:
+            api_url += "/v1/chat/completions"
     timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=25)
     async with aiohttp.ClientSession() as session:
-        async with session.post(settings["api_url"], json=payload, headers=headers, timeout=timeout) as resp:
+        async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 raise Exception(f"Chat AI API returned {resp.status}: {error_text[:300]}")
@@ -1195,11 +1204,18 @@ async def call_ai_api(conversation: str, settings: dict) -> str:
         "temperature": 0.3,
         "stream": True,
     }
+    # Auto-append /chat/completions if only base URL is provided
+    api_url = settings["api_url"].rstrip("/")
+    if not api_url.endswith("/chat/completions"):
+        if api_url.endswith("/v1") or api_url.endswith("/v2"):
+            api_url += "/chat/completions"
+        else:
+            api_url += "/v1/chat/completions"
     # Use streaming to avoid long silent waits — collect chunks as they arrive
     timeout = aiohttp.ClientTimeout(total=300, connect=15, sock_read=60)
     result_chunks = []
     async with aiohttp.ClientSession() as session:
-        async with session.post(settings["api_url"], json=payload, headers=headers, timeout=timeout) as resp:
+        async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 raise Exception(f"AI API returned {resp.status}: {error_text[:500]}")
@@ -1238,9 +1254,18 @@ async def call_ai_api_stream(conversation: str, settings: dict):
         "temperature": 0.3,
         "stream": True,
     }
+    # Auto-append /chat/completions if only base URL is provided
+    api_url = settings["api_url"].rstrip("/")
+    if not api_url.endswith("/chat/completions"):
+        if api_url.endswith("/v1"):
+            api_url += "/chat/completions"
+        elif api_url.endswith("/v2"):
+            api_url += "/chat/completions"
+        else:
+            api_url += "/v1/chat/completions"
     timeout = aiohttp.ClientTimeout(total=300, connect=15, sock_read=90)
     async with aiohttp.ClientSession() as session:
-        async with session.post(settings["api_url"], json=payload, headers=headers, timeout=timeout) as resp:
+        async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 raise Exception(f"AI API returned {resp.status}: {error_text[:500]}")
