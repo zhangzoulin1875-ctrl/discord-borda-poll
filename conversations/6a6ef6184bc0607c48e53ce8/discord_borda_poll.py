@@ -1301,16 +1301,45 @@ def _get_mute_duration(user_id: str, strictness: str, severity_override: int = 0
     return escalation[idx]
 
 
+async def _resolve_log_channel(guild):
+    """Resolve the configured log channel, with cache-miss fallback to a live fetch.
+    Returns (channel_or_None, error_reason_or_None)."""
+    log_ch_id = chat_ai_settings.get("log_channel_id")
+    if not log_ch_id:
+        return None, "未設定 log_channel_id"
+    if not guild:
+        return None, "沒有 guild 物件"
+
+    log_ch = guild.get_channel(log_ch_id)
+    if log_ch:
+        return log_ch, None
+
+    # Cache miss — try a live fetch (covers freshly-created channels or cache gaps)
+    try:
+        log_ch = await guild.fetch_channel(log_ch_id)
+        return log_ch, None
+    except discord.NotFound:
+        return None, f"頻道 ID {log_ch_id} 不存在（可能已被刪除，請重新設定 /chat log_channel）"
+    except discord.Forbidden:
+        return None, f"Bot 沒有權限查看頻道 ID {log_ch_id}（請確認 Bot 在該頻道有 View Channel 權限）"
+    except Exception as e:
+        return None, f"取得頻道失敗：{e}"
+
+
 async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name: str = ""):
     """Send a conversation log to the designated log channel."""
-    log_ch_id = chat_ai_settings.get("log_channel_id")
-    if not log_ch_id or not message.guild:
+    if not chat_ai_settings.get("log_channel_id"):
+        return  # not configured, nothing to do
+    if not message.guild:
+        print("⚠️ 對話紀錄：訊息沒有 guild（私訊？），略過")
         return
-    try:
-        log_ch = message.guild.get_channel(log_ch_id)
-        if not log_ch:
-            return
 
+    log_ch, err = await _resolve_log_channel(message.guild)
+    if not log_ch:
+        print(f"⚠️ 對話紀錄發送失敗：{err}")
+        return
+
+    try:
         author = message.author
         user_text = user_content[:300]
         if len(user_content) > 300:
@@ -1337,6 +1366,9 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
         ch_name = channel_name or (message.channel.name if hasattr(message.channel, "name") else "?")
         embed.set_footer(text=f"#{ch_name} | User ID: {author.id}")
         await log_ch.send(embed=embed)
+        print(f"📝 對話紀錄已發送到 #{log_ch.name}")
+    except discord.Forbidden:
+        print(f"⚠️ 對話紀錄發送失敗：Bot 沒有在 #{getattr(log_ch, 'name', '?')} 發送訊息/嵌入的權限")
     except Exception as e:
         print(f"⚠️ 對話紀錄發送失敗：{e}")
 
@@ -1387,10 +1419,11 @@ async def _execute_mute(message, duration: int, reason: str):
         print(f"🛡️ 濫用偵測：已禁言 {member.display_name} {duration}秒，原因：{reason}")
 
         # Send log to designated channel if configured
-        log_ch_id = chat_ai_settings.get("log_channel_id")
-        if log_ch_id:
+        if chat_ai_settings.get("log_channel_id"):
             try:
-                log_ch = guild.get_channel(log_ch_id)
+                log_ch, log_err = await _resolve_log_channel(guild)
+                if not log_ch:
+                    print(f"⚠️ 禁言紀錄發送失敗：{log_err}")
                 if log_ch:
                     log_embed = discord.Embed(
                         title="🛡️ AI 自動禁言",
@@ -3755,6 +3788,42 @@ class ChatGroup(app_commands.Group):
             )
         else:
             await interaction.response.send_message("⚠️ 請選擇動作和頻道。", ephemeral=True)
+
+    @app_commands.command(name="log_test", description="發送測試訊息到 AI 紀錄頻道，驗證設定是否正常（管理員限定）")
+    async def chat_log_test(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        log_ch_id = chat_ai_settings.get("log_channel_id")
+        if not log_ch_id:
+            await interaction.response.send_message(
+                "❌ 尚未設定 AI 紀錄頻道。請先用 `/chat log_channel` 設定。",
+                ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        log_ch, err = await _resolve_log_channel(interaction.guild)
+        if not log_ch:
+            await interaction.followup.send(f"❌ 找不到紀錄頻道：{err}", ephemeral=True)
+            return
+        try:
+            test_embed = discord.Embed(
+                title="🧪 測試訊息",
+                description=f"這是 `/chat log_test` 發送的測試訊息，確認 <#{log_ch_id}> 設定正常。",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow(),
+            )
+            test_embed.set_footer(text=f"由 {interaction.user.display_name} 觸發")
+            await log_ch.send(embed=test_embed)
+            await interaction.followup.send(f"✅ 測試訊息已成功發送到 {log_ch.mention}！", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                f"❌ Bot 沒有在 {log_ch.mention} 發送訊息的權限。\n"
+                f"請到該頻道 → 頻道設定 → 權限，確認 Bot 有「查看頻道」「發送訊息」「嵌入連結」權限。",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ 發送失敗：{e}", ephemeral=True)
 
     @app_commands.command(name="test", description="測試 AI 聊天回覆（管理員限定）")
     @app_commands.describe(message="要測試的訊息")
