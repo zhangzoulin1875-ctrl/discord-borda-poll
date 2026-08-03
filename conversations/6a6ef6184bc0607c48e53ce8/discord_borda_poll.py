@@ -2421,7 +2421,7 @@ async def sync_to_drive():
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     ok_count = 0
     fail_count = 0
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json"]:
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json", "quiz_state.json", "token_usage.json"]:
         filepath = os.path.join(data_dir, filename)
         if os.path.exists(filepath):
             try:
@@ -2450,7 +2450,7 @@ async def load_from_drive():
     print(f"🔄 Drive 載入開始：OAuth={'✅' if has_oauth else '❌'} SA={'✅' if has_sa else '❌'} client_id={'✅' if cid else '❌'}")
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
-    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json", "token_usage.json"]:
+    for filename in ["polls_data.json", "briefing_settings.json", "chat_ai_settings.json", "user_memories.json", "quiz_settings.json", "quiz_scores.json", "quiz_champions.json", "quiz_state.json", "token_usage.json"]:
         content = await _drive_download(filename)
         if content:
             try:
@@ -2826,10 +2826,12 @@ def load_polls_from_disk():
 
 
 async def auto_save_loop():
-    """Background task: save polls every 30 seconds."""
+    """Background task: save ALL in-memory state to disk every 30 seconds."""
     while True:
         await asyncio.sleep(30)
         save_polls_to_disk()
+        save_quiz_data()
+        save_token_usage()
 
 
 def get_poll(guild_id: int, poll_id: str) -> Optional[Poll]:
@@ -4874,6 +4876,7 @@ import random as _quiz_random
 QUIZ_SETTINGS_FILE = os.path.join(DATA_DIR, "quiz_settings.json")
 QUIZ_SCORES_FILE = os.path.join(DATA_DIR, "quiz_scores.json")
 QUIZ_CHAMPIONS_FILE = os.path.join(DATA_DIR, "quiz_champions.json")
+QUIZ_STATE_FILE = os.path.join(DATA_DIR, "quiz_state.json")
 
 # ── 記憶體狀態 ──
 quiz_settings = {
@@ -4889,7 +4892,8 @@ quiz_active_questions = {}
 
 
 def save_quiz_data():
-    """Save quiz settings, scores, and champions to disk."""
+    """Save quiz settings, scores, champions, and active state to disk."""
+    global _quiz_last_question_time
     os.makedirs(DATA_DIR, exist_ok=True)
     try:
         with open(QUIZ_SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -4898,13 +4902,19 @@ def save_quiz_data():
             json_module.dump(quiz_scores, f, ensure_ascii=False, indent=2)
         with open(QUIZ_CHAMPIONS_FILE, "w", encoding="utf-8") as f:
             json_module.dump(quiz_champions, f, ensure_ascii=False, indent=2)
+        quiz_state = {
+            "active_questions": quiz_active_questions,
+            "last_question_time": _quiz_last_question_time,
+        }
+        with open(QUIZ_STATE_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(quiz_state, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ Quiz data save failed: {e}")
 
 
 def load_quiz_data():
     """Load quiz data from disk."""
-    global quiz_settings, quiz_scores, quiz_champions
+    global quiz_settings, quiz_scores, quiz_champions, quiz_active_questions, _quiz_last_question_time
     try:
         if os.path.exists(QUIZ_SETTINGS_FILE):
             with open(QUIZ_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -4915,8 +4925,14 @@ def load_quiz_data():
         if os.path.exists(QUIZ_CHAMPIONS_FILE):
             with open(QUIZ_CHAMPIONS_FILE, "r", encoding="utf-8") as f:
                 quiz_champions = json_module.load(f)
+        if os.path.exists(QUIZ_STATE_FILE):
+            with open(QUIZ_STATE_FILE, "r", encoding="utf-8") as f:
+                state = json_module.load(f)
+                quiz_active_questions = state.get("active_questions", {})
+                _quiz_last_question_time = state.get("last_question_time", 0)
         print(f"✅ 問答資料載入：{'啟用' if quiz_settings.get('enabled') else '停用'}, "
-              f"{len(quiz_scores)} 位玩家, {len(quiz_champions)} 位冠軍")
+              f"{len(quiz_scores)} 位玩家, {len(quiz_champions)} 位冠軍, "
+              f"{len(quiz_active_questions)} 個活躍題目")
     except Exception as e:
         print(f"⚠️ Quiz data load failed: {e}")
 
@@ -5206,6 +5222,7 @@ class QuizAnswerView(discord.ui.View):
 
         # Mark as timed out
         quiz_active_questions.pop(str(self.message_id), None)
+        save_quiz_data()
 
         # Try to edit the message with the answer
         try:
@@ -5276,6 +5293,8 @@ async def quiz_question_loop():
             for k in stale_keys:
                 quiz_active_questions.pop(k, None)
                 print(f"🧹 Quiz: Cleaned up stale question {k}")
+            if stale_keys:
+                save_quiz_data()
 
             # Check if there's an unanswered active question — don't pile up
             if quiz_active_questions:
@@ -5324,6 +5343,7 @@ async def quiz_question_loop():
             }
 
             _quiz_last_question_time = _time.time()
+            save_quiz_data()
             print(f"✅ Quiz: Question posted in #{channel.name} (msg_id={msg.id})")
         except Exception as e:
             print(f"⚠️ Quiz loop error: {e}")
