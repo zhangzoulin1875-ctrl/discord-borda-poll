@@ -4947,9 +4947,15 @@ class QuizAnswerView(discord.ui.View):
     async def _handle_answer(self, interaction: discord.Interaction, selected_index: int):
         user_id_str = str(interaction.user.id)
 
-        # Check if this user already answered wrong before
-        if hasattr(self, '_wrong_users') and user_id_str in self._wrong_users:
-            await interaction.response.send_message("你已經答錯過了，不能再答！", ephemeral=True)
+        # Check if this user has already exhausted all wrong guesses (per-user, not shared)
+        if not hasattr(self, '_user_wrong_indices'):
+            self._user_wrong_indices = {}  # {user_id_str: set(indices tried wrong)}
+        user_tried = self._user_wrong_indices.get(user_id_str, set())
+        if selected_index in user_tried:
+            await interaction.response.send_message("你已經試過這個選項了，換一個吧！", ephemeral=True)
+            return
+        if len(user_tried) >= 3:
+            await interaction.response.send_message("你已經答錯 3 次了，這題你沒有機會了！", ephemeral=True)
             return
 
         # Already answered by someone
@@ -5025,41 +5031,22 @@ class QuizAnswerView(discord.ui.View):
                 pass
             print(f"🎉 Quiz: {interaction.user.display_name} answered correctly (+5 pts, daily={user_entry['daily_score']})")
         else:
-            # Wrong answer — record and block this user from answering again
-            if not hasattr(self, '_wrong_users'):
-                self._wrong_users = set()
-            self._wrong_users.add(user_id_str)
-            # Check if all 4 options have been tried by this user
-            remaining = 4 - len(self._wrong_users)
+            # Wrong answer — track per-user only. The message/buttons are SHARED
+            # by everyone in the channel, so we must NOT edit them here (that
+            # would make this one user's wrong guess appear red for everyone).
+            user_tried.add(selected_index)
+            self._user_wrong_indices[user_id_str] = user_tried
+            remaining = 3 - len(user_tried)
             if remaining > 0:
                 await interaction.response.send_message(
-                    f"❌ 答錯了！不能再選已經選過的，還剩 {remaining} 個選項。",
+                    f"❌ 答錯了！再試試其他選項，你還有 {remaining} 次機會。",
                     ephemeral=True
                 )
-                # Disable the button they just clicked
-                for child in self.children:
-                    if child.custom_id == interaction.data.get("custom_id"):
-                        child.disabled = True
-                        child.style = discord.ButtonStyle.danger
-                try:
-                    await interaction.message.edit(view=self)
-                except Exception:
-                    pass
             else:
-                # All wrong — eliminate this user
                 await interaction.response.send_message(
-                    "❌ 所有選項都錯了！本題你已無法再答。",
+                    "❌ 答錯 3 次了，這題你沒有機會了，等下一題吧！",
                     ephemeral=True
                 )
-                # Disable all remaining buttons for this user (disable all if they were the only one trying)
-                for child in self.children:
-                    if not child.disabled:
-                        child.disabled = True
-                        child.style = discord.ButtonStyle.secondary
-                try:
-                    await interaction.message.edit(view=self)
-                except Exception:
-                    pass
 
     async def on_timeout(self):
         """Reveal the answer when no one answers in time."""
