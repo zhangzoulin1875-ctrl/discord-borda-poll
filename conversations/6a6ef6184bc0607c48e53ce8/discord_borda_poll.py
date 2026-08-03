@@ -2392,7 +2392,7 @@ async def on_message(message):
             log_cfg = chat_ai_settings.get("log_channel_id")
             print(f"   📝 準備寫入對話紀錄：log_channel_id={log_cfg!r} (type={type(log_cfg).__name__})")
             try:
-                await _send_chat_log(message, clean_content, reply)
+                await _send_chat_log(message, clean or message.content, reply)
             except Exception as log_exc:
                 print(f"   ⚠️ _send_chat_log 拋出例外（不影響回覆）：{log_exc}")
         # ── Abuse detection: AI path (after AI call) ──
