@@ -865,6 +865,9 @@ chat_ai_settings = {
     "cooldown_seconds": 60,
     "channels_whitelist": [],  # empty = all channels
     "filter_strength": "low",  # off / low / medium / high
+    "abuse_detection_enabled": False,
+    "abuse_detection_strictness": "medium",  # low / medium / high
+    "abuse_mute_admins": False,
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -953,6 +956,12 @@ def load_chat_ai_settings():
             # Ensure filter_strength exists (migration for older saves)
             if "filter_strength" not in loaded:
                 loaded["filter_strength"] = "low"
+            if "abuse_detection_enabled" not in loaded:
+                loaded["abuse_detection_enabled"] = False
+            if "abuse_detection_strictness" not in loaded:
+                loaded["abuse_detection_strictness"] = "medium"
+            if "abuse_mute_admins" not in loaded:
+                loaded["abuse_mute_admins"] = False
             chat_ai_settings.update(loaded)
             print("✅ 載入 AI 聊天設定")
     except Exception as e:
@@ -1216,9 +1225,132 @@ async def server_context_refresh_loop():
         await asyncio.sleep(_SERVER_CONTEXT_TTL)
 
 
+# ──────────────────────────────────────────────
+# 濫用偵測系統（Abuse Detection）
+# ──────────────────────────────────────────────
+
+# Per-user abuse tracking: {user_id_str: {message_times: [...], warnings: int, total_mutes: int, last_mute_time: float}}
+abuse_tracker: dict = {}
+# Mod action log: [{user_id, user_name, action, duration, reason, timestamp, channel}]
+mod_action_log: list = []
+MOD_LOG_MAX = 50
+
+# Severe slur / hate keywords (fast path, no AI needed)
+_SEVERE_KEYWORDS = [
+    "死gay", "死Gay", "死GAY",
+    "nigger", "nigga", "Nigger", "NIGGA",
+    "chink", "Chink", "CHINK",
+    "retard", "Retard", "RETARD",
+    "faggot", "Faggot", "FAGGOT",
+    "反人類", "種族滅絕",
+]
+
+# Flood thresholds: (messages_in_window, window_seconds)
+_FLOOD_THRESHOLDS = {
+    "low":    (12, 30),   # 12 msgs in 30s
+    "medium": (8, 30),    # 8 msgs in 30s
+    "high":   (5, 20),    # 5 msgs in 20s
+}
+
+# Escalating mute durations (seconds): [1st, 2nd, 3rd, 4th+]
+_MUTE_ESCALATION = {
+    "low":    [300, 600, 1800, 3600],       # 5m, 10m, 30m, 1h
+    "medium": [600, 1800, 3600, 21600],      # 10m, 30m, 1h, 6h
+    "high":   [1800, 3600, 21600, 86400],    # 30m, 1h, 6h, 24h
+}
+
+
+def _track_flood(user_id: str, strictness: str) -> bool:
+    """Track message frequency. Returns True if flooding detected."""
+    now = _time.time()
+    threshold_count, window_secs = _FLOOD_THRESHOLDS.get(strictness, _FLOOD_THRESHOLDS["medium"])
+
+    tracker = abuse_tracker.setdefault(user_id, {"message_times": [], "warnings": 0, "total_mutes": 0, "last_mute_time": 0})
+    times = tracker["message_times"]
+    times.append(now)
+    # Prune old entries outside the window
+    cutoff = now - window_secs
+    tracker["message_times"] = [t for t in times if t > cutoff]
+
+    return len(tracker["message_times"]) >= threshold_count
+
+
+def _check_severe_keywords(content: str) -> str | None:
+    """Fast-path check for severe slurs. Returns the matched keyword or None."""
+    lower = content.lower()
+    for kw in _SEVERE_KEYWORDS:
+        if kw.lower() in lower:
+            return kw
+    return None
+
+
+def _get_mute_duration(user_id: str, strictness: str, severity_override: int = 0) -> int:
+    """Get mute duration based on offense count and strictness.
+    severity_override: if >0, use this duration directly (from AI judgment)."""
+    if severity_override > 0:
+        # Cap at 86400 (24h)
+        return min(severity_override, 86400)
+
+    tracker = abuse_tracker.get(user_id, {"warnings": 0, "total_mutes": 0, "last_mute_time": 0})
+    offense = tracker["total_mutes"]
+    escalation = _MUTE_ESCALATION.get(strictness, _MUTE_ESCALATION["medium"])
+    idx = min(offense, len(escalation) - 1)
+    return escalation[idx]
+
+
+async def _execute_mute(message, duration: int, reason: str):
+    """Execute Discord timeout on the message author."""
+    member = message.author
+    guild = message.guild
+    if not guild or not member:
+        return False
+
+    # Skip admins unless abuse_mute_admins is True
+    if not chat_ai_settings.get("abuse_mute_admins", False):
+        if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
+            print(f"🛡️ 濫用偵測：跳過管理員 {member.display_name}（abuse_mute_admins=False）")
+            return False
+
+    # Check bot permissions
+    bot_member = guild.get_member(bot.user.id)
+    if not bot_member or not bot_member.guild_permissions.moderate_members:
+        print(f"🛡️ 濫用偵測：Bot 沒有 Moderate Members 權限，無法禁言")
+        try:
+            await message.channel.send(f"⚠️ 偵測到濫用行為但 Bot 缺少「禁言成員」權限。請給 Bot「Moderate Members」權限。")
+        except:
+            pass
+        return False
+
+    try:
+        until = discord.utils.utcnow() + datetime.timedelta(seconds=duration)
+        await member.timeout(until, reason=reason)
+
+        tracker = abuse_tracker.setdefault(str(member.id), {"message_times": [], "warnings": 0, "total_mutes": 0, "last_mute_time": 0})
+        tracker["total_mutes"] += 1
+        tracker["last_mute_time"] = _time.time()
+
+        mod_action_log.append({
+            "user_id": str(member.id),
+            "user_name": member.display_name,
+            "action": "mute",
+            "duration": duration,
+            "reason": reason,
+            "timestamp": _time.time(),
+            "channel": str(message.channel.name) if hasattr(message.channel, "name") else "?",
+        })
+        if len(mod_action_log) > MOD_LOG_MAX:
+            mod_action_log[:] = mod_action_log[-MOD_LOG_MAX:]
+
+        print(f"🛡️ 濫用偵測：已禁言 {member.display_name} {duration}秒，原因：{reason}")
+        return True
+    except Exception as e:
+        print(f"🛡️ 濫用偵測：禁言失敗：{e}")
+        return False
+
+
 async def generate_chat_reply(message, settings: dict) -> tuple:
     """Generate a reply for a chat message with brief context, server awareness, and per-user memory.
-    Returns (reply_text, new_facts_or_None)."""
+    Returns (reply_text, new_facts_or_None, mod_action_or_None)."""
     user_id = str(message.author.id)
     user_name = message.author.display_name
 
@@ -1257,6 +1389,24 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         f"\n- 這行不會顯示給用戶看"
     )
 
+    # Add abuse detection instruction if enabled
+    if settings.get("abuse_detection_enabled", False):
+        strictness = settings.get("abuse_detection_strictness", "medium")
+        strict_desc = {"low": "寬容", "medium": "標準", "high": "嚴格"}.get(strictness, "標準")
+        system_prompt += (
+            f"\n\n─── 濫用偵測（已啟用，{strict_desc}）───\n"
+            f"你有權判斷使用者是否濫用，並建議禁言時長。\n"
+            f"判定標準：\n"
+            f"- 辱罵、歧視、仇恨言論 → 嚴重（建議 1800-86400 秒）\n"
+            f"- 瘋狂廢話刷屏、無意義騷擾 → 中等（建議 300-1800 秒）\n"
+            f"- 輕微挑釁、態度不佳 → 輕微（建議 60-300 秒）\n"
+            f"- 正常玩笑、抱怨、討論 → 不禁言\n"
+            f"如果需要禁言，在回覆最後加一行 [MOD: 秒數]\n"
+            f"例如：[MOD: 600] 表示禁言 10 分鐘\n"
+            f"正常對話不加 [MOD:]。這行不會顯示給用戶看。\n"
+            f"⚠️ 請謹慎使用，只在真正濫用時才建議禁言。"
+        )
+
     # Collect brief context (last 5 messages before this one)
     # Clearly label each message with the speaker's name
     context_lines = []
@@ -1292,17 +1442,30 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     ]
     raw_reply = await call_chat_api(messages, settings)
 
-    # Parse [MEMORY:] tag from reply
+    # Parse [MEMORY:] and [MOD:] tags from reply
     actual_reply = raw_reply
     new_facts = None
-    if "[MEMORY:" in raw_reply:
-        parts = raw_reply.rsplit("[MEMORY:", 1)
+    mod_action = None
+
+    if "[MOD:" in actual_reply:
+        parts = actual_reply.rsplit("[MOD:", 1)
+        actual_reply = parts[0].strip()
+        mod_str = parts[1].rstrip("]").strip()
+        try:
+            mod_seconds = int(mod_str)
+            if mod_seconds > 0:
+                mod_action = mod_seconds
+        except ValueError:
+            pass
+
+    if "[MEMORY:" in actual_reply:
+        parts = actual_reply.rsplit("[MEMORY:", 1)
         actual_reply = parts[0].strip()
         memory_str = parts[1].rstrip("]").strip()
         if memory_str.lower() != "none" and memory_str:
             new_facts = [f.strip() for f in memory_str.split(",") if f.strip()]
 
-    return actual_reply, new_facts
+    return actual_reply, new_facts, mod_action
 
 
 # ──────────────────────────────────────────────
@@ -2076,11 +2239,41 @@ async def on_message(message):
         return
     print(f"   ✅ Worth replying! Generating...")
 
+    # ── Abuse detection: fast path (before AI call) ──
+    if chat_ai_settings.get("abuse_detection_enabled", False):
+        strictness = chat_ai_settings.get("abuse_detection_strictness", "medium")
+        uid = str(message.author.id)
+
+        # Check severe keywords
+        matched_kw = _check_severe_keywords(message.content)
+        if matched_kw:
+            duration = _get_mute_duration(uid, strictness, severity_override=3600)
+            muted = await _execute_mute(message, duration, f"嚴重違規用語（{matched_kw}）")
+            if muted:
+                await message.reply(
+                    f"🛡️ {message.author.mention} 因使用嚴重違規用語已被禁言 {duration//60} 分鐘。",
+                    mention_author=False
+                )
+                return
+
+        # Check flood
+        if _track_flood(uid, strictness):
+            duration = _get_mute_duration(uid, strictness)
+            tracker = abuse_tracker.get(uid, {})
+            tracker["warnings"] = tracker.get("warnings", 0)
+            muted = await _execute_mute(message, duration, f"訊息刷屏（{strictness}模式）")
+            if muted:
+                await message.reply(
+                    f"🛡️ {message.author.mention} 因短時間內大量發訊已被禁言 {duration//60} 分鐘。",
+                    mention_author=False
+                )
+                return
+
     # Generate reply
     chat_generating.add(message.channel.id)
     try:
         async with message.channel.typing():
-            reply, new_facts = await generate_chat_reply(message, chat_ai_settings)
+            reply, new_facts, mod_action = await generate_chat_reply(message, chat_ai_settings)
         if reply and reply.strip():
             chat_cooldowns[message.channel.id] = _time.time()
             await message.reply(reply[:2000], mention_author=False)
@@ -2088,6 +2281,16 @@ async def on_message(message):
             if new_facts:
                 _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
                 print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
+        # ── Abuse detection: AI path (after AI call) ──
+        if mod_action and chat_ai_settings.get("abuse_detection_enabled", False):
+            duration = min(mod_action, 86400)
+            reason = f"AI 判定濫用行為，建議禁言 {duration} 秒"
+            muted = await _execute_mute(message, duration, reason)
+            if muted:
+                await message.reply(
+                    f"🛡️ {message.author.mention} AI 偵測到不當行為，已被禁言 {duration//60} 分鐘。",
+                    mention_author=False
+                )
     except Exception as e:
         print(f"⚠️ Chat AI error: {e}")
     finally:
@@ -3392,6 +3595,71 @@ class ChatGroup(app_commands.Group):
         embed.set_footer(text="每 10 分鐘自動更新。此指令可手動刷新。")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="abuse_toggle", description="開關濫用偵測系統（管理員限定）")
+    async def chat_abuse_toggle(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        chat_ai_settings["abuse_detection_enabled"] = not chat_ai_settings.get("abuse_detection_enabled", False)
+        save_chat_ai_settings()
+        status = "✅ 開啟" if chat_ai_settings["abuse_detection_enabled"] else "❌ 關閉"
+        await interaction.response.send_message(f"🛡️ 濫用偵測系統已{status}", ephemeral=True)
+
+    @app_commands.command(name="abuse_level", description="設定濫用偵測嚴格度（管理員限定）")
+    @app_commands.describe(level="偵測嚴格度等級")
+    @app_commands.choices(level=[
+        app_commands.Choice(name="低（寬容，嚴重違規才禁言）", value="low"),
+        app_commands.Choice(name="中（標準，刷屏+辱罵都禁）", value="medium"),
+        app_commands.Choice(name="高（嚴格，輕微挑釁也禁）", value="high"),
+    ])
+    async def chat_abuse_level(self, interaction: discord.Interaction, level: app_commands.Choice[str]):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        chat_ai_settings["abuse_detection_strictness"] = level.value
+        save_chat_ai_settings()
+        await interaction.response.send_message(f"✅ 濫用偵測嚴格度已設為**{level.name}**", ephemeral=True)
+
+    @app_commands.command(name="abuse_admins", description="設定是否允許禁言管理員（管理員限定）")
+    @app_commands.describe(enabled="True=可以禁言管理員, False=跳過管理員")
+    async def chat_abuse_admins(self, interaction: discord.Interaction, enabled: bool):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        chat_ai_settings["abuse_mute_admins"] = enabled
+        save_chat_ai_settings()
+        await interaction.response.send_message(
+            f"✅ 禁言管理員：{'開啟（管理員也會被禁言）' if enabled else '關閉（管理員不受影響）'}",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="abuse_log", description="查看最近的禁言記錄（管理員限定）")
+    async def chat_abuse_log(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        if not mod_action_log:
+            await interaction.response.send_message("📋 目前沒有任何禁言記錄。", ephemeral=True)
+            return
+        lines = ["📋 **最近禁言記錄**\n"]
+        for entry in reversed(mod_action_log[-15:]):
+            ts = datetime.datetime.fromtimestamp(entry["timestamp"]).strftime("%m/%d %H:%M")
+            mins = entry["duration"] // 60
+            lines.append(f"• `{ts}` **{entry['user_name']}** — {mins}分鐘\n  原因：{entry['reason']}（#{entry['channel']}）")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="abuse_unmute", description="手動解除禁言（管理員限定）")
+    @app_commands.describe(user="要解除禁言的用戶")
+    async def chat_abuse_unmute(self, interaction: discord.Interaction, user: discord.Member):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        try:
+            await user.timeout(None, reason=f"由 {interaction.user.display_name} 手動解除禁言")
+            await interaction.response.send_message(f"✅ 已解除 {user.mention} 的禁言。", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 解除禁言失敗：{e}", ephemeral=True)
+
     @app_commands.command(name="test", description="測試 AI 聊天回覆（管理員限定）")
     @app_commands.describe(message="要測試的訊息")
     async def chat_test(self, interaction: discord.Interaction, message: str):
@@ -3410,10 +3678,12 @@ class ChatGroup(app_commands.Group):
             fake.channel = interaction.channel
             fake.author = interaction.user
             fake.content = message
-            reply, new_facts = await generate_chat_reply(fake, chat_ai_settings)
+            reply, new_facts, mod_action = await generate_chat_reply(fake, chat_ai_settings)
             # Strip [MEMORY:] from test reply
             if "[MEMORY:" in reply:
                 reply = reply.rsplit("[MEMORY:", 1)[0].strip()
+            if "[MOD:" in reply:
+                reply = reply.rsplit("[MOD:", 1)[0].strip()
             result = f"✅ AI 回覆：\n{reply}"
             if new_facts:
                 result += f"\n\n🧠 記憶更新：{', '.join(new_facts)}"
@@ -3509,6 +3779,17 @@ class ChatGroup(app_commands.Group):
             lines.append(f"  ❌ 尚未建立快取")
         lines.append(f"  → 用 `/chat server_info` 手動刷新")
         lines.append(f"")
+        lines.append(f"**8. 濫用偵測**")
+        abuse_on = chat_ai_settings.get("abuse_detection_enabled", False)
+        abuse_strict = chat_ai_settings.get("abuse_detection_strictness", "medium")
+        abuse_admins = chat_ai_settings.get("abuse_mute_admins", False)
+        lines.append(f"  狀態：{'✅ 開啟' if abuse_on else '❌ 關閉'}")
+        lines.append(f"  嚴格度：{abuse_strict}")
+        lines.append(f"  禁言管理員：{'是' if abuse_admins else '否'}")
+        if mod_action_log:
+            lines.append(f"  累計禁言次數：{len(mod_action_log)}")
+        lines.append(f"  → `/chat abuse_toggle` 開關 | `/chat abuse_level` 調整 | `/chat abuse_log` 查看記錄")
+        lines.append(f"")
         lines.append(f"**7. 測試**")
         lines.append(f"  請在這個頻道發一則 >15 字的訊息，然後查看 Render logs")
         lines.append(f"  應該能看到 `📩 on_message: ...` 的日誌")
@@ -3539,7 +3820,10 @@ class ChatGroup(app_commands.Group):
         embed.add_field(name="頻道白名單", value=channels, inline=False)
         mem_count = len(user_memories)
         embed.add_field(name="用戶記憶", value=f"已記住 {mem_count} 位使用者", inline=True)
-        embed.set_footer(text="/chat toggle | /chat model | /chat memory | /chat debug")
+        abuse_on = chat_ai_settings.get("abuse_detection_enabled", False)
+        abuse_strict = chat_ai_settings.get("abuse_detection_strictness", "medium")
+        embed.add_field(name="濫用偵測", value=f"{'✅' if abuse_on else '❌'} {abuse_strict}", inline=True)
+        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat memory | /chat debug")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
