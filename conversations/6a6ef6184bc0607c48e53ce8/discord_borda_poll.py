@@ -2374,7 +2374,10 @@ async def _search_discord_history_inner(guild, query: str, limit: int = 10) -> s
                     )
                 else:
                     block += "\n（此貼文下沒有任何回覆，狀態可能從未更新過）"
-                block += f"\n連結：{p['url']}"
+                # Deliberately NOT including the raw jump_url here — some
+                # weak models see a URL and hallucinate a refusal like "I
+                # can't access Discord links directly", even when nothing
+                # in the user's message was a link at all.
                 parts.append(block)
             return "\n".join(parts)
         except Exception as e:
@@ -2674,7 +2677,11 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"⚠️ 極重要：論壇貼文的「原始內容」只是提案剛發起時的樣子，事情很可能早就有後續發展"
             f"（撤案、通過、否決、換人等）。一定要看「最新進展」欄位裡最後幾則回覆的日期和內容，"
             f"那才是目前真正的狀態。如果最新進展顯示案子已經結束/撤回/有結果，"
-            f"就不要再用原始提案的角度回答，要以最新狀態為準。"
+            f"就不要再用原始提案的角度回答，要以最新狀態為準。\n"
+            f"⚠️ 工具回傳的文字內容本身就是完整答案來源，不是網址或連結，"
+            f"你不需要、也沒有能力瀏覽任何網頁。絕對不要回覆「我無法查看連結」"
+            f"「Discord 訊息需要透過客戶端存取」之類的話——你收到的搜尋結果已經是純文字內容，"
+            f"直接根據內容回答使用者的問題就好，不要提到「連結」或「網址」這件事。"
         )
 
     messages = [
