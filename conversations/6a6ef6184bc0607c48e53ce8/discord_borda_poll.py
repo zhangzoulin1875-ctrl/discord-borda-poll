@@ -5437,156 +5437,201 @@ class SystemGroup(app_commands.Group):
 
         await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
 
-
-# ──────────────────────────────────────────────
-# 會議指令群組
-# ──────────────────────────────────────────────
-
-
-class MeetingGroup(app_commands.Group):
-    def __init__(self):
-        super().__init__(name="meeting", description="會議相關指令")
-
-    @app_commands.command(name="adjourn", description="整理會議紀錄（管理員限定）")
-    @app_commands.describe(
-        channel="要整理的頻道",
-        since="起始時間（例如：2h=2小時前、1h30m、14:00、2026-08-02）",
-    )
-    async def adjourn(self, interaction: discord.Interaction, channel: discord.TextChannel, since: str):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+    @app_commands.command(name="corrections", description="查看/審核使用者提交的修正建議（機器人擁有者限定）")
+    @app_commands.describe(action="list=列出待審核, approve=批准, reject=拒絕", entry_id="要審核的修正 ID（approve/reject 時必填）")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="列出待審核", value="list"),
+        app_commands.Choice(name="列出全部", value="all"),
+        app_commands.Choice(name="批准", value="approve"),
+        app_commands.Choice(name="拒絕", value="reject"),
+    ])
+    async def system_corrections(self, interaction: discord.Interaction, action: app_commands.Choice[str], entry_id: str = ""):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True)
 
-        if not ai_settings["api_key"]:
-            await interaction.response.send_message(
-                "❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定 中設定。", ephemeral=True
+        entries = _corrections.get("entries", [])
+
+        if action.value == "list":
+            pending = [e for e in entries if e.get("validation_status") == "pending"]
+            if not pending:
+                await interaction.followup.send("✅ 沒有待審核的修正建議。", ephemeral=True)
+                return
+            lines = []
+            for e in pending[:10]:
+                lines.append(
+                    f"**ID: {e['id']}**\n"
+                    f"  使用者：{e.get('user_name', '?')}\n"
+                    f"  問題：{e.get('question', '')[:80]}\n"
+                    f"  修正：{e.get('correction', '')[:150]}\n"
+                    f"  AI 審核：{e.get('ai_validation', '')[:80]}"
+                )
+            await interaction.followup.send(
+                f"📝 **待審核修正（{len(pending)} 筆）**\n\n" + "\n\n".join(lines),
+                ephemeral=True,
             )
-            return
 
-        after_time = parse_since(since)
-        if not after_time:
-            await interaction.response.send_message(
-                "❌ 無法解析時間。支援格式：`2h`（2小時前）、`1h30m`、`14:00`、`2026-08-02`、`2026-08-02 14:00`",
+        elif action.value == "all":
+            if not entries:
+                await interaction.followup.send("📝 目前沒有任何修正資料。", ephemeral=True)
+                return
+            approved = [e for e in entries if e.get("validated")]
+            rejected = [e for e in entries if e.get("validation_status") == "rejected"]
+            pending = [e for e in entries if e.get("validation_status") == "pending"]
+            summary = (
+                f"📊 **修正資料統計**\n"
+                f"  總計：{len(entries)}\n"
+                f"  ✅ 已批准：{len(approved)}\n"
+                f"  ❌ 已拒絕：{len(rejected)}\n"
+                f"  ⏳ 待審核：{len(pending)}"
+            )
+            await interaction.followup.send(summary, ephemeral=True)
+
+        elif action.value == "approve":
+            if not entry_id:
+                await interaction.followup.send("❌ 請提供要批准的修正 ID。", ephemeral=True)
+                return
+            for e in entries:
+                if e.get("id") == entry_id:
+                    e["validated"] = True
+                    e["validation_status"] = "approved"
+                    e["ai_validation"] = "管理員手動批准"
+                    save_corrections()
+                    await interaction.followup.send(
+                        f"✅ 已批准修正 ID {entry_id}。AI 之後會參考這個修正回答問題。",
+                        ephemeral=True,
+                    )
+                    return
+            await interaction.followup.send(f"❌ 找不到 ID 為 {entry_id} 的修正。", ephemeral=True)
+
+        elif action.value == "reject":
+            if not entry_id:
+                await interaction.followup.send("❌ 請提供要拒絕的修正 ID。", ephemeral=True)
+                return
+            for e in entries:
+                if e.get("id") == entry_id:
+                    e["validated"] = False
+                    e["validation_status"] = "rejected"
+                    save_corrections()
+                    await interaction.followup.send(
+                        f"❌ 已拒絕修正 ID {entry_id}。AI 不會參考這個修正。",
+                        ephemeral=True,
+                    )
+                    return
+            await interaction.followup.send(f"❌ 找不到 ID 為 {entry_id} 的修正。", ephemeral=True)
+
+    @app_commands.command(name="forum_index", description="查看/刷新論壇貼文搜尋索引（機器人擁有者限定）")
+    async def system_forum_index(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        # Hard cap so this command can NEVER leave the user staring at
+        # "思考中..." forever — if indexing genuinely takes longer than 60s
+        # (large server, many threads/replies), let it keep running as a
+        # background task and tell the user to check back with this same
+        # command shortly instead of blocking the interaction indefinitely.
+        try:
+            posts = await asyncio.wait_for(_refresh_forum_index(interaction.guild), timeout=60)
+        except asyncio.TimeoutError:
+            print("⚠️ /system forum_index 手動刷新超過 60s，轉為背景執行")
+            asyncio.ensure_future(_refresh_forum_index(interaction.guild))
+            await interaction.followup.send(
+                "⏳ 索引的貼文/回覆數量較多，60 秒內沒跑完，已轉為背景繼續執行。"
+                "大約 1-2 分鐘後再用這個指令查看結果就會是最新的。",
                 ephemeral=True,
             )
             return
 
-        await interaction.response.defer()  # public — meeting minutes should be visible
+        forum_count = len(list(interaction.guild.forums))
 
-        # Collect messages
-        formatted = []
-        count = 0
-        try:
-            async for msg in channel.history(after=after_time, limit=500):
-                if msg.author.bot:
-                    continue
-                content = msg.content.strip()
-                if not content:
-                    if msg.attachments:
-                        content = f"[傳送了 {len(msg.attachments)} 個附件]"
-                    elif msg.embeds:
-                        content = f"[傳送了嵌入訊息: {msg.embeds[0].title or '無標題'}]"
-                    else:
-                        continue
-                if len(content) > 500:
-                    content = content[:500] + "..."
-                time_str = msg.created_at.strftime("%H:%M")
-                name = msg.author.display_name
-                formatted.append(f"[{time_str}] {name}: {content}")
-                count += 1
-        except discord.Forbidden:
-            await interaction.followup.send("❌ 沒有權限讀取該頻道的訊息。")
-            return
-
-        if not formatted:
-            await interaction.followup.send(
-                f"❌ 在指定時間後未找到任何訊息（頻道：{channel.mention}，起始：{after_time.strftime('%Y-%m-%d %H:%M UTC')}）"
-            )
-            return
-
-        # Build conversation log
-        log_text = f"頻道: #{channel.name}\n時間範圍: {after_time.strftime('%Y-%m-%d %H:%M')} UTC ~ 整理時間\n訊息數: {count}\n\n"
-        log_text += "\n".join(reversed(formatted))
-
-        if len(log_text) > 30000:
-            log_text = log_text[:30000] + "\n...（後續訊息已截斷）"
-
-        # Send live message — will be edited as AI streams
-        live_msg = await interaction.followup.send(
-            f"📋 **會議紀錄 — #{channel.name}**\n📝 正在整理 {count} 則訊息，AI 開始生成...",
-            wait=True
+        embed = discord.Embed(
+            title="🗂️ 論壇貼文搜尋索引",
+            description=(
+                f"論壇頻道數：{forum_count}\n"
+                f"已索引貼文數：{len(posts)}\n"
+                f"快取有效期：每 15 分鐘自動刷新（此指令可手動立即刷新）"
+            ),
+            color=discord.Color.blue(),
         )
+        if posts:
+            sample = "\n".join(f"• 【{p['channel_name']}】{p['title']}" for p in posts[:15])
+            if len(posts) > 15:
+                sample += f"\n...還有 {len(posts) - 15} 篇"
+            embed.add_field(name="已索引的貼文（部分）", value=sample[:1024] or "無", inline=False)
+        embed.set_footer(text="這個索引讓 AI 的 search_discord 工具能找到論壇貼文內容（含 Embed），不只是純文字訊息")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # Stream AI response, edit message live
-        import time as _time
-        accumulated = ""
-        last_edit = 0
-        edit_interval = 1.5  # seconds between edits (Discord rate limit safe)
-        header = f"📋 **會議紀錄 — #{channel.name}**\n"
-
-        try:
-            async for chunk in call_ai_api_stream(log_text, ai_settings):
-                accumulated += chunk
-                now = _time.time()
-                if now - last_edit >= edit_interval:
-                    last_edit = now
-                    # Truncate to fit Discord 2000 char limit
-                    display = header + accumulated
-                    if len(display) > 1950:
-                        max_body = 1950 - len(header) - 5
-                        display = header + accumulated[:max_body] + "\n⏳..."
-                    try:
-                        await live_msg.edit(content=display)
-                    except Exception:
-                        pass
-
-            # Final edit with complete content
-            full_text = header + accumulated
-            if len(full_text) <= 2000:
-                try:
-                    await live_msg.edit(content=full_text)
-                except Exception:
-                    pass
-            else:
-                # Too long for one message — send as file
-                import io
-                try:
-                    await live_msg.edit(content=header + "✅ 會議紀錄已生成（完整內容見下方附件）")
-                except Exception:
-                    pass
-                file_content = f"# 會議紀錄 — #{channel.name}\n# 整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n# 共 {count} 則訊息\n# 由 {interaction.user.display_name} 整理\n# AI 模型：{ai_settings['model']}\n\n---\n\n{accumulated}"
-                file = discord.File(
-                    io.BytesIO(file_content.encode("utf-8")),
-                    filename=f"meeting_minutes_{channel.name}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.md"
-                )
-                embed = discord.Embed(
-                    title=f"📋 會議紀錄 — {channel.name}",
-                    description=f"整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n共 {count} 則訊息\nAI 模型：{ai_settings['model']}",
-                    color=discord.Color.blue(),
-                )
-                embed.set_footer(text=f"由 {interaction.user.display_name} 整理")
-                await interaction.followup.send(embed=embed, file=file)
-
-        except Exception as e:
-            try:
-                await live_msg.edit(content=f"❌ AI 整理失敗：{e}")
-            except Exception:
-                await interaction.followup.send(f"❌ AI 整理失敗：{e}")
-
-    @app_commands.command(name="test", description="測試 AI API 連線（機器人擁有者限定）")
-    async def test_ai(self, interaction: discord.Interaction):
+    @app_commands.command(name="channel_index", description="查看/刷新一般頻道訊息搜尋索引（機器人擁有者限定）")
+    @app_commands.describe(query="選填：直接測試搜尋這個關鍵字，看看會不會命中")
+    async def system_channel_index(self, interaction: discord.Interaction, query: str = ""):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
-        if not ai_settings["api_key"]:
-            await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定 中設定。", ephemeral=True)
-            return
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(ephemeral=True)
+
         try:
-            result = await call_ai_api("請回覆：AI 連線測試成功！只需一句話。", ai_settings)
-            await interaction.followup.send(f"✅ AI API 連線成功！\n模型：{ai_settings['model']}\n回覆：{result}", ephemeral=True)
-        except Exception as e:
-            await interaction.followup.send(f"❌ AI API 連線失敗：{e}", ephemeral=True)
+            entries = await asyncio.wait_for(_refresh_channel_index(interaction.guild), timeout=60)
+        except asyncio.TimeoutError:
+            print("⚠️ /system channel_index 手動刷新超過 60s，轉為背景執行")
+            asyncio.ensure_future(_refresh_channel_index(interaction.guild))
+            await interaction.followup.send(
+                "⏳ 頻道數量較多，60 秒內沒跑完，已轉為背景繼續執行。稍後再用這個指令查看結果。",
+                ephemeral=True,
+            )
+            return
+
+        # Per-channel breakdown so we can see exactly which channels got
+        # skipped (excluded as test/log, no permission, or no qualifying
+        # messages) vs indexed, and how many messages each contributed.
+        from collections import Counter
+        ch_counts = Counter(e["channel_name"] for e in entries)
+        all_text_channels = [ch.name for ch in interaction.guild.text_channels]
+        cached = _channel_index_cache.get(interaction.guild.id, {})
+        skip_reasons = cached.get("skip_reasons", {})
+        excluded_as_test_log = cached.get("excluded_channels", [])
+
+        embed = discord.Embed(
+            title="📢 頻道訊息搜尋索引",
+            description=(
+                f"伺服器文字頻道總數：{len(all_text_channels)}\n"
+                f"已索引訊息數：{len(entries)}\n"
+                f"快取有效期：每 30 分鐘自動刷新（此指令可手動立即刷新）"
+            ),
+            color=discord.Color.blue(),
+        )
+        if ch_counts:
+            breakdown = "\n".join(f"• #{name}：{count} 則" for name, count in ch_counts.most_common(20))
+            embed.add_field(name="已索引頻道（訊息數，前20）", value=breakdown[:1024] or "無", inline=False)
+        if excluded_as_test_log:
+            embed.add_field(
+                name="🚫 被判定為測試/紀錄頻道而排除（不索引）",
+                value=", ".join(f"#{n}" for n in excluded_as_test_log)[:1024],
+                inline=False,
+            )
+        if skip_reasons:
+            reason_lines = "\n".join(f"• #{name}：{reason}" for name, reason in list(skip_reasons.items())[:15])
+            embed.add_field(
+                name="⚠️ 有讀取但沒有索引到任何訊息的頻道（含原因）",
+                value=reason_lines[:1024] or "無",
+                inline=False,
+            )
+
+        if query.strip():
+            matched = _search_channel_index(query.strip(), entries, top_n=5)
+            if matched:
+                preview = "\n".join(
+                    f"• #{m['channel_name']} | {m['author']} ({m['date']}): {m['text'][:120]}"
+                    for m in matched
+                )
+                embed.add_field(name=f"🔍 搜尋「{query}」的結果（{len(matched)} 則）", value=preview[:1024], inline=False)
+            else:
+                embed.add_field(name=f"🔍 搜尋「{query}」的結果", value="沒有命中任何已索引的訊息", inline=False)
+
+        embed.set_footer(text="這個索引讓 AI 的 search_discord 工具能搜到一般頻道的公告/訊息（含 Embed）")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ──────────────────────────────────────────────
@@ -6190,201 +6235,156 @@ class ChatGroup(app_commands.Group):
         await interaction.response.send_message(text, ephemeral=True)
 
 
-    @app_commands.command(name="corrections", description="查看/審核使用者提交的修正建議（機器人擁有者限定）")
-    @app_commands.describe(action="list=列出待審核, approve=批准, reject=拒絕", entry_id="要審核的修正 ID（approve/reject 時必填）")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="列出待審核", value="list"),
-        app_commands.Choice(name="列出全部", value="all"),
-        app_commands.Choice(name="批准", value="approve"),
-        app_commands.Choice(name="拒絕", value="reject"),
-    ])
-    async def system_corrections(self, interaction: discord.Interaction, action: app_commands.Choice[str], entry_id: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+# ──────────────────────────────────────────────
+# 會議指令群組
+# ──────────────────────────────────────────────
+
+
+class MeetingGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="meeting", description="會議相關指令")
+
+    @app_commands.command(name="adjourn", description="整理會議紀錄（管理員限定）")
+    @app_commands.describe(
+        channel="要整理的頻道",
+        since="起始時間（例如：2h=2小時前、1h30m、14:00、2026-08-02）",
+    )
+    async def adjourn(self, interaction: discord.Interaction, channel: discord.TextChannel, since: str):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
 
-        entries = _corrections.get("entries", [])
+        if not ai_settings["api_key"]:
+            await interaction.response.send_message(
+                "❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定 中設定。", ephemeral=True
+            )
+            return
 
-        if action.value == "list":
-            pending = [e for e in entries if e.get("validation_status") == "pending"]
-            if not pending:
-                await interaction.followup.send("✅ 沒有待審核的修正建議。", ephemeral=True)
-                return
-            lines = []
-            for e in pending[:10]:
-                lines.append(
-                    f"**ID: {e['id']}**\n"
-                    f"  使用者：{e.get('user_name', '?')}\n"
-                    f"  問題：{e.get('question', '')[:80]}\n"
-                    f"  修正：{e.get('correction', '')[:150]}\n"
-                    f"  AI 審核：{e.get('ai_validation', '')[:80]}"
-                )
-            await interaction.followup.send(
-                f"📝 **待審核修正（{len(pending)} 筆）**\n\n" + "\n\n".join(lines),
+        after_time = parse_since(since)
+        if not after_time:
+            await interaction.response.send_message(
+                "❌ 無法解析時間。支援格式：`2h`（2小時前）、`1h30m`、`14:00`、`2026-08-02`、`2026-08-02 14:00`",
                 ephemeral=True,
             )
-
-        elif action.value == "all":
-            if not entries:
-                await interaction.followup.send("📝 目前沒有任何修正資料。", ephemeral=True)
-                return
-            approved = [e for e in entries if e.get("validated")]
-            rejected = [e for e in entries if e.get("validation_status") == "rejected"]
-            pending = [e for e in entries if e.get("validation_status") == "pending"]
-            summary = (
-                f"📊 **修正資料統計**\n"
-                f"  總計：{len(entries)}\n"
-                f"  ✅ 已批准：{len(approved)}\n"
-                f"  ❌ 已拒絕：{len(rejected)}\n"
-                f"  ⏳ 待審核：{len(pending)}"
-            )
-            await interaction.followup.send(summary, ephemeral=True)
-
-        elif action.value == "approve":
-            if not entry_id:
-                await interaction.followup.send("❌ 請提供要批准的修正 ID。", ephemeral=True)
-                return
-            for e in entries:
-                if e.get("id") == entry_id:
-                    e["validated"] = True
-                    e["validation_status"] = "approved"
-                    e["ai_validation"] = "管理員手動批准"
-                    save_corrections()
-                    await interaction.followup.send(
-                        f"✅ 已批准修正 ID {entry_id}。AI 之後會參考這個修正回答問題。",
-                        ephemeral=True,
-                    )
-                    return
-            await interaction.followup.send(f"❌ 找不到 ID 為 {entry_id} 的修正。", ephemeral=True)
-
-        elif action.value == "reject":
-            if not entry_id:
-                await interaction.followup.send("❌ 請提供要拒絕的修正 ID。", ephemeral=True)
-                return
-            for e in entries:
-                if e.get("id") == entry_id:
-                    e["validated"] = False
-                    e["validation_status"] = "rejected"
-                    save_corrections()
-                    await interaction.followup.send(
-                        f"❌ 已拒絕修正 ID {entry_id}。AI 不會參考這個修正。",
-                        ephemeral=True,
-                    )
-                    return
-            await interaction.followup.send(f"❌ 找不到 ID 為 {entry_id} 的修正。", ephemeral=True)
-
-    @app_commands.command(name="forum_index", description="查看/刷新論壇貼文搜尋索引（機器人擁有者限定）")
-    async def system_forum_index(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
 
-        # Hard cap so this command can NEVER leave the user staring at
-        # "思考中..." forever — if indexing genuinely takes longer than 60s
-        # (large server, many threads/replies), let it keep running as a
-        # background task and tell the user to check back with this same
-        # command shortly instead of blocking the interaction indefinitely.
+        await interaction.response.defer()  # public — meeting minutes should be visible
+
+        # Collect messages
+        formatted = []
+        count = 0
         try:
-            posts = await asyncio.wait_for(_refresh_forum_index(interaction.guild), timeout=60)
-        except asyncio.TimeoutError:
-            print("⚠️ /system forum_index 手動刷新超過 60s，轉為背景執行")
-            asyncio.ensure_future(_refresh_forum_index(interaction.guild))
+            async for msg in channel.history(after=after_time, limit=500):
+                if msg.author.bot:
+                    continue
+                content = msg.content.strip()
+                if not content:
+                    if msg.attachments:
+                        content = f"[傳送了 {len(msg.attachments)} 個附件]"
+                    elif msg.embeds:
+                        content = f"[傳送了嵌入訊息: {msg.embeds[0].title or '無標題'}]"
+                    else:
+                        continue
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                time_str = msg.created_at.strftime("%H:%M")
+                name = msg.author.display_name
+                formatted.append(f"[{time_str}] {name}: {content}")
+                count += 1
+        except discord.Forbidden:
+            await interaction.followup.send("❌ 沒有權限讀取該頻道的訊息。")
+            return
+
+        if not formatted:
             await interaction.followup.send(
-                "⏳ 索引的貼文/回覆數量較多，60 秒內沒跑完，已轉為背景繼續執行。"
-                "大約 1-2 分鐘後再用這個指令查看結果就會是最新的。",
-                ephemeral=True,
+                f"❌ 在指定時間後未找到任何訊息（頻道：{channel.mention}，起始：{after_time.strftime('%Y-%m-%d %H:%M UTC')}）"
             )
             return
 
-        forum_count = len(list(interaction.guild.forums))
+        # Build conversation log
+        log_text = f"頻道: #{channel.name}\n時間範圍: {after_time.strftime('%Y-%m-%d %H:%M')} UTC ~ 整理時間\n訊息數: {count}\n\n"
+        log_text += "\n".join(reversed(formatted))
 
-        embed = discord.Embed(
-            title="🗂️ 論壇貼文搜尋索引",
-            description=(
-                f"論壇頻道數：{forum_count}\n"
-                f"已索引貼文數：{len(posts)}\n"
-                f"快取有效期：每 15 分鐘自動刷新（此指令可手動立即刷新）"
-            ),
-            color=discord.Color.blue(),
+        if len(log_text) > 30000:
+            log_text = log_text[:30000] + "\n...（後續訊息已截斷）"
+
+        # Send live message — will be edited as AI streams
+        live_msg = await interaction.followup.send(
+            f"📋 **會議紀錄 — #{channel.name}**\n📝 正在整理 {count} 則訊息，AI 開始生成...",
+            wait=True
         )
-        if posts:
-            sample = "\n".join(f"• 【{p['channel_name']}】{p['title']}" for p in posts[:15])
-            if len(posts) > 15:
-                sample += f"\n...還有 {len(posts) - 15} 篇"
-            embed.add_field(name="已索引的貼文（部分）", value=sample[:1024] or "無", inline=False)
-        embed.set_footer(text="這個索引讓 AI 的 search_discord 工具能找到論壇貼文內容（含 Embed），不只是純文字訊息")
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="channel_index", description="查看/刷新一般頻道訊息搜尋索引（機器人擁有者限定）")
-    @app_commands.describe(query="選填：直接測試搜尋這個關鍵字，看看會不會命中")
-    async def system_channel_index(self, interaction: discord.Interaction, query: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
+        # Stream AI response, edit message live
+        import time as _time
+        accumulated = ""
+        last_edit = 0
+        edit_interval = 1.5  # seconds between edits (Discord rate limit safe)
+        header = f"📋 **會議紀錄 — #{channel.name}**\n"
 
         try:
-            entries = await asyncio.wait_for(_refresh_channel_index(interaction.guild), timeout=60)
-        except asyncio.TimeoutError:
-            print("⚠️ /system channel_index 手動刷新超過 60s，轉為背景執行")
-            asyncio.ensure_future(_refresh_channel_index(interaction.guild))
-            await interaction.followup.send(
-                "⏳ 頻道數量較多，60 秒內沒跑完，已轉為背景繼續執行。稍後再用這個指令查看結果。",
-                ephemeral=True,
-            )
-            return
+            async for chunk in call_ai_api_stream(log_text, ai_settings):
+                accumulated += chunk
+                now = _time.time()
+                if now - last_edit >= edit_interval:
+                    last_edit = now
+                    # Truncate to fit Discord 2000 char limit
+                    display = header + accumulated
+                    if len(display) > 1950:
+                        max_body = 1950 - len(header) - 5
+                        display = header + accumulated[:max_body] + "\n⏳..."
+                    try:
+                        await live_msg.edit(content=display)
+                    except Exception:
+                        pass
 
-        # Per-channel breakdown so we can see exactly which channels got
-        # skipped (excluded as test/log, no permission, or no qualifying
-        # messages) vs indexed, and how many messages each contributed.
-        from collections import Counter
-        ch_counts = Counter(e["channel_name"] for e in entries)
-        all_text_channels = [ch.name for ch in interaction.guild.text_channels]
-        cached = _channel_index_cache.get(interaction.guild.id, {})
-        skip_reasons = cached.get("skip_reasons", {})
-        excluded_as_test_log = cached.get("excluded_channels", [])
-
-        embed = discord.Embed(
-            title="📢 頻道訊息搜尋索引",
-            description=(
-                f"伺服器文字頻道總數：{len(all_text_channels)}\n"
-                f"已索引訊息數：{len(entries)}\n"
-                f"快取有效期：每 30 分鐘自動刷新（此指令可手動立即刷新）"
-            ),
-            color=discord.Color.blue(),
-        )
-        if ch_counts:
-            breakdown = "\n".join(f"• #{name}：{count} 則" for name, count in ch_counts.most_common(20))
-            embed.add_field(name="已索引頻道（訊息數，前20）", value=breakdown[:1024] or "無", inline=False)
-        if excluded_as_test_log:
-            embed.add_field(
-                name="🚫 被判定為測試/紀錄頻道而排除（不索引）",
-                value=", ".join(f"#{n}" for n in excluded_as_test_log)[:1024],
-                inline=False,
-            )
-        if skip_reasons:
-            reason_lines = "\n".join(f"• #{name}：{reason}" for name, reason in list(skip_reasons.items())[:15])
-            embed.add_field(
-                name="⚠️ 有讀取但沒有索引到任何訊息的頻道（含原因）",
-                value=reason_lines[:1024] or "無",
-                inline=False,
-            )
-
-        if query.strip():
-            matched = _search_channel_index(query.strip(), entries, top_n=5)
-            if matched:
-                preview = "\n".join(
-                    f"• #{m['channel_name']} | {m['author']} ({m['date']}): {m['text'][:120]}"
-                    for m in matched
-                )
-                embed.add_field(name=f"🔍 搜尋「{query}」的結果（{len(matched)} 則）", value=preview[:1024], inline=False)
+            # Final edit with complete content
+            full_text = header + accumulated
+            if len(full_text) <= 2000:
+                try:
+                    await live_msg.edit(content=full_text)
+                except Exception:
+                    pass
             else:
-                embed.add_field(name=f"🔍 搜尋「{query}」的結果", value="沒有命中任何已索引的訊息", inline=False)
+                # Too long for one message — send as file
+                import io
+                try:
+                    await live_msg.edit(content=header + "✅ 會議紀錄已生成（完整內容見下方附件）")
+                except Exception:
+                    pass
+                file_content = f"# 會議紀錄 — #{channel.name}\n# 整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n# 共 {count} 則訊息\n# 由 {interaction.user.display_name} 整理\n# AI 模型：{ai_settings['model']}\n\n---\n\n{accumulated}"
+                file = discord.File(
+                    io.BytesIO(file_content.encode("utf-8")),
+                    filename=f"meeting_minutes_{channel.name}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.md"
+                )
+                embed = discord.Embed(
+                    title=f"📋 會議紀錄 — {channel.name}",
+                    description=f"整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n共 {count} 則訊息\nAI 模型：{ai_settings['model']}",
+                    color=discord.Color.blue(),
+                )
+                embed.set_footer(text=f"由 {interaction.user.display_name} 整理")
+                await interaction.followup.send(embed=embed, file=file)
 
-        embed.set_footer(text="這個索引讓 AI 的 search_discord 工具能搜到一般頻道的公告/訊息（含 Embed）")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            try:
+                await live_msg.edit(content=f"❌ AI 整理失敗：{e}")
+            except Exception:
+                await interaction.followup.send(f"❌ AI 整理失敗：{e}")
+
+    @app_commands.command(name="test", description="測試 AI API 連線（機器人擁有者限定）")
+    async def test_ai(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        if not ai_settings["api_key"]:
+            await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定 中設定。", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        try:
+            result = await call_ai_api("請回覆：AI 連線測試成功！只需一句話。", ai_settings)
+            await interaction.followup.send(f"✅ AI API 連線成功！\n模型：{ai_settings['model']}\n回覆：{result}", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ AI API 連線失敗：{e}", ephemeral=True)
+
 
 
 # ──────────────────────────────────────────────
