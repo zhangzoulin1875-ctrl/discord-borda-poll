@@ -1186,19 +1186,82 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
 
-    async def _post(payload, timeout_total=45, timeout_read=40):
-        # Use the shared, pooled session (set up in on_ready) instead of opening
-        # a new connection per request. Falls back to a throwaway session only
-        # if the shared one isn't ready yet (very early startup edge case).
+    async def _post(payload, timeout_total=120, timeout_read=60):
+        """Streaming-aware POST: always uses stream=True to keep the
+        connection alive on slow endpoints. Accumulates content AND
+        tool_calls from SSE chunks, then returns a synthetic non-stream
+        response body (JSON with choices[0].message) so the caller code
+        doesn't need to change. The sock_read timeout only applies BETWEEN
+        chunks — once the first chunk arrives, the timer resets, so even
+        a slow free API that takes 60s to generate won't time out as long
+        as it sends chunks along the way."""
+        payload = {**payload, "stream": True}
         t = aiohttp.ClientTimeout(total=timeout_total, connect=10, sock_read=timeout_read)
         session = _shared_session
         if session is None or session.closed:
             async with aiohttp.ClientSession() as session:
                 async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
-                    return resp.status, await resp.text()
+                    return await _read_stream(resp)
         else:
             async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
-                return resp.status, await resp.text()
+                return await _read_stream(resp)
+
+    async def _read_stream(resp):
+        """Read an SSE stream and return (status, json_body) where json_body
+        is a synthetic non-stream response containing the accumulated message."""
+        if resp.status != 200:
+            error_text = await resp.text()
+            return resp.status, error_text
+
+        content_parts = []
+        tool_calls_acc = {}  # index -> {id, name, arguments}
+        finish_reason = None
+
+        async for raw_line in resp.content:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json_module.loads(data_str)
+                choices = chunk.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                fr = choices[0].get("finish_reason")
+                if fr:
+                    finish_reason = fr
+                # Accumulate content
+                if "content" in delta and delta["content"]:
+                    content_parts.append(delta["content"])
+                # Accumulate tool_calls (they come as deltas across chunks)
+                if "tool_calls" in delta:
+                    for tc in delta["tool_calls"]:
+                        idx = tc.get("index", 0)
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {
+                                "id": tc.get("id", ""),
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        if tc.get("id"):
+                            tool_calls_acc[idx]["id"] = tc["id"]
+                        fn = tc.get("function", {})
+                        if fn.get("name"):
+                            tool_calls_acc[idx]["function"]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            tool_calls_acc[idx]["function"]["arguments"] += fn["arguments"]
+            except Exception:
+                continue
+
+        # Build a synthetic non-stream response body
+        message = {"role": "assistant", "content": "".join(content_parts)}
+        if tool_calls_acc:
+            message["tool_calls"] = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+        body = json_module.dumps({"choices": [{"message": message, "finish_reason": finish_reason or "stop"}]})
+        return 200, body
 
     payload = {
         "model": settings.get("model", "gpt-4o-mini"),
