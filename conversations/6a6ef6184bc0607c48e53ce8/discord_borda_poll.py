@@ -10739,15 +10739,17 @@ async def _ai_refine_cross_reference(channel_snippets, wiki_text, discovered_top
     topic = data.get("topic", "").strip()
     summary = data.get("summary", "").strip()
     details = data.get("details", "").strip()
-    confidence = data.get("confidence", "").strip().lower()
+    confidence = data.get("confidence", "high").strip().lower()
     if not topic or not summary:
         return None
     # Only accept high-confidence (wiki-sourced) knowledge.
     # Low-confidence (Discord-sourced) entries are discarded.
-    if confidence != "high":
+    # But if confidence field is missing/empty, default to "high"
+    # (the new prompt only produces high-confidence results from wiki).
+    if confidence and confidence not in ("high", "高", "true", "1"):
         print(f"🔍 AI精煉: 拒絕低可信度知識「{topic}」 (confidence={confidence})")
         return None
-    return {"topic": topic, "summary": summary, "details": details, "confidence": confidence}
+    return {"topic": topic, "summary": summary, "details": details, "confidence": "high"}
 
 
 async def _ai_refine_post_to_channel(channel, knowledge_entry):
@@ -10814,11 +10816,15 @@ async def ai_refine_loop():
 
             if not chat_ai_settings.get("api_key"):
                 print("🔍 AI精煉: 沒有 AI API Key，跳過")
-                _refine_last_run = now
                 await asyncio.sleep(20)
                 continue
 
             print(f"🔍 AI精煉: 開始精煉 (API {cpm} calls/min, 知識庫 {len(ai_refined_knowledge)}/{ai_refine_settings.get('max_knowledge_entries', 500)} ({kb_full:.0%}), 動態間隔 {interval_secs}s)")
+
+            # Mark as running NOW — prevents infinite retry loop if any
+            # step below throws an exception (without this, _refine_last_run
+            # never gets set on error, and the loop ignores the interval)
+            _refine_last_run = now
 
             # Step 1: Fetch Discord channel snippets
             channel_snippets = await _ai_refine_fetch_channel_snippets(guild)
@@ -10832,6 +10838,10 @@ async def ai_refine_loop():
                 discovered_topics = await _ai_refine_extract_topics(channel_snippets)
                 if discovered_topics:
                     print(f"🔍 AI精煉: 從社群討論發現話題: {discovered_topics}")
+                else:
+                    print(f"🔍 AI精煉: 未從社群討論中發現微國家話題，使用隨機詞")
+            else:
+                print(f"🔍 AI精煉: 頻道無訊息，使用隨機詞")
 
             # Step 3: Fetch wiki articles for discovered topics
             # (falls back to random terms if no topics found)
@@ -10842,16 +10852,21 @@ async def ai_refine_loop():
 
             if not wiki_text:
                 print("🔍 AI精煉: 沒有可用的百科資料，跳過")
-                _refine_last_run = now
                 await asyncio.sleep(20)
                 continue
+
+            print(f"🔍 AI精煉: 百科文章長度 {len(wiki_text)} 字，開始萃取知識...")
 
             # Step 4: Synthesize verified knowledge from wiki articles
             knowledge = await _ai_refine_cross_reference(channel_snippets, wiki_text, discovered_topics)
 
+            if knowledge:
+                print(f"🔍 AI精煉: AI 回傳知識: topic={knowledge.get('topic')}, confidence={knowledge.get('confidence')}")
+            else:
+                print(f"🔍 AI精煉: AI 回傳空結果（可能百科內容不值得萃取）")
+
             if not knowledge or not knowledge.get("topic"):
                 print("🔍 AI精煉: 本次未萃取到有價值的知識")
-                _refine_last_run = now
                 await asyncio.sleep(20)
                 continue
 
@@ -10859,7 +10874,6 @@ async def ai_refine_loop():
             existing_topics = [k.get("topic", "") for k in ai_refined_knowledge]
             if knowledge["topic"] in existing_topics:
                 print(f"🔍 AI精煉: 主題「{knowledge['topic']}」已存在，跳過")
-                _refine_last_run = now
                 await asyncio.sleep(20)
                 continue
 
@@ -10881,8 +10895,6 @@ async def ai_refine_loop():
 
             # Step 5: Post in the designated channel
             await _ai_refine_post_to_channel(channel, entry)
-
-            _refine_last_run = now
 
         except Exception as e:
             print(f"⚠️ AI精煉循環錯誤: {e}")
