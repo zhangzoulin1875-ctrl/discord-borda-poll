@@ -1900,7 +1900,7 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
     return True, clean
 
 
-async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300) -> dict:
+async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120) -> dict:
     """Call the chat AI API (non-streaming, short replies).
     Returns the raw assistant message dict (content + possible tool_calls),
     so the caller can drive a tool-calling loop when `tools` is provided.
@@ -1938,7 +1938,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
 
-    async def _post(payload, timeout_total=300, timeout_read=120):
+    async def _post(payload, _tt=None, _tr=None):
         """Streaming-aware POST: always uses stream=True to keep the
         connection alive on slow endpoints. Creates a FRESH session per
         call (like the briefing function does) to avoid any session-level
@@ -1946,7 +1946,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         only applies BETWEEN chunks — once the first chunk arrives, the
         timer resets."""
         payload = {**payload, "stream": True}
-        t = aiohttp.ClientTimeout(total=timeout_total, connect=15, sock_read=timeout_read)
+        t = aiohttp.ClientTimeout(total=_tt or timeout_total, connect=10, sock_read=_tr or timeout_read)
         # Always create a fresh session — no session-level timeout to interfere
         async with aiohttp.ClientSession() as session:
             async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
@@ -3125,9 +3125,9 @@ async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
     higher than before since this may now include a forced web-search
     fallback on top of the structured MediaWiki search.)"""
     try:
-        return await asyncio.wait_for(_fetch_micropedia_inner(query, max_results), timeout=10)
+        return await asyncio.wait_for(_fetch_micropedia_inner(query, max_results), timeout=5)
     except asyncio.TimeoutError:
-        print(f"📚 Micropedia: 整體查詢逾時（>10s），放棄 for '{query}'")
+        print(f"📚 Micropedia: 整體查詢逾時（>5s），放棄 for '{query}'")
         return ""
 
 
@@ -3646,7 +3646,7 @@ async def _search_discord_history(guild, query: str, limit: int = 10) -> str:
     network conditions — guarantees this tool call never meaningfully stalls
     the reply pipeline (same pattern as _fetch_micropedia)."""
     try:
-        return await asyncio.wait_for(_search_discord_history_inner(guild, query, limit), timeout=15)
+        return await asyncio.wait_for(_search_discord_history_inner(guild, query, limit), timeout=8)
     except asyncio.TimeoutError:
         print(f"⚠️ Discord 搜尋整體逾時（>15s），放棄 for '{query}'")
         return "搜尋逾時，換個關鍵字試試看"
@@ -3712,7 +3712,7 @@ async def _web_search(query: str) -> str:
     bottleneck (previous version ran up to 6 HTTP requests sequentially at
     10s each — worst case ~60s for ONE tool call). No API keys needed, all
     endpoints are free and HTTPS-accessible from Render."""
-    _ws_timeout = aiohttp.ClientTimeout(total=5, connect=3)
+    _ws_timeout = aiohttp.ClientTimeout(total=4, connect=2)
     _ws_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -3814,7 +3814,7 @@ async def _web_search(query: str) -> str:
         return results
 
     try:
-        results = await asyncio.wait_for(_run_all(), timeout=10)
+        results = await asyncio.wait_for(_run_all(), timeout=6)
     except asyncio.TimeoutError:
         print(f"⚠️ web_search 整體逾時（>10s） for '{query}'")
         results = []
@@ -4224,122 +4224,119 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     else:
         full_prompt = f"{user_name}: {clean_content}"
 
-    # ── Micropedia ──
-    # Two layers, so this works regardless of whether the AI provider even
-    # supports tool calling:
-    # 1. AUTO context injection (always runs, no AI judgment needed): fuzzy
-    #    bigram-match the raw message against the wiki's full cached title
-    #    list and inject any matched articles' content directly. This is what
-    #    actually fixes real misses like "琉璃是誰" / "山海事件" where the
-    #    wiki's own search returns zero hits for the full phrase.
-    # 2. The search_micropedia TOOL, for models that support tool calling, to
-    #    dig further with a different term if the auto context isn't enough.
+    # ── Micropedia + Discord auto-context — RUN IN PARALLEL ──
+    # These two were previously sequential (10s + 10s = 20s before AI even
+    # starts), which alone blew the 20s budget. Now they run concurrently
+    # with asyncio.gather — total pre-AI time = max(micropedia, discord)
+    # instead of micropedia + discord.
     micropedia_enabled = settings.get("micropedia_enabled", True)
     max_results = settings.get("micropedia_max_results", 5)
 
-    if micropedia_enabled and len(clean_content) >= 4:
-        # Skip micropedia for very short messages (emoji-only, "好", etc.)
-        # to avoid inflating the system prompt with 2000+ chars of wiki content
-        # that the AI has to process on a slow free API
-        try:
-            auto_context = await asyncio.wait_for(
-                _micropedia_auto_context(clean_content, max_results), timeout=10
-            )
-        except asyncio.TimeoutError:
-            print(f"📚 Micropedia: 自動比對逾時（>10s），跳過")
-            auto_context = ""
-        if auto_context:
-            system_prompt += (
-                f"\n\n─── 微國家百科資料（已自動比對到相關文章）───\n"
-                f"以下是根據使用者訊息，自動從微國家百科 (micropedia.site) 比對到的相關文章。"
-                f"請優先參考這些資料來回答問題。\n"
-                f"⚠️ 反幻覺鐵律（絕對遵守）：\n"
-                f"1. 只能陳述資料中「明確寫出」的事實，不要自行推論、腦補、或連連看式地把"
-                f"兩個不同條目的資訊兜在一起編造成新的事實。\n"
-                f"2. 絕對不可以自己判定「A 國家其實就是 B 國家的別稱／不同名稱」「A 跟 B 其實是同一個人」"
-                f"這類等同關係，除非資料中「明確、直接」寫出兩者是同一實體。兩個名稱同時出現在"
-                f"同一篇文章、或描述相似，都不代表它們是同一個東西——這是常見的錯誤推論，絕對禁止。\n"
-                f"3. 如果資料裡沒有直接答案，就誠實告知使用者「目前資料裡沒有明確寫到這點」，"
-                f"不要為了回答得完整而編造細節或關係。\n"
-                f"4. 寧可回答「不確定」或「這個我不清楚」，也不要輸出一個聽起來很合理但其實是"
-                f"你自己拼湊出來的答案。\n{auto_context}"
-            )
-            print(f"📚 Micropedia: 已自動注入 {len(auto_context)} chars 到 AI 上下文")
-
-        # Inject AI refined knowledge (cross-referenced insights from channel
-        # messages + micropedia articles, accumulated over time by the
-        # ai_refine_loop background task). This gives the AI deeper, more
-        # nuanced background knowledge about micronations beyond what a
-        # single micropedia lookup can provide.
-        if ai_refined_knowledge:
-            # Inject ALL refined knowledge — both high (wiki-verified) and
-            # low (community-sourced, not yet verified). Both have value:
-            # - high: verified facts from community discussions, cross-checked with wiki
-            # - low: community insights/knowledge that wiki didn't cover yet
-            # They're labeled so the AI knows which to trust more.
-            high_confidence = [k for k in ai_refined_knowledge if k.get("confidence", "high") == "high"]
-            low_confidence = [k for k in ai_refined_knowledge if k.get("confidence", "high") != "high"]
-            recent_knowledge = ai_refined_knowledge[-12:]  # last 12 to keep prompt lean
-            if recent_knowledge:
-                knowledge_lines = []
-                for k in recent_knowledge:
-                    conf_tag = "✅" if k.get("confidence", "high") == "high" else "⚠️"
-                    knowledge_lines.append(f"- {conf_tag} [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
-                system_prompt += (
-                    f"\n\n─── 微國家精煉知識庫 ───\n"
-                    f"以下是從社群討論中萃取、經百科驗證修正的知識摘要。\n"
-                    f"✅ = 已經百科驗證（可信），⚠️ = 社群討論但百科未覆蓋（僅供參考）。\n"
-                    f"回答相關問題時優先參考 ✅ 條目，⚠️ 條目可作為補充但需自行判斷。\n"
-                    + "\n".join(knowledge_lines)
-                )
-                print(f"🔍 AI精煉: 已注入 {len(high_confidence)} 條高可信 + {len(low_confidence)} 條低可信知識")
-
-        system_prompt += (
-            f"\n\n─── search_micropedia 工具 ───\n"
-            f"你還有一個 search_micropedia 工具，可以再查詢微國家百科的其他資料"
-            f"（例如上面自動比對到的資料不夠、或你懷疑還有其他相關文章時）。"
-            f"當使用者問到任何組織內部的人事時地物、事件、專有名詞，而你不確定或沒印象時，"
-            f"呼叫這個工具查證，不要憑印象亂猜或編造內容。"
-            f"如果查詢的關鍵字找不到結果，試試看換成更短的核心詞再查一次"
-            f"（這個 wiki 的搜尋不支援中文斷詞，完整片語常常查不到，但拆開的核心詞可以）。"
-            f"如果自動比對和你的查詢都找不到資料，才誠實告知使用者你沒有找到相關資料。"
-            f"\n⚠️ 工具優先級：微國家相關的問題先用 search_micropedia；"
-            f"真實世界的事實、新聞、時事、或你認為「不存在/沒發生過」的事，"
-            f"用 web_search 上網查證。兩者可以同時呼叫。"
-        )
-
-    # ── search_discord AUTO context injection ──
-    # Tool-calling is entirely up to the (often weak/free) AI model's own
-    # judgment — and in practice it frequently just doesn't bother calling
-    # search_discord even when the question is clearly about server history
-    # (e.g. "新當選的秘書長是誰" — the AI just guessed "I'm not sure" instead
-    # of searching). Mirror the micropedia auto-injection pattern: run a
-    # real search UNCONDITIONALLY (no AI judgment needed) whenever the
-    # message looks like an info-seeking question about people/events/status,
-    # and inject the results directly into the system prompt. The tool is
-    # still offered on top of this for follow-up digging.
     _INFO_SEEKING_MARKERS = (
         "誰", "是誰", "什麼", "哪", "何時", "多少", "是不是", "有沒有", "?", "？",
         "當選", "新任", "上任", "現任", "現在", "最近", "最新", "剛", "已經",
         "罷免", "撤案", "撤回", "選舉", "投票結果", "誰是", "結果",
     )
-    if message.guild and len(clean_content) >= 4 and any(m in clean_content for m in _INFO_SEEKING_MARKERS):
+    _need_discord = bool(
+        message.guild and len(clean_content) >= 4
+        and any(m in clean_content for m in _INFO_SEEKING_MARKERS)
+    )
+    _need_micropedia = bool(micropedia_enabled and len(clean_content) >= 4)
+
+    # Run both searches concurrently with a tight 6s budget each
+    async def _do_micropedia():
+        if not _need_micropedia:
+            return ""
         try:
-            _discord_auto = await asyncio.wait_for(
-                _search_discord_history(message.guild, clean_content, limit=15), timeout=10
+            return await asyncio.wait_for(
+                _micropedia_auto_context(clean_content, max_results), timeout=6
             )
         except asyncio.TimeoutError:
-            print("🔍 search_discord 自動比對逾時（>12s），跳過")
-            _discord_auto = ""
-        if _discord_auto and "沒有找到" not in _discord_auto:
-            system_prompt += (
-                f"\n\n─── Discord 伺服器歷史資料（已自動搜尋到相關內容）───\n"
-                f"以下是根據使用者的問題，自動從整個伺服器（含論壇貼文與訊息歷史）搜尋到的相關內容。"
-                f"這些是真實存在的伺服器記錄，請優先參考並以此為準來回答，"
-                f"尤其是涉及人事任命、選舉結果、提案狀態等問題——不要僅憑印象猜測或說「不確定/沒有公布」，"
-                f"如果下面的資料已經有答案就直接引用回答。\n{_discord_auto}"
+            print(f"📚 Micropedia: 自動比對逾時（>6s），跳過")
+            return ""
+        except Exception as e:
+            print(f"📚 Micropedia: 自動比對錯誤：{e}")
+            return ""
+
+    async def _do_discord():
+        if not _need_discord:
+            return ""
+        try:
+            return await asyncio.wait_for(
+                _search_discord_history(message.guild, clean_content, limit=15), timeout=6
             )
-            print(f"🔍 search_discord: 已自動注入 {len(_discord_auto)} chars 到 AI 上下文")
+        except asyncio.TimeoutError:
+            print("🔍 search_discord 自動比對逾時（>6s），跳過")
+            return ""
+        except Exception as e:
+            print(f"🔍 search_discord 自動比對錯誤：{e}")
+            return ""
+
+    _t_pre = _time.time()
+    auto_context, _discord_auto, _web_auto = await asyncio.gather(
+        _do_micropedia(), _do_discord(), _do_web()
+    )
+    _t_ctx_done = _time.time()
+    print(f"⏱️ 預處理（百科+Discord+網路 平行）耗時 {_t_ctx_done-_t_pre:.1f}s（百科 {len(auto_context)}, Discord {len(_discord_auto)}, 網路 {len(_web_auto)} chars）")
+
+    # Inject micropedia results
+    if auto_context:
+        system_prompt += (
+            f"\n\n─── 微國家百科資料（已自動比對到相關文章）───\n"
+            f"以下是根據使用者訊息，自動從微國家百科 (micropedia.site) 比對到的相關文章。"
+            f"請優先參考這些資料來回答問題。\n"
+            f"⚠️ 反幻覺鐵律（絕對遵守）：\n"
+            f"1. 只能陳述資料中「明確寫出」的事實，不要自行推論、腦補、或連連看式地把"
+            f"兩個不同條目的資訊兜在一起編造成新的事實。\n"
+            f"2. 絕對不可以自己判定「A 國家其實就是 B 國家的別稱／不同名稱」「A 跟 B 其實是同一個人」"
+            f"這類等同關係，除非資料中「明確、直接」寫出兩者是同一實體。兩個名稱同時出現在"
+            f"同一篇文章、或描述相似，都不代表它們是同一個東西——這是常見的錯誤推論，絕對禁止。\n"
+            f"3. 如果資料裡沒有直接答案，就誠實告知使用者「目前資料裡沒有明確寫到這點」，"
+            f"不要為了回答得完整而編造細節或關係。\n"
+            f"4. 寧可回答「不確定」或「這個我不清楚」，也不要輸出一個聽起來很合理但其實是"
+            f"你自己拼湊出來的答案。\n{auto_context}"
+        )
+        print(f"📚 Micropedia: 已自動注入 {len(auto_context)} chars 到 AI 上下文")
+
+    # Inject AI refined knowledge (in-memory, instant)
+    if ai_refined_knowledge:
+        high_confidence = [k for k in ai_refined_knowledge if k.get("confidence", "high") == "high"]
+        low_confidence = [k for k in ai_refined_knowledge if k.get("confidence", "high") != "high"]
+        recent_knowledge = ai_refined_knowledge[-12:]
+        if recent_knowledge:
+            knowledge_lines = []
+            for k in recent_knowledge:
+                conf_tag = "✅" if k.get("confidence", "high") == "high" else "⚠️"
+                knowledge_lines.append(f"- {conf_tag} [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
+            system_prompt += (
+                f"\n\n─── 微國家精煉知識庫 ───\n"
+                f"以下是從社群討論中萃取、經百科驗證修正的知識摘要。\n"
+                f"✅ = 已經百科驗證（可信），⚠️ = 社群討論但百科未覆蓋（僅供參考）。\n"
+                f"回答相關問題時優先參考 ✅ 條目，⚠️ 條目可作為補充但需自行判斷。\n"
+                + "\n".join(knowledge_lines)
+            )
+            print(f"🔍 AI精煉: 已注入 {len(high_confidence)} 條高可信 + {len(low_confidence)} 條低可信知識")
+
+    # Inject discord search results
+    if _discord_auto and "沒有找到" not in _discord_auto:
+        system_prompt += (
+            f"\n\n─── Discord 伺服器歷史資料（已自動搜尋到相關內容）───\n"
+            f"以下是根據使用者的問題，自動從整個伺服器（含論壇貼文與訊息歷史）搜尋到的相關內容。"
+            f"這些是真實存在的伺服器記錄，請優先參考並以此為準來回答，"
+            f"尤其是涉及人事任命、選舉結果、提案狀態等問題——不要僅憑印象猜測或說「不確定/沒有公布」，"
+            f"如果下面的資料已經有答案就直接引用回答。\n{_discord_auto}"
+        )
+        print(f"🔍 search_discord: 已自動注入 {len(_discord_auto)} chars 到 AI 上下文")
+
+    # Inject web search results (real-world info)
+    if _web_auto:
+        system_prompt += (
+            f"\n\n─── 網際網路搜尋結果（已自動查詢）───\n"
+            f"以下是根據使用者訊息，自動從網際網路（維基百科 + DuckDuckGo）搜尋到的結果。"
+            f"如果使用者問的是真實世界的事物、新聞、時事，請參考這些資料回答。"
+            f"如果搜尋結果跟問題無關（例如使用者問的是微國家內部事務），就忽略這些結果。\n{_web_auto[:1500]}"
+        )
+        print(f"🌐 web_search: 已自動注入 {len(_web_auto)} chars 到 AI 上下文")
 
     # ── 黑名單提示（讓 AI 知道哪些用戶被封禁，避免引用其言論） ──
     bl_users = _blacklist.get("users", [])
@@ -4419,9 +4416,15 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"請參考這些描述來回覆使用者的問題或回應圖片內容：\n{image_context}"
         )
 
-    # Build tool list FIRST so we know whether search_discord is available
-    # before constructing the system prompt (avoids adding ~500 chars of
-    # search_discord instructions when the tool won't even be sent).
+    # ── CONDITIONAL TOOLS: if auto-context already found rich data, skip
+    # tools entirely → single AI round (saves a full 7-15s round-trip on slow
+    # free APIs). Only offer tools when auto-context came up thin, meaning
+    # the AI genuinely needs to search to answer well.
+    _context_rich = bool(auto_context and len(auto_context) > 400) or bool(_discord_auto and len(_discord_auto) > 400) or bool(_web_auto and len(_web_auto) > 200) or bool(_web_auto and len(_web_auto) > 200)
+    if _context_rich:
+        print(f"⚡ 快速路徑：自動注入已找到豐富資料（百科 {len(auto_context)} + Discord {len(_discord_auto)} chars），跳過工具呼叫，單輪 AI 回答")
+
+    # Build tool list — only when auto-context is thin AND the endpoint supports tools
     _norm = settings.get("api_url", "").rstrip("/")
     if not _norm.endswith("/chat/completions"):
         if _norm.endswith("/v1") or _norm.endswith("/v2"):
@@ -4437,15 +4440,15 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     tools = []
     _search_discord_available = False
     _web_search_available = False
-    if tools_ok:
+    if tools_ok and not _context_rich:  # Skip tools when auto-context is rich
         if micropedia_enabled:
             tools.append(_MICROPEDIA_TOOL_SCHEMA)
         tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)
         tools.append(_WEB_SEARCH_TOOL_SCHEMA)
         _search_discord_available = True
         _web_search_available = True
-    elif not _tools_unsup and not _tools_supported:
-        # Endpoint not yet tested — send safe read-only tools
+    elif not _tools_unsup and not _tools_supported and not _context_rich:
+        # Endpoint not yet tested — send safe read-only tools (only if context is thin)
         if micropedia_enabled:
             tools.append(_MICROPEDIA_TOOL_SCHEMA)
         tools.append(_WEB_SEARCH_TOOL_SCHEMA)
@@ -4501,17 +4504,14 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     if _web_search_available:
         system_prompt += (
             f"\n\n─── web_search 工具（搜尋網際網路）───\n"
-            f"你有一個 web_search 工具，可以搜尋網際網路（維基百科 + DuckDuckGo），"
-            f"取得即時、最新的資訊。\n\n"
-            f"⚠️ 強制使用規則（必須遵守）：\n"
-            f"1. 當你準備回答「這不存在」「沒這回事」「沒發生過」「不是真的」「沒有這個國家/組織/事件」"
-            f"之類的否定結論時，必須先呼叫 web_search 查證。你的訓練資料有截止日期，"
-            f"很多你認為「不存在」的東西可能只是在你訓練截止後才出現的。\n"
-            f"2. 當你不確定某個事實、日期、事件是否屬實時，先查再答。\n"
-            f"3. 當使用者問到近期新聞、時事、或你的訓練資料可能過時的問題時，先查再答。\n"
-            f"4. 查到的結果用自然口語回答，不要貼搜尋結果原文。\n"
-            f"5. 可以用中文或英文搜尋，視問題性質決定。如果中文查不到，試試英文。\n"
-            f"6. 如果搜尋也查不到，才誠實說「網路上也找不到相關資訊」。\n"
+            f"你有一個 web_search 工具，可以搜尋網際網路（維基百科 + DuckDuckGo）。"
+            f"不過，系統已經根據你的訊息自動做了一次網路搜尋，結果在上面「網際網路搜尋結果」區塊。"
+            f"如果上面的結果已經夠你回答，就不需要再呼叫這個工具。\n\n"
+            f"只有當你覺得自動搜尋的結果不夠、或你想用不同的關鍵字再查一次時，才呼叫 web_search。\n\n"
+            f"⚠️ 仍然適用的規則：\n"
+            f"1. 當你準備回答「這不存在」「沒這回事」「沒發生過」「不是真的」之類的否定結論時，"
+            f"先確認自動搜尋結果或呼叫 web_search 查證。\n"
+            f"2. 如果搜尋也查不到，才誠實說「網路上也找不到相關資訊」。\n"
             f"寧可多查一次確認，也不要給出錯誤的否定結論。"
         )
 
@@ -4544,7 +4544,11 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         total latency bounded and predictable."""
         t0 = _time.time()
         msgs = messages
-        assistant_msg = await call_chat_api(msgs, settings, tools=tools)
+        # Tight per-call timeout: 8s for tool-enabled round (leaves room for
+        # tools + final round within the 20s budget), 12s for no-tools round
+        _call_tt = 8 if tools else 12
+        _call_tr = 6 if tools else 10
+        assistant_msg = await call_chat_api(msgs, settings, tools=tools, timeout_total=_call_tt, timeout_read=_call_tr)
         print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}）耗時 {_time.time()-t0:.1f}s")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
@@ -4598,17 +4602,31 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
 
         # Final round — ALWAYS plain text, no tools. Capped at 2 calls total.
         t2 = _time.time()
-        final_msg = await call_chat_api(msgs, settings, tools=None)
+        final_msg = await call_chat_api(msgs, settings, tools=None, timeout_total=8, timeout_read=6)
         print(f"⏱️ Round 2（最終答案，無 tools）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
-    # Hard overall cap on the whole AI round-trip (covers all tool rounds),
-    # so no matter how many searches happen the reply pipeline never stalls
-    # indefinitely — this is the outer safety net on top of each call's own timeout.
+    # ── 20s TOTAL BUDGET (pre-AI + AI loop combined) ──
+    # The 20s cap covers the ENTIRE pipeline from here, not just the tool loop.
+    # Subtract time already spent on pre-AI context gathering to get the
+    # remaining budget for the AI round-trip(s).
+    _pipeline_elapsed = _time.time() - _t_pre
+    _ai_budget = max(8, 20 - _pipeline_elapsed)  # at least 8s for AI, but aim for 20s total
+    print(f"⏱️ 預處理已花 {_pipeline_elapsed:.1f}s，AI 剩餘預算 {_ai_budget:.1f}s")
+
+    # If the remaining budget is tight (<14s), skip tools entirely — a single
+    # AI round without tools can fit in ~10-12s, but a 2-round tool loop cannot.
+    # This trades "the AI might not find extra info" for "the user gets a reply
+    # in time" — the auto-context already did forced web search, so the AI
+    # has the most important data regardless.
+    if _ai_budget < 14 and tools:
+        print(f"⚡ 時間預算緊迫（{_ai_budget:.1f}s），關閉工具以確保單輪回答能完成")
+        tools = None
+
     try:
-        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=70)
+        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=_ai_budget)
     except asyncio.TimeoutError:
-        print(f"⚠️ AI 回覆流程整體逾時（>70s）")
+        print(f"⚠️ AI 回覆流程逾時（>{_ai_budget:.1f}s，總計 {_time.time()-_t_pre:.1f}s）")
         raise
     except Exception as e:
         # Something about the tool-calling machinery itself broke (bad response
@@ -4616,7 +4634,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # the whole chat feature down. Fall back to one plain, tool-free call.
         print(f"⚠️ 工具呼叫流程失敗，改用純文字模式重試：{e}")
         fallback_msg = await asyncio.wait_for(
-            call_chat_api(messages, settings, tools=None), timeout=30
+            call_chat_api(messages, settings, tools=None, timeout_total=10, timeout_read=8), timeout=12
         )
         raw_reply = fallback_msg.get("content") or ""
 
