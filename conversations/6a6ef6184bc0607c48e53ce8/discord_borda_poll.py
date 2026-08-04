@@ -1468,7 +1468,14 @@ DEFAULT_CHAT_AI_PROMPT = """你是一個微國家組織的 Discord 成員，也�
   不代表它們有任何關聯——不要自己腦補出一個聽起來合理但沒有根據的關係或故事。
 - 當你不確定、或資料沒有明確涵蓋使用者問的細節時，直接說「這個我不確定」或「目前資料沒有寫到這點」，
   絕對不要為了讓回答顯得完整、有自信，而生出一個編造的答案。使用者寧可聽到「不知道」，
-  也不要被一個錯誤但講得很篤定的答案誤導。"""
+  也不要被一個錯誤但講得很篤定的答案誤導。
+
+─── 回覆格式鐵律 ───
+- 直接給出答案，不要在回覆中展示你的思考過程、推理步驟、或分析邏輯
+- 不要寫「讓我想想」「我來分析一下」「首先」「好的，我來看看」等思考性開場白
+- 不要使用 <think> 或 <thinking> 標籤，不要輸出任何形式的 reasoning
+- 你的回覆必須是一個自然的對話回應，不是思考筆記
+- 違反以上規則的回覆會被直接刪除思考部分，只保留最終答案"""
 
 chat_ai_settings = {
     "api_url": os.getenv("CHAT_AI_API_URL", "https://api.openai.com/v1/chat/completions"),
@@ -2181,6 +2188,11 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                                 _status2, _body2, _data2 = await _do_fallback_post()
 
                             if _status2 == 200 and _data2 and "choices" in _data2:
+                                # Strip reasoning_content from non-streaming response
+                                # (reasoning models put thinking here, not in content)
+                                _ns_msg = _data2["choices"][0].get("message", {})
+                                if "reasoning_content" in _ns_msg:
+                                    _ns_msg.pop("reasoning_content", None)
                                 data = _data2
                                 ok = True
                                 if use_tools:
@@ -3993,6 +4005,72 @@ _TOOL_DUMP_MARKERS = (
 )
 
 
+def _strip_thinking(text: str) -> str:
+    """Remove chain-of-thought / reasoning output that reasoning models
+    (GPT-oss, DeepSeek-R1, etc.) sometimes embed in the content field.
+
+    Two strategies:
+    1. Tag-based: strip ilda.../thinking blocks (handles most reasoning models)
+    2. Preamble-based: strip known thinking preambles followed by the actual answer
+    """
+    if not text:
+        return text
+
+    # 1. Strip closed ilda.../thinking>
+    text = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL)
+
+    # 2. Handle unclosed ilda tag
+    think_open = text.find('<think')
+    if think_open != -1 and '</think' not in text[think_open:]:
+        after_think = text[think_open:]
+        after_think = re.sub(r'^<think(?:ing)?>\s*', '', after_think)
+        blocks = re.split(r'\n\s*\n', after_think)
+        if len(blocks) > 1:
+            last_block = blocks[-1].strip()
+            if last_block and len(last_block) > 5:
+                text = last_block
+            else:
+                text = text[:think_open]
+        else:
+            text = text[:think_open]
+
+    # 3. If there's a closed ilda tag, keep only content after it
+    close_idx = text.rfind('</think')
+    if close_idx != -1:
+        after_close = text[close_idx:]
+        after_close = re.sub(r'^</think(?:ing)?>\s*', '', after_close)
+        if after_close.strip():
+            text = after_close.strip()
+
+    # 4. Strip thinking preambles — if the text starts with a known thinking
+    #    phrase, strip everything up to the first double-newline separator.
+    #    The actual answer almost always follows a blank line after thinking.
+    _THINKING_PREAMBLES = [
+        '讓我想想', '讓我思考', '讓我分析', '讓我看看',
+        '我來想想', '我來分析', '我來思考', '我來看看',
+        '好的，我來', '好的，讓我', '好的我來', '好的讓我',
+        '嗯，讓我', '嗯，我來', '嗯讓我', '嗯我來',
+        '首先，', '首先我', '首先讓',
+        'Let me think', 'Let me analyze', 'Let me consider',
+        'Okay, so', 'Okay so', 'Alright, so', 'Alright so',
+        'Well, let me', 'Well let me',
+    ]
+    text_stripped = text.strip()
+    for preamble in _THINKING_PREAMBLES:
+        if text_stripped.startswith(preamble):
+            # Find the first double-newline — that's where thinking ends
+            # and the actual answer begins
+            sep_idx = text.find('\n\n')
+            if sep_idx != -1:
+                remainder = text[sep_idx + 2:].strip()
+                # Only strip if there's real content after the separator
+                if len(remainder) > 5:
+                    text = remainder
+            break
+
+    return text.strip()
+
+
 def _strip_raw_tool_dump(text: str) -> str:
     """Defensive safety net: weak/free AI models sometimes echo the raw
     tool-call search result verbatim as their 'final answer' instead of
@@ -4661,7 +4739,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             # Single-round quick path: give it nearly the ENTIRE remaining budget.
             _call_tt = max(6, _ai_budget - 1.5)
         _call_tr = max(4, _call_tt - 2)
-        assistant_msg = await call_chat_api(msgs, settings, tools=tools, timeout_total=_call_tt, timeout_read=_call_tr, is_background=False)
+        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=2000, timeout_total=_call_tt, timeout_read=_call_tr, is_background=False)
         print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
@@ -4718,7 +4796,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # minus a small safety margin — not a hardcoded 8s.
         t2 = _time.time()
         _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
-        final_msg = await call_chat_api(msgs, settings, tools=None, timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False)
+        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=2000, timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False)
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
@@ -4753,12 +4831,15 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # the whole chat feature down. Fall back to one plain, tool-free call.
         print(f"⚠️ 工具呼叫流程失敗，改用純文字模式重試：{e}")
         fallback_msg = await asyncio.wait_for(
-            call_chat_api(messages, settings, tools=None, timeout_total=10, timeout_read=8, is_background=False), timeout=12
+            call_chat_api(messages, settings, tools=None, max_tokens=2000, timeout_total=10, timeout_read=8, is_background=False), timeout=12
         )
         raw_reply = fallback_msg.get("content") or ""
 
     # Safety net: strip raw tool-output dumps that a weak model sometimes
     # echoes verbatim instead of composing a natural-language answer.
+    # Strip thinking/reasoning output that reasoning models (GPT-oss, etc.)
+    # sometimes embed in the content field
+    raw_reply = _strip_thinking(raw_reply)
     _sanitized = _strip_raw_tool_dump(raw_reply)
     if _sanitized != raw_reply.strip():
         print(f"⚠️ 偵測到 AI 原封不動貼上搜尋結果，已清除原始格式（原長度 {len(raw_reply)} → {len(_sanitized)}）")
