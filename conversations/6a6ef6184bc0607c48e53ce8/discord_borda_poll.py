@@ -118,8 +118,12 @@ except ImportError:
 import hmac
 import hashlib
 import json as json_module
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from aiohttp import web
+
+# ── GMT+8 (Taiwan) timezone for all user-facing timestamps and scheduling ──
+# Render runs in UTC; we convert everything to Asia/Taipei for display.
+GMT8 = timezone(timedelta(hours=8))
 
 
 # ──────────────────────────────────────────────
@@ -335,7 +339,7 @@ async def api_create_nation(request):
         "representative_names": [],
         "registered_by": user.get("user_id", 0),
         "registered_by_name": user.get("username", ""),
-        "registered_date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        "registered_date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
         "notes": notes,
     }
     _member_nations["entries"].append(entry)
@@ -1000,7 +1004,7 @@ def load_briefing_settings():
 
 async def collect_all_messages(hours: int, max_per_channel: int = 80) -> str:
     """Collect messages from all text channels in all guilds."""
-    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    cutoff = datetime.now(GMT8) - timedelta(hours=hours)
     sections = []
 
     for guild in bot.guilds:
@@ -1020,7 +1024,7 @@ async def collect_all_messages(hours: int, max_per_channel: int = 80) -> str:
                             continue
                     if len(text) > 300:
                         text = text[:300] + "..."
-                    time_str = msg.created_at.strftime("%m/%d %H:%M")
+                    time_str = (msg.created_at + timedelta(hours=8)).strftime("%m/%d %H:%M")
                     name = msg.author.display_name
                     channel_msgs.append(f"[{time_str}] {name}: {text}")
 
@@ -1085,10 +1089,10 @@ async def run_briefing(target_channel: discord.TextChannel, hours: int, mode: st
         else:
             import io
             await live_msg.edit(content=f"{title}\n✅ 已生成（完整內容見下方附件）")
-            file_content = f"# {title}\n# 生成時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n# 涵蓋範圍：過去 {hours} 小時\n\n---\n\n{accumulated}"
+            file_content = f"# {title}\n# 生成時間：{datetime.now(GMT8).strftime('%Y-%m-%d %H:%M')}\n# 涵蓋範圍：過去 {hours} 小時\n\n---\n\n{accumulated}"
             file = discord.File(
                 io.BytesIO(file_content.encode("utf-8")),
-                filename=f"{'daily_briefing' if is_daily else 'weekly_bulletin'}_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+                filename=f"{'daily_briefing' if is_daily else 'weekly_bulletin'}_{datetime.now(GMT8).strftime('%Y%m%d_%H%M')}.md"
             )
             await target_channel.send(file=file)
 
@@ -1107,7 +1111,7 @@ async def daily_briefing_scheduler():
         if not briefing_settings["daily_enabled"]:
             last_run_date = None
             continue
-        now = datetime.now()
+        now = datetime.now(GMT8)
         if now.strftime("%H:%M") == briefing_settings.get("daily_time", "23:00"):
             today_key = now.date().isoformat()
             if today_key != last_run_date:
@@ -1129,7 +1133,7 @@ async def weekly_briefing_scheduler():
         if not briefing_settings["weekly_enabled"]:
             last_run_date = None
             continue
-        now = datetime.now()
+        now = datetime.now(GMT8)
         target_day = int(briefing_settings.get("weekly_day", 6))
         if now.weekday() == target_day and now.strftime("%H:%M") == briefing_settings.get("weekly_time", "23:00"):
             today_key = now.date().isoformat()
@@ -1222,7 +1226,7 @@ def load_token_usage():
                     token_usage["started_at"] = started_at
         if not token_usage.get("started_at"):
             token_usage["started_at"] = _time.time()
-        today = _time.strftime("%Y-%m-%d")
+        today = datetime.now(GMT8).strftime("%Y-%m-%d")
         if token_usage.get("today_date") != today:
             token_usage["today_date"] = today
             token_usage["today_tokens"] = 0
@@ -1243,7 +1247,7 @@ def _track_token_usage(data: dict):
     completion = usage.get("completion_tokens", 0)
     if not total and not prompt and not completion:
         return
-    today = _time.strftime("%Y-%m-%d")
+    today = datetime.now(GMT8).strftime("%Y-%m-%d")
     if token_usage.get("today_date") != today:
         token_usage["today_date"] = today
         token_usage["today_tokens"] = 0
@@ -2690,7 +2694,7 @@ async def _refresh_channel_index(guild) -> list:
                     _msg_count += 1
                     _ch_msg_count += 1
                     author = msg.author.display_name if msg.author else "未知"
-                    date_str = msg.created_at.strftime("%Y-%m-%d %H:%M") if msg.created_at else ""
+                    date_str = (msg.created_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M") if msg.created_at else ""
 
                     entries.append({
                         "channel_name": ch.name,
@@ -2833,7 +2837,7 @@ async def _refresh_forum_index(guild) -> list:
                                 body = body.strip()
                             if not body:
                                 continue
-                            date_str = msg.created_at.strftime("%Y-%m-%d") if msg.created_at else "?"
+                            date_str = (msg.created_at + timedelta(hours=8)).strftime("%Y-%m-%d") if msg.created_at else "?"
                             author = msg.author.display_name if msg.author else "未知"
                             reply_lines.append(f"[{date_str}] {author}: {body[:200]}")
 
@@ -2856,7 +2860,7 @@ async def _refresh_forum_index(guild) -> list:
                         "reply_lines": reply_lines,  # kept separate so we can always surface the LATEST update
                         "url": thread.jump_url,
                         "author": (starter.author.display_name if starter and starter.author else "未知"),
-                        "created_at": thread.created_at.strftime("%Y-%m-%d") if thread.created_at else "",
+                        "created_at": (thread.created_at + timedelta(hours=8)).strftime("%Y-%m-%d") if thread.created_at else "",
                         "last_activity": last_activity.strftime("%Y-%m-%d") if last_activity else "",
                     })
                 except Exception as e:
@@ -3451,7 +3455,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                 if _target_msg is None:
                     continue
                 _author = _target_msg.author.display_name if _target_msg.author else "未知"
-                _date = _target_msg.created_at.strftime("%Y-%m-%d")
+                _date = (_target_msg.created_at + timedelta(hours=8)).strftime("%Y-%m-%d")
                 _body = _target_msg.content.strip()
                 for embed in _target_msg.embeds:
                     if embed.title:
@@ -3473,7 +3477,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                                     _rb = str(_emb.description)[:200]
                                     break
                         if _rb:
-                            _rd = _rm.created_at.strftime("%Y-%m-%d")
+                            _rd = (_rm.created_at + timedelta(hours=8)).strftime("%Y-%m-%d")
                             _ra = _rm.author.display_name if _rm.author else "未知"
                             _replies.append(f"[{_rd}] {_ra}: {_rb}")
                     if _replies:
@@ -4223,8 +4227,8 @@ def _cleanup_cooldowns():
         for k in stale:
             d.pop(k, None)
     # quiz_scores: remove users with 0 total score and old date (>7 days)
-    today = _time.strftime("%Y-%m-%d")
-    old_date = _time.strftime("%Y-%m-%d", _time.localtime(now - 7 * 86400))
+    today = datetime.now(GMT8).strftime("%Y-%m-%d")
+    old_date = datetime.fromtimestamp(now - 7 * 86400, GMT8).strftime("%Y-%m-%d")
     stale_scores = [
         uid for uid, e in quiz_scores.items()
         if e.get("total_score", 0) == 0 and e.get("date", "") < old_date
@@ -4319,7 +4323,7 @@ ai_settings = {
 def parse_since(since_str: str):
     """Parse a time string and return UTC datetime."""
     since_str = since_str.strip().lower()
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(GMT8)
 
     # "Nh" or "Nhours"
     m = re.match(r'^(\d+(?:\.\d+)?)\s*h(?:ours?)?$', since_str)
@@ -6361,7 +6365,7 @@ class SystemGroup(app_commands.Group):
         # 4. Try uploading a test file
         lines.append("")
         lines.append(f"**4. 測試上傳**")
-        test_content = f'{{"test": true, "time": "{datetime.now().isoformat()}"}}'
+        test_content = f'{{"test": true, "time": "{datetime.now(GMT8).isoformat()}"}}'
         success, detail = await _drive_upload("_connection_test.json", test_content, return_detail=True)
         if success:
             lines.append(f"  ✅ 測試檔案上傳成功！請到 Drive 資料夾確認 `_connection_test.json`")
@@ -6584,7 +6588,7 @@ class SystemGroup(app_commands.Group):
                 "user_id": str(user.id),
                 "user_name": user.display_name,
                 "reason": reason or "未指定",
-                "date": _time.strftime("%Y-%m-%d %H:%M"),
+                "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
                 "added_by": interaction.user.display_name,
             }
             _blacklist.setdefault("users", []).append(entry)
@@ -7663,7 +7667,7 @@ class MeetingGroup(app_commands.Group):
                         continue
                 if len(content) > 500:
                     content = content[:500] + "..."
-                time_str = msg.created_at.strftime("%H:%M")
+                time_str = (msg.created_at + timedelta(hours=8)).strftime("%H:%M")
                 name = msg.author.display_name
                 formatted.append(f"[{time_str}] {name}: {content}")
                 count += 1
@@ -7673,12 +7677,12 @@ class MeetingGroup(app_commands.Group):
 
         if not formatted:
             await interaction.followup.send(
-                f"❌ 在指定時間後未找到任何訊息（頻道：{channel.mention}，起始：{after_time.strftime('%Y-%m-%d %H:%M UTC')}）"
+                f"❌ 在指定時間後未找到任何訊息（頻道：{channel.mention}，起始：{afterdatetime.now(GMT8).strftime('%Y-%m-%d %H:%M GMT+8')}）"
             )
             return
 
         # Build conversation log
-        log_text = f"頻道: #{channel.name}\n時間範圍: {after_time.strftime('%Y-%m-%d %H:%M')} UTC ~ 整理時間\n訊息數: {count}\n\n"
+        log_text = f"頻道: #{channel.name}\n時間範圍: {afterdatetime.now(GMT8).strftime('%Y-%m-%d %H:%M')} GMT+8 ~ 整理時間\n訊息數: {count}\n\n"
         log_text += "\n".join(reversed(formatted))
 
         if len(log_text) > 30000:
@@ -7727,14 +7731,14 @@ class MeetingGroup(app_commands.Group):
                     await live_msg.edit(content=header + "✅ 會議紀錄已生成（完整內容見下方附件）")
                 except Exception as e:
                     print("⚠️ 靜默例外:", e)
-                file_content = f"# 會議紀錄 — #{channel.name}\n# 整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n# 共 {count} 則訊息\n# 由 {interaction.user.display_name} 整理\n# AI 模型：{ai_settings['model']}\n\n---\n\n{accumulated}"
+                file_content = f"# 會議紀錄 — #{channel.name}\n# 整理範圍：{afterdatetime.now(GMT8).strftime('%Y-%m-%d %H:%M')} GMT+8 起\n# 共 {count} 則訊息\n# 由 {interaction.user.display_name} 整理\n# AI 模型：{ai_settings['model']}\n\n---\n\n{accumulated}"
                 file = discord.File(
                     io.BytesIO(file_content.encode("utf-8")),
-                    filename=f"meeting_minutes_{channel.name}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.md"
+                    filename=f"meeting_minutes_{channel.name}_{datetime.now(GMT8).strftime('%Y%m%d_%H%M')}.md"
                 )
                 embed = discord.Embed(
                     title=f"📋 會議紀錄 — {channel.name}",
-                    description=f"整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n共 {count} 則訊息\nAI 模型：{ai_settings['model']}",
+                    description=f"整理範圍：{afterdatetime.now(GMT8).strftime('%Y-%m-%d %H:%M')} GMT+8 起\n共 {count} 則訊息\nAI 模型：{ai_settings['model']}",
                     color=discord.Color.blue(),
                 )
                 embed.set_footer(text=f"由 {interaction.user.display_name} 整理")
@@ -7786,7 +7790,7 @@ async def token_log_loop():
                 print("⚠️ Token Log: Cannot find log channel")
                 await asyncio.sleep(1800)
                 continue
-            today = _time.strftime("%Y-%m-%d")
+            today = datetime.now(GMT8).strftime("%Y-%m-%d")
             started_at = token_usage.get("started_at", _time.time())
             uptime_seconds = int(_time.time() - started_at)
             uptime_days = uptime_seconds // 86400
@@ -8233,7 +8237,7 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
         entry_id = str(int(now * 1000))
         entry = {
             "id": entry_id,
-            "date": _time.strftime("%Y-%m-%d %H:%M"),
+            "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
             "_ts": now,
             "user_id": self.user_id,
             "user_name": self.user_name,
@@ -8396,7 +8400,7 @@ async def _process_new_proposal(message: discord.Message, channel):
     proposal_id = str(int(now * 1000))
     entry = {
         "id": proposal_id,
-        "date": _time.strftime("%Y-%m-%d %H:%M"),
+        "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
         "_ts": now,
         "guild_id": message.guild.id if message.guild else 0,
         "proposer_id": str(message.author.id),
@@ -8555,7 +8559,7 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
     # Update proposal record
     entry["status"] = decision
     entry["reviewed_by"] = interaction.user.display_name
-    entry["review_date"] = _time.strftime("%Y-%m-%d %H:%M")
+    entry["review_date"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M")
     entry["reject_reason"] = reject_reason
     save_proposals()
 
@@ -9113,13 +9117,13 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
         entry["flag_valid"] = flag_valid
         if flag_valid and flag_image_url:
             entry["flag_image_url"] = flag_image_url
-        entry["last_checked"] = _time.strftime("%Y-%m-%d %H:%M")
+        entry["last_checked"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M")
         entry["applicant_nation"] = applicant_name or entry.get("applicant_nation", "")
     else:
         app_id = str(int(now * 1000))
         entry = {
             "id": app_id,
-            "date": _time.strftime("%Y-%m-%d %H:%M"),
+            "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
             "_ts": now,
             "guild_id": message.guild.id if message.guild else 0,
             "applicant_id": str(message.author.id),
@@ -9145,7 +9149,7 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
             "reviewed_by": "",
             "review_date": "",
             "reject_reason": "",
-            "last_checked": _time.strftime("%Y-%m-%d %H:%M"),
+            "last_checked": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
         }
         _applications.setdefault("entries", []).append(entry)
         if len(_applications["entries"]) > 500:
@@ -9395,7 +9399,7 @@ async def _handle_application_decision(interaction: discord.Interaction, app_id:
     # Update record
     entry["status"] = decision
     entry["reviewed_by"] = interaction.user.display_name
-    entry["review_date"] = _time.strftime("%Y-%m-%d %H:%M")
+    entry["review_date"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M")
     entry["reject_reason"] = reject_reason
     save_applications()
 
@@ -9510,7 +9514,7 @@ def _create_feedback_entry(rating: str, reason: str, custom_text: str, question:
     entry_id = str(int(now * 1000))
     entry = {
         "id": entry_id,
-        "date": _time.strftime("%Y-%m-%d %H:%M"),
+        "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
         "_ts": now,
         "rating": rating,  # "like" or "dislike"
         "reason": reason,
@@ -9928,7 +9932,7 @@ class QuizAnswerView(discord.ui.View):
             self.correct_user_id = user_id_str
 
             # Award 5 points
-            today = _time.strftime("%Y-%m-%d")
+            today = datetime.now(GMT8).strftime("%Y-%m-%d")
             user_entry = quiz_scores.get(user_id_str, {
                 "username": interaction.user.display_name,
                 "daily_score": 0,
@@ -10133,9 +10137,9 @@ async def quiz_settlement_loop():
     while True:
         try:
             # Check if it's 22:00 (check every 30 seconds for precision)
-            now = _time.localtime()
+            now = datetime.now(GMT8)
             if now.tm_hour == 22 and now.tm_min == 0 and now.tm_sec < 30:
-                today = _time.strftime("%Y-%m-%d")
+                today = datetime.now(GMT8).strftime("%Y-%m-%d")
 
                 # Find today's top scorer(s)
                 today_scores = []
@@ -10279,7 +10283,7 @@ class QuizGroup(app_commands.Group):
 
     @app_commands.command(name="scoreboard", description="查看問答積分榜")
     async def quiz_scoreboard(self, interaction: discord.Interaction):
-        today = _time.strftime("%Y-%m-%d")
+        today = datetime.now(GMT8).strftime("%Y-%m-%d")
         today_scores = []
         all_time_scores = []
         for uid, entry in quiz_scores.items():
@@ -10393,7 +10397,7 @@ class QuizGroup(app_commands.Group):
 
     @app_commands.command(name="status", description="查看問答系統狀態")
     async def quiz_status(self, interaction: discord.Interaction):
-        today = _time.strftime("%Y-%m-%d")
+        today = datetime.now(GMT8).strftime("%Y-%m-%d")
         today_players = sum(1 for e in quiz_scores.values() if e.get("date") == today and e.get("daily_score", 0) > 0)
         total_questions_answered = sum(1 for q in quiz_active_questions.values() if q.get("answered_by"))
         embed = discord.Embed(
@@ -10885,7 +10889,7 @@ async def _fetch_user_messages(guild, user_id: int, limit: int = 100, overall_ti
                     out.append({
                         "channel": label,
                         "content": msg.content.strip()[:300],
-                        "date": msg.created_at.strftime("%Y-%m-%d"),
+                        "date": (msg.created_at + timedelta(hours=8)).strftime("%Y-%m-%d"),
                     })
             await asyncio.wait_for(_do_scan(), timeout=10)
         except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
@@ -11260,7 +11264,7 @@ class MemberNationGroup(app_commands.Group):
             "representative_names": rep_names,  # for display, updated on load
             "registered_by": interaction.user.id,
             "registered_by_name": interaction.user.display_name,
-            "registered_date": interaction.created_at.strftime("%Y-%m-%d %H:%M"),
+            "registered_date": (interaction.created_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M"),
             "notes": "",
         }
 
@@ -11807,7 +11811,7 @@ async def _collect_daily_messages(guild, hours=24) -> str:
                 # Tag with author authority level
                 authority_tag = _author_authority_tag(msg)
                 author = msg.author.display_name if msg.author else "未知"
-                time_str = msg.created_at.strftime("%H:%M") if msg.created_at else "??:??"
+                time_str = (msg.created_at + timedelta(hours=8)).strftime("%H:%M") if msg.created_at else "??:??"
                 ch_lines.append(f"[{time_str}]{authority_tag} {author}: {text[:250]}")
                 _msg_count += 1
         except discord.Forbidden:
