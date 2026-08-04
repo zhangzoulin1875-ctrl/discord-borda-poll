@@ -8734,11 +8734,10 @@ async def _rate_nation_name(nation_name: str, ai_settings: dict) -> dict:
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
         )
-        text = ""
-        if isinstance(result, dict):
-            choices = result.get("choices", [])
-            if choices:
-                text = choices[0].get("message", {}).get("content", "")
+        # call_chat_api returns the assistant MESSAGE dict directly
+        # (e.g. {"role": "assistant", "content": "..."}), not a full
+        # {"choices": [...]} response — no extra unwrapping needed here.
+        text = result.get("content", "") if isinstance(result, dict) else ""
         if not text:
             return {"error": "AI 回應為空"}
 
@@ -9268,11 +9267,9 @@ async def _generate_daily_summary(messages_text: str, date_str: str) -> str:
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
         )
-        text = ""
-        if isinstance(result, dict):
-            choices = result.get("choices", [])
-            if choices:
-                text = choices[0].get("message", {}).get("content", "")
+        # call_chat_api returns the assistant MESSAGE dict directly, not a
+        # full {"choices": [...]} response.
+        text = result.get("content", "") if isinstance(result, dict) else ""
         return text.strip() if text else "AI 整理失敗（空回應）。"
     except Exception as e:
         return f"AI 整理失敗：{e}"
