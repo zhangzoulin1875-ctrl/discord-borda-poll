@@ -2948,7 +2948,7 @@ async def _micropedia_ddg_site_search(query: str, max_results: int = 5) -> list:
     search or on a stale local title cache."""
     import urllib.parse as _up
     titles = []
-    _timeout = aiohttp.ClientTimeout(total=8, connect=4)
+    _timeout = aiohttp.ClientTimeout(total=6, connect=3)
     _headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -3119,13 +3119,15 @@ async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
 
 
 async def _fetch_micropedia(query: str, max_results: int = 5) -> str:
-    """Thin wrapper enforcing a hard overall time budget (8s) on a single
+    """Thin wrapper enforcing a hard overall time budget (10s) on a single
     micropedia lookup, regardless of network conditions — guarantees a tool
-    call the AI makes never meaningfully stalls the reply pipeline."""
+    call the AI makes never meaningfully stalls the reply pipeline. (Slightly
+    higher than before since this may now include a forced web-search
+    fallback on top of the structured MediaWiki search.)"""
     try:
-        return await asyncio.wait_for(_fetch_micropedia_inner(query, max_results), timeout=8)
+        return await asyncio.wait_for(_fetch_micropedia_inner(query, max_results), timeout=10)
     except asyncio.TimeoutError:
-        print(f"📚 Micropedia: 整體查詢逾時（>8s），放棄 for '{query}'")
+        print(f"📚 Micropedia: 整體查詢逾時（>10s），放棄 for '{query}'")
         return ""
 
 
@@ -3704,96 +3706,121 @@ _MICROPEDIA_TOOL_SCHEMA = {
 
 
 async def _web_search(query: str) -> str:
-    """Search the web using Wikipedia (zh+en) + DuckDuckGo.
-    Returns combined text results — no API keys needed, all endpoints are
-    free and HTTPS-accessible from Render."""
-    results = []
-    _ws_timeout = aiohttp.ClientTimeout(total=10, connect=5)
+    """Search the web using Wikipedia (zh+en) + DuckDuckGo — ALL sources run
+    CONCURRENTLY with tight per-source timeouts and a hard overall cap, so a
+    single web_search tool call can never itself become the pipeline
+    bottleneck (previous version ran up to 6 HTTP requests sequentially at
+    10s each — worst case ~60s for ONE tool call). No API keys needed, all
+    endpoints are free and HTTPS-accessible from Render."""
+    _ws_timeout = aiohttp.ClientTimeout(total=5, connect=3)
     _ws_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    try:
+
+    async def _wiki_lookup(session, lang):
+        try:
+            search_url = (
+                f"https://{lang}.wikipedia.org/w/api.php?action=query"
+                f"&list=search&srsearch={urllib.parse.quote(query)}"
+                f"&format=json&utf8=1&srlimit=3"
+            )
+            async with session.get(search_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+            search_results = data.get("query", {}).get("search", [])
+            if not search_results:
+                return None
+            page_ids = "|".join(str(r["pageid"]) for r in search_results[:3])
+            extract_url = (
+                f"https://{lang}.wikipedia.org/w/api.php?action=query"
+                f"&prop=extracts&exintro=1&explaintext=1&format=json"
+                f"&exchars=800&pageids={page_ids}"
+            )
+            async with session.get(extract_url, headers=_ws_headers, timeout=_ws_timeout) as resp2:
+                if resp2.status != 200:
+                    return None
+                ext_data = await resp2.json()
+            pages = ext_data.get("query", {}).get("pages", {})
+            for pid, page in pages.items():
+                title = page.get("title", "")
+                extract = page.get("extract", "")
+                if extract and len(extract) > 30:
+                    return f"📖 維基百科({lang})：{title}\n{extract[:600]}"
+            return None
+        except Exception as e:
+            print(f"⚠️ web_search Wikipedia({lang}) 例外：{e}")
+            return None
+
+    async def _ddg_api_lookup(session):
+        out = []
+        try:
+            ddg_url = (
+                f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}"
+                f"&format=json&no_html=1&skip_disambig=1"
+            )
+            async with session.get(ddg_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    abstract = data.get("Abstract", "")
+                    if abstract:
+                        out.append(f"🔍 {abstract[:500]}")
+                    related = data.get("RelatedTopics", [])
+                    for r in related[:3]:
+                        if isinstance(r, dict) and r.get("Text"):
+                            out.append(f"🔍 {r['Text'][:300]}")
+        except Exception as e:
+            print(f"⚠️ web_search DDG API 例外：{e}")
+        return out
+
+    async def _ddg_html_lookup(session):
+        out = []
+        try:
+            ddg_html_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+            async with session.get(ddg_html_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
+                    titles = re.findall(r'class="result__a"[^>]*>(.*?)</a>', html, re.DOTALL)
+                    for i in range(min(len(titles), len(snippets), 5)):
+                        clean_title = re.sub(r'<[^>]+>', '', titles[i]).strip()
+                        clean_snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip()
+                        if clean_snippet and len(clean_snippet) > 20:
+                            out.append(f"🌐 {clean_title}：{clean_snippet[:300]}")
+        except Exception as e:
+            print(f"⚠️ web_search DDG HTML 例外：{e}")
+        return out
+
+    async def _run_all():
+        results = []
         async with aiohttp.ClientSession() as session:
-            # 1. Wikipedia (Chinese first, then English)
-            for lang in ["zh", "en"]:
-                try:
-                    search_url = (
-                        f"https://{lang}.wikipedia.org/w/api.php?action=query"
-                        f"&list=search&srsearch={urllib.parse.quote(query)}"
-                        f"&format=json&utf8=1&srlimit=3"
-                    )
-                    async with session.get(search_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
-                        if resp.status != 200:
-                            continue
-                        data = await resp.json()
-                        search_results = data.get("query", {}).get("search", [])
-                        if not search_results:
-                            continue
-                        page_ids = "|".join(str(r["pageid"]) for r in search_results[:3])
-                        extract_url = (
-                            f"https://{lang}.wikipedia.org/w/api.php?action=query"
-                            f"&prop=extracts&exintro=1&explaintext=1&format=json"
-                            f"&exchars=800&pageids={page_ids}"
-                        )
-                        async with session.get(extract_url, headers=_ws_headers, timeout=_ws_timeout) as resp2:
-                            if resp2.status != 200:
-                                continue
-                            ext_data = await resp2.json()
-                            pages = ext_data.get("query", {}).get("pages", {})
-                            for pid, page in pages.items():
-                                title = page.get("title", "")
-                                extract = page.get("extract", "")
-                                if extract and len(extract) > 30:
-                                    results.append(f"📖 維基百科({lang})：{title}\n{extract[:600]}")
-                                    break  # one result per language
-                except Exception as e:
-                    print(f"⚠️ web_search Wikipedia({lang}) 例外：{e}")
-
-            # 2. DuckDuckGo Instant Answer API
-            try:
-                ddg_url = (
-                    f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}"
-                    f"&format=json&no_html=1&skip_disambig=1"
-                )
-                async with session.get(ddg_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        abstract = data.get("Abstract", "")
-                        if abstract:
-                            results.append(f"🔍 {abstract[:500]}")
-                        related = data.get("RelatedTopics", [])
-                        for r in related[:3]:
-                            if isinstance(r, dict) and r.get("Text"):
-                                results.append(f"🔍 {r['Text'][:300]}")
-            except Exception as e:
-                print(f"⚠️ web_search DDG API 例外：{e}")
-
-            # 3. DuckDuckGo HTML fallback (for queries the API doesn't answer well)
+            # Run Wikipedia (zh+en) and DDG API concurrently — this alone
+            # cuts the common case from ~4 sequential requests to 1 round-trip.
+            wiki_zh, wiki_en, ddg_api_results = await asyncio.gather(
+                _wiki_lookup(session, "zh"),
+                _wiki_lookup(session, "en"),
+                _ddg_api_lookup(session),
+                return_exceptions=False,
+            )
+            if wiki_zh:
+                results.append(wiki_zh)
+            if wiki_en:
+                results.append(wiki_en)
+            results.extend(ddg_api_results)
+            # HTML fallback only if the fast sources came up short — this is
+            # the slowest/least reliable source, so it's last-resort only.
             if len(results) < 2:
-                try:
-                    ddg_html_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
-                    async with session.get(ddg_html_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
-                        if resp.status == 200:
-                            html = await resp.text()
-                            # DDG HTML: results in <a class="result__a" ...>title</a>
-                            # and <a class="result__snippet" ...>snippet</a>
-                            snippets = re.findall(
-                                r'class="result__snippet"[^>]*>(.*?)</a>',
-                                html, re.DOTALL
-                            )
-                            titles = re.findall(
-                                r'class="result__a"[^>]*>(.*?)</a>',
-                                html, re.DOTALL
-                            )
-                            for i in range(min(len(titles), len(snippets), 5)):
-                                clean_title = re.sub(r'<[^>]+>', '', titles[i]).strip()
-                                clean_snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip()
-                                if clean_snippet and len(clean_snippet) > 20:
-                                    results.append(f"🌐 {clean_title}：{clean_snippet[:300]}")
-                except Exception as e:
-                    print(f"⚠️ web_search DDG HTML 例外：{e}")
+                results.extend(await _ddg_html_lookup(session))
+        return results
+
+    try:
+        results = await asyncio.wait_for(_run_all(), timeout=10)
+    except asyncio.TimeoutError:
+        print(f"⚠️ web_search 整體逾時（>10s） for '{query}'")
+        results = []
     except Exception as e:
         print(f"⚠️ web_search 整體例外：{e}")
+        results = []
 
     return "\n\n".join(results[:6]) if results else ""
 
@@ -4299,7 +4326,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     if message.guild and len(clean_content) >= 4 and any(m in clean_content for m in _INFO_SEEKING_MARKERS):
         try:
             _discord_auto = await asyncio.wait_for(
-                _search_discord_history(message.guild, clean_content, limit=15), timeout=12
+                _search_discord_history(message.guild, clean_content, limit=15), timeout=10
             )
         except asyncio.TimeoutError:
             print("🔍 search_discord 自動比對逾時（>12s），跳過")
@@ -4523,55 +4550,51 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         if not tool_calls:
             return assistant_msg.get("content") or ""
 
-        # Model wants to search — execute each requested call (possibly
-        # several at once), then let it see all results and give a final answer.
+        # Model wants to search — execute each requested call CONCURRENTLY
+        # (not one-by-one) so e.g. search_micropedia + web_search called
+        # together take max(their times) instead of the sum — this is what
+        # actually keeps multi-tool turns fast.
         t1 = _time.time()
         msgs = msgs + [assistant_msg]
-        for tc in tool_calls:
+
+        async def _run_one_tool(tc):
             fn = tc.get("function", {})
             name = fn.get("name")
-            call_id = tc.get("id")
-            if name == "search_micropedia":
-                try:
-                    args = json_module.loads(fn.get("arguments") or "{}")
-                except Exception:
-                    args = {}
-                query = (args.get("query") or "").strip()
-                print(f"🔧 AI 呼叫 search_micropedia('{query}')")
-                result = await _fetch_micropedia(query, max_results) if query else ""
-                tool_content = result if result else "沒有找到相關資料，試試看換一個更短或不同的關鍵字。"
-            elif name == "search_discord":
-                try:
-                    args = json_module.loads(fn.get("arguments") or "{}")
-                except Exception:
-                    args = {}
-                query = (args.get("query") or "").strip()
-                print(f"🔧 AI 呼叫 search_discord('{query}')")
-                if query and message.guild:
-                    result = await _search_discord_history(message.guild, query, limit=10)
+            try:
+                args = json_module.loads(fn.get("arguments") or "{}")
+            except Exception:
+                args = {}
+            query = (args.get("query") or "").strip()
+            try:
+                if name == "search_micropedia":
+                    print(f"🔧 AI 呼叫 search_micropedia('{query}')")
+                    result = await _fetch_micropedia(query, max_results) if query else ""
+                    return result if result else "沒有找到相關資料，試試看換一個更短或不同的關鍵字。"
+                elif name == "search_discord":
+                    print(f"🔧 AI 呼叫 search_discord('{query}')")
+                    if query and message.guild:
+                        result = await _search_discord_history(message.guild, query, limit=10)
+                    else:
+                        result = "無法搜尋（沒有 guild 或搜尋詞為空）"
+                    return result if result else "沒有找到相關訊息，試試看換一個不同的關鍵字。"
+                elif name == "web_search":
+                    print(f"🔧 AI 呼叫 web_search('{query}')")
+                    result = await _web_search(query) if query else ""
+                    return result if result else "網路搜尋沒有找到相關結果。可能這個詞太冷門或太新，試試看換一個更通用的關鍵字。"
                 else:
-                    result = "無法搜尋（沒有 guild 或搜尋詞為空）"
-                tool_content = result if result else "沒有找到相關訊息，試試看換一個不同的關鍵字。"
-            elif name == "web_search":
-                try:
-                    args = json_module.loads(fn.get("arguments") or "{}")
-                except Exception:
-                    args = {}
-                query = (args.get("query") or "").strip()
-                print(f"🔧 AI 呼叫 web_search('{query}')")
-                if query:
-                    result = await _web_search(query)
-                else:
-                    result = ""
-                tool_content = result if result else "網路搜尋沒有找到相關結果。可能這個詞太冷門或太新，試試看換一個更通用的關鍵字。"
-            else:
-                tool_content = f"未知工具：{name}"
+                    return f"未知工具：{name}"
+            except Exception as e:
+                print(f"⚠️ 工具 {name}('{query}') 執行例外：{e}")
+                return "查詢時發生錯誤，請直接告知使用者這部分暫時查不到。"
+
+        tool_contents = await asyncio.gather(*[_run_one_tool(tc) for tc in tool_calls])
+        for tc, tool_content in zip(tool_calls, tool_contents):
             msgs = msgs + [{
                 "role": "tool",
-                "tool_call_id": call_id,
+                "tool_call_id": tc.get("id"),
                 "content": tool_content[:3000],
             }]
-        print(f"⏱️ 工具執行（{len(tool_calls)} 個）耗時 {_time.time()-t1:.1f}s")
+        print(f"⏱️ 工具執行（{len(tool_calls)} 個，平行）耗時 {_time.time()-t1:.1f}s")
 
         # Final round — ALWAYS plain text, no tools. Capped at 2 calls total.
         t2 = _time.time()
@@ -4583,9 +4606,9 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # so no matter how many searches happen the reply pipeline never stalls
     # indefinitely — this is the outer safety net on top of each call's own timeout.
     try:
-        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=90)
+        raw_reply = await asyncio.wait_for(_run_tool_loop(), timeout=70)
     except asyncio.TimeoutError:
-        print(f"⚠️ AI 回覆流程整體逾時（>90s）")
+        print(f"⚠️ AI 回覆流程整體逾時（>70s）")
         raise
     except Exception as e:
         # Something about the tool-calling machinery itself broke (bad response
