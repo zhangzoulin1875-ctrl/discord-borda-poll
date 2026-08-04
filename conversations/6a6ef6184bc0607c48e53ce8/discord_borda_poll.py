@@ -1262,6 +1262,58 @@ def _track_token_usage(data: dict):
     token_usage["today_prompt"] += prompt
     token_usage["today_completion"] += completion
     token_usage["today_calls"] += 1
+    # Rolling 60s window for API call rate detection (used by AI refine loop)
+    _api_call_timestamps.append(_time.time())
+
+
+# ── Rolling API call rate tracker (for dynamic refine interval) ──
+_api_call_timestamps: list = []  # timestamps of recent API calls (pruned to last 120s)
+
+def _get_api_calls_per_minute() -> int:
+    """Return the number of API calls in the last 60 seconds."""
+    now = _time.time()
+    cutoff = now - 60
+    # Prune old entries
+    while _api_call_timestamps and _api_call_timestamps[0] < cutoff:
+        _api_call_timestamps.pop(0)
+    return len(_api_call_timestamps)
+
+def _compute_dynamic_refine_interval() -> int:
+    """Compute the effective refine interval in seconds based on:
+    - Current API call rate (calls/min)
+    - Knowledge base fullness
+
+    Rules:
+    - High traffic (>20 calls/min): slow down to 15 min
+    - Medium traffic (10-20 calls/min): 5 min
+    - Low traffic (<10 calls/min): speed up to 1 min (minimum)
+    - Knowledge base full (>90%): slow down to 60 min regardless of traffic
+    - User-set interval_minutes acts as the BASELINE; dynamic adjustments
+      only push the interval UP (never below the user's setting unless
+      traffic is very low and the user explicitly set a low interval).
+    """
+    base_minutes = ai_refine_settings.get("interval_minutes", 5)
+    base_secs = base_minutes * 60
+
+    # Knowledge base fullness check
+    max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
+    current_entries = len(ai_refined_knowledge)
+    if max_entries > 0 and current_entries >= max_entries * 0.9:
+        return 3600  # 1 hour when knowledge base is 90%+ full
+
+    calls_per_min = _get_api_calls_per_minute()
+
+    if calls_per_min > 20:
+        # High traffic — back off significantly
+        dynamic = max(base_secs, 900)  # at least 15 min
+    elif calls_per_min > 10:
+        # Medium traffic — moderate pace
+        dynamic = max(base_secs, 300)  # at least 5 min
+    else:
+        # Low traffic — allow speeding up, but not below 1 min
+        dynamic = max(60, min(base_secs, 60))
+
+    return dynamic
 
 # Per-USER generating lock (not per-channel) — different people in the same
 # channel can get replies simultaneously; only the same user is blocked from
@@ -7083,12 +7135,26 @@ class SystemGroup(app_commands.Group):
 
         lines = ["🔬 **AI 精煉系統狀態**", ""]
         lines.append(f"啟用狀態：{'✅ 已啟用' if enabled else '❌ 已停用'}")
-        lines.append(f"精煉間隔：{interval} 分鐘")
+        lines.append(f"基準間隔：{interval} 分鐘（動態調整中）")
+        # Show current dynamic interval
+        dynamic_secs = _compute_dynamic_refine_interval()
+        cpm = _get_api_calls_per_minute()
+        max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
+        kb_ratio = knowledge_count / max(1, max_entries)
+        if kb_ratio >= 0.9:
+            lines.append(f"動態間隔：60 分鐘（知識庫已滿 {kb_ratio:.0%}，自動放慢）")
+        elif cpm > 20:
+            lines.append(f"動態間隔：{dynamic_secs // 60} 分鐘（API 流量高 {cpm} calls/min，已降速）")
+        elif cpm > 10:
+            lines.append(f"動態間隔：{dynamic_secs // 60} 分鐘（API 流量中等 {cpm} calls/min）")
+        else:
+            lines.append(f"動態間隔：{dynamic_secs} 秒（API 流量低 {cpm} calls/min，已加速）")
+        lines.append(f"當前 API 速率：{cpm} calls/min")
+        lines.append(f"知識庫：{knowledge_count}/{max_entries} ({kb_ratio:.0%})")
         if ch_id:
             lines.append(f"發布頻道：<#{ch_id}> (`{ch_id}`)")
         else:
             lines.append("發布頻道：❌ 尚未設定（用 /system refine_channel 設定）")
-        lines.append(f"知識庫累計：{knowledge_count} 條")
         if knowledge_count > 0:
             lines.append("")
             lines.append("**近期精煉知識（最後 5 條）：**")
@@ -10615,11 +10681,16 @@ async def ai_refine_loop():
                 await asyncio.sleep(20)
                 continue
 
-            interval_secs = ai_refine_settings.get("interval_minutes", 5) * 60
+            # Dynamic interval: adjusts based on API traffic and knowledge base fullness
+            interval_secs = _compute_dynamic_refine_interval()
             now = _time.time()
             if _refine_last_run and (now - _refine_last_run) < interval_secs:
                 await asyncio.sleep(20)
                 continue
+
+            # Log the dynamic decision for visibility
+            cpm = _get_api_calls_per_minute()
+            kb_full = len(ai_refined_knowledge) / max(1, ai_refine_settings.get("max_knowledge_entries", 500))
 
             guild_id = ai_refine_settings.get("guild_id")
             channel_id = ai_refine_settings.get("channel_id")
@@ -10644,7 +10715,7 @@ async def ai_refine_loop():
                 await asyncio.sleep(20)
                 continue
 
-            print("🔍 AI精煉: 開始精煉...")
+            print(f"🔍 AI精煉: 開始精煉 (API {cpm} calls/min, 知識庫 {len(ai_refined_knowledge)}/{ai_refine_settings.get('max_knowledge_entries', 500)} ({kb_full:.0%}), 動態間隔 {interval_secs}s)")
 
             # Step 1: Fetch channel snippets and micropedia article in parallel
             channel_task = asyncio.ensure_future(_ai_refine_fetch_channel_snippets(guild))
