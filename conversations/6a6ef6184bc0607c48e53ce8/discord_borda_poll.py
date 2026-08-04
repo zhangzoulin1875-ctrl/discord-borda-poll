@@ -9160,60 +9160,107 @@ class NationGroup(app_commands.Group):
 # 用戶分析系統
 # ──────────────────────────────────────────────
 
-async def _fetch_user_messages(guild, user_id: int, limit: int = 200) -> list:
+async def _fetch_user_messages(guild, user_id: int, limit: int = 100, overall_timeout: float = 40.0) -> list:
     """Fetch a user's recent messages across all text channels and forum
-    threads in the guild. Returns a list of {"channel": str, "content": str,
-    "date": str} dicts. Skips bot messages, empty messages, and test/log
-    channels (same exclusions as the search indexer)."""
-    messages_collected = []
+    threads in the guild — CONCURRENTLY, with a hard overall time budget.
+
+    The original version awaited every channel and every archived forum
+    thread ONE AT A TIME, sequentially. On a server with a few hundred
+    channels/threads (this one has ~234 channels) that easily took minutes
+    per call — long enough that the command appeared to just hang forever,
+    and the AI API was never even reached (no request ever left the bot).
+    This version scans all sources in parallel (bounded concurrency) and
+    gives up on individual slow sources instead of blocking on them, so the
+    whole scan always finishes within `overall_timeout` seconds and returns
+    whatever was collected — best-effort, but it always returns.
+
+    Returns a list of {"channel": str, "content": str, "date": str} dicts.
+    Skips bot messages, empty messages, and test/log channels (same
+    exclusions as the search indexer)."""
     _skip_keywords = {"測試", "test", "log", "紀錄", "ai-log", "bot-log"}
+    _t0 = _time.time()
 
-    # Text channels
+    async def _scan_one(source, label: str) -> list:
+        """Scan a single channel/thread's history for this user's messages,
+        with its own short timeout so one slow/huge channel can't eat the
+        whole budget on its own."""
+        out = []
+        try:
+            async def _do_scan():
+                async for msg in source.history(limit=limit, oldest_first=False):
+                    if msg.author.id != user_id:
+                        continue
+                    if not msg.content or msg.content.strip().startswith("/"):
+                        continue
+                    out.append({
+                        "channel": label,
+                        "content": msg.content.strip()[:300],
+                        "date": msg.created_at.strftime("%Y-%m-%d"),
+                    })
+            await asyncio.wait_for(_do_scan(), timeout=10)
+        except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
+            pass
+        except Exception as e:
+            print(f"⚠️ 用戶訊息掃描「{label}」失敗：{e}")
+        return out
+
+    # Build the list of sources to scan: all text channels + currently open
+    # forum threads (cheap — already cached client-side, no extra API call)
+    # + a CAPPED number of archived forum threads per forum. Archived
+    # threads are capped low on purpose: a busy proposal forum can
+    # accumulate hundreds of them over time, and for a personality snapshot
+    # recent activity matters far more than every old archived thread —
+    # scanning them all was the actual root cause of the hang.
+    sources = []
     for ch in guild.text_channels:
-        ch_name_lower = ch.name.lower()
-        if any(sk in ch_name_lower for sk in _skip_keywords):
+        if any(sk in ch.name.lower() for sk in _skip_keywords):
             continue
-        try:
-            async for msg in ch.history(limit=limit, oldest_first=False):
-                if msg.author.id != user_id:
-                    continue
-                if not msg.content or msg.content.strip().startswith("/"):
-                    continue
-                messages_collected.append({
-                    "channel": f"#{ch.name}",
-                    "content": msg.content.strip()[:300],
-                    "date": msg.created_at.strftime("%Y-%m-%d"),
-                })
-        except (discord.Forbidden, discord.HTTPException):
-            continue
-
-    # Forum threads
+        sources.append((ch, f"#{ch.name}"))
     for ch in guild.forums:
+        for thread in ch.threads:  # open threads, already in cache
+            sources.append((thread, f"📋 {ch.name} > {thread.name}"))
         try:
-            async for thread in ch.archived_threads(limit=50):
-                async for msg in thread.history(limit=limit, oldest_first=False):
-                    if msg.author.id != user_id:
-                        continue
-                    if not msg.content or msg.content.strip().startswith("/"):
-                        continue
-                    messages_collected.append({
-                        "channel": f"📋 {ch.name} > {thread.name}",
-                        "content": msg.content.strip()[:300],
-                        "date": msg.created_at.strftime("%Y-%m-%d"),
-                    })
-            async for thread in ch.threads:
-                async for msg in thread.history(limit=limit, oldest_first=False):
-                    if msg.author.id != user_id:
-                        continue
-                    if not msg.content or msg.content.strip().startswith("/"):
-                        continue
-                    messages_collected.append({
-                        "channel": f"📋 {ch.name} > {thread.name}",
-                        "content": msg.content.strip()[:300],
-                        "date": msg.created_at.strftime("%Y-%m-%d"),
-                    })
-        except (discord.Forbidden, discord.HTTPException):
-            continue
+            async def _list_archived():
+                found = []
+                async for thread in ch.archived_threads(limit=20):
+                    found.append(thread)
+                return found
+            archived = await asyncio.wait_for(_list_archived(), timeout=6)
+            for thread in archived:
+                sources.append((thread, f"📋 {ch.name} > {thread.name}"))
+        except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
+            pass
+        except Exception:
+            pass
+
+    print(f"📊 用戶訊息掃描：{len(sources)} 個頻道/討論串，開始並行抓取（總預算 {overall_timeout:.0f}s）...")
+
+    # Scan all sources CONCURRENTLY with bounded parallelism, then hard-cap
+    # the total wait — whatever hasn't finished by then gets cancelled and
+    # we proceed with whatever we've got instead of hanging indefinitely.
+    sem = asyncio.Semaphore(12)
+
+    async def _bounded_scan(source, label):
+        async with sem:
+            return await _scan_one(source, label)
+
+    tasks = [asyncio.create_task(_bounded_scan(s, lbl)) for s, lbl in sources]
+    done, pending = await asyncio.wait(tasks, timeout=overall_timeout) if tasks else (set(), set())
+
+    for t in pending:
+        t.cancel()
+
+    messages_collected = []
+    for t in done:
+        try:
+            messages_collected.extend(t.result())
+        except Exception:
+            pass
+
+    elapsed = _time.time() - _t0
+    _timeout_note = f"（{len(pending)} 個來源逾時被取消）" if pending else ""
+    print(f"📊 用戶訊息掃描完成：{len(messages_collected)} 則訊息，{len(done)}/{len(sources)} 來源完成，"
+          f"耗時 {elapsed:.1f}s{_timeout_note}")
 
     # Sort by date descending, cap at 200 total
     messages_collected.sort(key=lambda m: m["date"], reverse=True)
@@ -9318,16 +9365,20 @@ class AnalyzeGroup(app_commands.Group):
         user_name = user.display_name
         user_id = user.id
 
-        await interaction.followup.send(f"🔍 正在抓取「{user_name}」的歷史訊息並分析中，請稍候...")
+        progress_msg = await interaction.followup.send(f"🔍 正在抓取「{user_name}」的歷史訊息，請稍候...")
 
-        # Fetch user messages
-        messages = await _fetch_user_messages(interaction.guild, user_id, limit=200)
+        # Fetch user messages (bounded to ~40s max — always returns, never hangs)
+        messages = await _fetch_user_messages(interaction.guild, user_id, limit=100)
 
         if not messages:
-            await interaction.followup.send(f"❌ 沒有找到「{user_name}」的訊息紀錄。")
+            await progress_msg.edit(content=f"❌ 沒有找到「{user_name}」的訊息紀錄。")
             return
 
         print(f"📊 用戶分析：抓到 {len(messages)} 則訊息，呼叫 AI 分析中...")
+        try:
+            await progress_msg.edit(content=f"🧠 已抓到 {len(messages)} 則訊息，AI 分析中，請稍候...")
+        except (discord.NotFound, discord.HTTPException):
+            pass
 
         # Use the briefing AI settings (more reliable)
         result = await _analyze_user(user_name, messages, ai_settings)
