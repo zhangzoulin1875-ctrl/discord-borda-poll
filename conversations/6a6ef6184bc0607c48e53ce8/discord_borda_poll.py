@@ -1185,7 +1185,7 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
     return True, clean
 
 
-async def call_chat_api(messages: list, settings: dict, tools: list = None) -> dict:
+async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300) -> dict:
     """Call the chat AI API (non-streaming, short replies).
     Returns the raw assistant message dict (content + possible tool_calls),
     so the caller can drive a tool-calling loop when `tools` is provided.
@@ -1322,7 +1322,13 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None) -> d
         "model": settings.get("model", "gpt-4o-mini"),
         "messages": messages,
         "temperature": 0.7,
-        "max_tokens": 300,
+        # Default kept low (300) for normal quick chat replies. Callers that
+        # need longer structured output (name rating, daily/weekly briefings,
+        # etc.) should pass a higher max_tokens explicitly — otherwise
+        # reasoning-style models (e.g. nvidia/nemotron) can burn the entire
+        # budget on internal "The user wants me to..." preamble before ever
+        # reaching the actual requested format, causing silent truncation.
+        "max_tokens": max_tokens,
         "stream_options": {"include_usage": True},
     }
     if use_tools:
@@ -8883,6 +8889,9 @@ async def _rate_nation_name(nation_name: str, ai_settings: dict) -> dict:
         result = await call_chat_api(
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
+            max_tokens=1200,  # generous budget — reasoning models can burn
+                              # a few hundred tokens on internal preamble
+                              # before ever reaching the requested format
         )
         # call_chat_api returns the assistant MESSAGE dict directly
         # (e.g. {"role": "assistant", "content": "..."}), not a full
@@ -9416,6 +9425,9 @@ async def _generate_daily_summary(messages_text: str, date_str: str) -> str:
         result = await call_chat_api(
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
+            max_tokens=2500,  # briefing asks for 500-1500 中文字 output — needs a
+                              # much bigger budget than the 300-token chat default,
+                              # plus headroom for reasoning-model preamble
         )
         # call_chat_api returns the assistant MESSAGE dict directly, not a
         # full {"choices": [...]} response.
