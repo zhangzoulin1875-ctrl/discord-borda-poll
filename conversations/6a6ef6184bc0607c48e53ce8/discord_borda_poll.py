@@ -4715,20 +4715,28 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
-    # ── 20s TOTAL BUDGET (pre-AI + AI loop combined) ──
-    # The 20s cap covers the ENTIRE pipeline from here, not just the tool loop.
-    # Subtract time already spent on pre-AI context gathering to get the
-    # remaining budget for the AI round-trip(s).
+    # ── 20s is a SOFT TARGET, not a hard system-imposed ceiling ──
+    # Plain on_message replies (not slash-command interactions) have NO
+    # Discord-side deadline — there's no ack/token to expire — so cutting the
+    # AI off at exactly 20s was a self-imposed UX goal, not a technical
+    # requirement. When the underlying API is just genuinely slow (not dead),
+    # killing the request at 20s only guarantees the user gets the canned
+    # "let me think" filler instead of a real answer. So: aim for 20s, but
+    # give the call real room (up to a much larger hard ceiling) to actually
+    # finish before giving up.
+    _AI_SOFT_TARGET = 20     # what we're aiming for — logged for visibility
+    _AI_HARD_CEILING = 60    # the ACTUAL cutoff — generous, but still bounded
     _pipeline_elapsed = _time.time() - _t_pre
-    _ai_budget = max(8, 20 - _pipeline_elapsed)  # at least 8s for AI, but aim for 20s total
-    print(f"⏱️ 預處理已花 {_pipeline_elapsed:.1f}s，AI 剩餘預算 {_ai_budget:.1f}s")
+    _ai_budget = max(10, _AI_HARD_CEILING - _pipeline_elapsed)
+    print(f"⏱️ 預處理已花 {_pipeline_elapsed:.1f}s，AI 剩餘預算 {_ai_budget:.1f}s"
+          f"（目標 {_AI_SOFT_TARGET}s 內完成，但硬上限放寬到 {_AI_HARD_CEILING}s，"
+          f"避免 API 只是比較慢就被腰斬）")
 
-    # If the remaining budget is tight (<14s), skip tools entirely — a single
-    # AI round without tools can fit in ~10-12s, but a 2-round tool loop cannot.
-    # This trades "the AI might not find extra info" for "the user gets a reply
-    # in time" — the auto-context already did forced web search, so the AI
-    # has the most important data regardless.
-    if _ai_budget < 14 and tools:
+    # If the remaining budget is tight (<20s — not enough for a safe 2-round
+    # tool loop), skip tools entirely so at least a single AI round can use
+    # most of what's left. With the larger hard ceiling this rarely triggers
+    # in practice, only when pre-AI context gathering itself ran unusually long.
+    if _ai_budget < 20 and tools:
         print(f"⚡ 時間預算緊迫（{_ai_budget:.1f}s），關閉工具以確保單輪回答能完成")
         tools = None
 
