@@ -7434,6 +7434,7 @@ QUIZ_SETTINGS_FILE = os.path.join(DATA_DIR, "quiz_settings.json")
 QUIZ_SCORES_FILE = os.path.join(DATA_DIR, "quiz_scores.json")
 QUIZ_CHAMPIONS_FILE = os.path.join(DATA_DIR, "quiz_champions.json")
 QUIZ_STATE_FILE = os.path.join(DATA_DIR, "quiz_state.json")
+QUIZ_ASKED_FILE = os.path.join(DATA_DIR, "quiz_asked_questions.json")
 
 # ── Emoji aliases: map cryptic emoji names to human-readable descriptions ──
 EMOJI_ALIASES_FILE = os.path.join(DATA_DIR, "emoji_aliases.json")
@@ -7468,6 +7469,9 @@ quiz_scores = {}      # {user_id_str: {username, daily_score, total_score, date}
 quiz_champions = []   # [{date, champion_id, champion_name, champion_score, runner_up_name, runner_up_score}]
 # Active questions: {message_id_str: {question, options, correct_index, source_title, source_url, answered_by, created_at}}
 quiz_active_questions = {}
+# Previously asked questions (dedup history) — list of normalized question strings
+quiz_asked_questions = []
+_QUIZ_MAX_HISTORY = 200  # keep last N questions to avoid unbounded growth
 
 
 def save_quiz_data():
@@ -7487,6 +7491,8 @@ def save_quiz_data():
         }
         with open(QUIZ_STATE_FILE, "w", encoding="utf-8") as f:
             json_module.dump(quiz_state, f, ensure_ascii=False, indent=2)
+        with open(QUIZ_ASKED_FILE, "w", encoding="utf-8") as f:
+            json_module.dump(quiz_asked_questions, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"⚠️ Quiz data save failed: {e}")
 
@@ -7509,6 +7515,11 @@ def load_quiz_data():
                 state = json_module.load(f)
                 quiz_active_questions = state.get("active_questions", {})
                 _quiz_last_question_time = state.get("last_question_time", 0)
+        global quiz_asked_questions
+        if os.path.exists(QUIZ_ASKED_FILE):
+            with open(QUIZ_ASKED_FILE, "r", encoding="utf-8") as f:
+                quiz_asked_questions = json_module.load(f)
+            print(f"✅ 問答歷史載入：{len(quiz_asked_questions)} 題已出過")
         print(f"✅ 問答資料載入：{'啟用' if quiz_settings.get('enabled') else '停用'}, "
               f"{len(quiz_scores)} 位玩家, {len(quiz_champions)} 位冠軍, "
               f"{len(quiz_active_questions)} 個活躍題目")
@@ -7516,9 +7527,37 @@ def load_quiz_data():
         print(f"⚠️ Quiz data load failed: {e}")
 
 
+def _normalize_quiz_question(q: str) -> str:
+    """Normalize a quiz question for dedup comparison: strip whitespace,
+    punctuation, and lowercase, so trivial wording changes don't bypass the
+    duplicate check."""
+    import re as _re
+    # Remove all whitespace, common punctuation, and lowercase
+    cleaned = _re.sub(r'[\s\W_]+', '', q).lower().strip()
+    return cleaned
+
+
+def _is_duplicate_question(question: str) -> bool:
+    """Check if a question has been asked before (fuzzy: normalized match)."""
+    if not question:
+        return False
+    norm = _normalize_quiz_question(question)
+    for prev in quiz_asked_questions:
+        prev_norm = _normalize_quiz_question(prev)
+        # Exact normalized match = duplicate
+        if norm == prev_norm:
+            return True
+        # Also check substring match (catches minor additions/removals)
+        if len(norm) > 10 and (norm in prev_norm or prev_norm in norm):
+            return True
+    return False
+
+
 async def _generate_quiz_question() -> dict | None:
     """Fetch a random micropedia article and generate a quiz question via AI.
-    Returns {question, options: [4], correct_index: 0-3, source_title, source_url} or None."""
+    Returns {question, options: [4], correct_index: 0-3, source_title, source_url} or None.
+    Retries up to 3 times if the generated question is a duplicate of one
+    previously asked."""
     if not chat_ai_settings.get("api_key"):
         print("⚠️ Quiz: No AI API key configured")
         return None
@@ -7661,6 +7700,31 @@ async def _generate_quiz_question() -> dict | None:
         "source_title": source_title,
         "source_url": source_url,
     }
+
+
+# ── Dedup wrapper: retry with different articles if AI generates a duplicate ──
+async def _generate_quiz_question_with_dedup() -> dict | None:
+    """Wrap _generate_quiz_question with duplicate detection: retry up to 3
+    times if the generated question matches one previously asked."""
+    global quiz_asked_questions
+    quiz_data = None
+    for attempt in range(3):
+        quiz_data = await _generate_quiz_question()
+        if not quiz_data:
+            continue
+        if _is_duplicate_question(quiz_data["question"]):
+            print(f"🔄 Quiz: Question #{attempt+1} is duplicate, retrying...")
+            continue
+        # Not a duplicate — record it and return
+        quiz_asked_questions.append(quiz_data["question"])
+        # Trim history to prevent unbounded growth
+        if len(quiz_asked_questions) > _QUIZ_MAX_HISTORY:
+            quiz_asked_questions = quiz_asked_questions[-_QUIZ_MAX_HISTORY:]
+        return quiz_data
+    # All 3 attempts were duplicates or failed
+    print("⚠️ Quiz: Could not generate a non-duplicate question after 3 attempts")
+    # Return the last generated one anyway (better than no question at all)
+    return quiz_data
 
 
 class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
@@ -8770,9 +8834,9 @@ async def quiz_question_loop():
                 await asyncio.sleep(15)
                 continue
 
-            # Generate the question
+            # Generate the question (with dedup — won't repeat previously asked questions)
             print("📝 Quiz: Generating new question...")
-            quiz_data = await _generate_quiz_question()
+            quiz_data = await _generate_quiz_question_with_dedup()
             if not quiz_data:
                 print("⚠️ Quiz: Failed to generate question, will retry next cycle")
                 _quiz_last_question_time = now  # Reset timer to avoid immediate retry spam
