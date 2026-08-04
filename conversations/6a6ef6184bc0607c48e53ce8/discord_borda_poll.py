@@ -5180,10 +5180,27 @@ async def on_message(message):
                                     pass
                         return  # Consumed the image, don't process further
 
-            try:
-                await _process_new_application(message, message.channel, system_type=system_type)
-            except Exception as e:
-                print(f"⚠️ 入盟申請處理錯誤：{e}")
+            # Only treat this message as an application submission if it's
+            # genuinely the post itself — for forum threads that means the
+            # thread's own opening/starter message (message.id == thread.id).
+            # Any OTHER message posted in the thread (a casual reply like
+            # "謝謝" or "之後再想吧", congratulations, follow-up chat, etc.)
+            # must NOT be re-checked against the required-fields list — its
+            # message_id never matches the stored application entry, so it
+            # was previously treated as a brand-new (empty) submission and
+            # incorrectly re-triggered the "尚不完整" warning even after the
+            # application had already been accepted/rejected.
+            # Plain text-channel applications (no thread) keep the old
+            # behavior since there's no starter/reply distinction there.
+            is_forum_reply = (
+                isinstance(message.channel, discord.Thread)
+                and message.id != message.channel.id
+            )
+            if not is_forum_reply:
+                try:
+                    await _process_new_application(message, message.channel, system_type=system_type)
+                except Exception as e:
+                    print(f"⚠️ 入盟申請處理錯誤：{e}")
 
     # Ignore bot messages
     if message.author.bot:
@@ -8998,6 +9015,7 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
         return
 
     msg_id = str(message.id)
+    thread_id_str = str(message.channel.id) if isinstance(message.channel, discord.Thread) else None
 
     # Check if this message already has an entry
     existing_entry = None
@@ -9013,6 +9031,17 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
     # If the application was already reviewed, don't re-process
     if existing_entry and existing_entry.get("status") in ("accepted", "rejected"):
         return
+
+    # Defense in depth: even if something calls this for a message that isn't
+    # the stored application's own message_id (e.g. a reply in the thread),
+    # bail out entirely once THIS thread already has a decided application.
+    # Once accepted/rejected, the thread is done — any further message in it
+    # (a "thanks", a follow-up chat, congratulations, etc.) must never be
+    # re-checked against the required-fields list again.
+    if not existing_entry and thread_id_str:
+        for a in _applications.get("entries", []):
+            if a.get("thread_id") == thread_id_str and a.get("status") in ("accepted", "rejected"):
+                return
 
     print(f"📝 偵測到入盟申請{'（編輯）' if is_edit else ''}：#{getattr(channel, 'name', '?')} by {message.author.display_name}")
 
