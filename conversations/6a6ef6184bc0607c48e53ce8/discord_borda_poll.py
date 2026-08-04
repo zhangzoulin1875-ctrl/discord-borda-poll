@@ -1314,10 +1314,10 @@ def _compute_dynamic_refine_interval() -> int:
         # Medium traffic — moderate pace
         dynamic = max(base_secs, 300)  # at least 5 min
     else:
-        # Low traffic — speed up moderately, but respect the user's base
-        # setting as a ceiling: at most half the base interval, with an
-        # absolute floor of 2 minutes (never hammer every 60s).
-        dynamic = max(120, base_secs // 2)
+        # Low traffic — go as fast as possible. No artificial floor;
+        # if there's bandwidth, the next round starts ~15s after the
+        # previous one finishes (just enough to let the loop breathe).
+        dynamic = 15
 
     # Back off if recent cycles kept yielding nothing (duplicate/empty).
     # Prevents wasting API calls every cycle when there's simply nothing
