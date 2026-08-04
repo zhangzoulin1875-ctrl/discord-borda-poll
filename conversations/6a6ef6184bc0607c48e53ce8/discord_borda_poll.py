@@ -5094,6 +5094,7 @@ async def on_message(message):
                                 entry["flag_status"] = "ok"
                                 entry["flag_valid"] = True
                                 entry["flag_image_url"] = image_url
+                                entry.setdefault("field_status", {})["國旗"] = True
                                 entry["missing_fields"] = [f for f in entry.get("missing_fields", []) if "國旗" not in f]
                                 save_applications()
 
@@ -8739,36 +8740,41 @@ def save_applications():
 
 
 # Fields that require actual content after the label (not just the label itself)
-_APPLICATION_TEXT_FIELDS = [
+# Simple line-based fields: label + colon + value on the same line, or at
+# least reliably detectable via regex/text scanning.
+_APPLICATION_SIMPLE_FIELDS = [
     ("申請國家名稱", "Name of Applicant"),
     ("國家成立日期", "Date of Establishment"),
     ("聯絡代表姓名", "Name of Representative"),
     ("聯絡方式", "Contact Information"),
     ("國家代碼", "National Code"),
     ("伺服器連結", "Server Link"),
+]
+
+# Essay fields: the applicant writes a free-form paragraph, often on the
+# line(s) AFTER the label (not after a colon on the same line), so a
+# regex/format check is unreliable — these are verified by AI reading the
+# whole application text instead.
+_APPLICATION_ESSAY_FIELDS = [
     ("申請目的與願景", "Desired goals and vision"),
     ("國家簡介", "Country Profile"),
 ]
 
+# Kept for backward compatibility with any external callers.
+_APPLICATION_TEXT_FIELDS = _APPLICATION_SIMPLE_FIELDS + _APPLICATION_ESSAY_FIELDS
 
-def _check_application_fields(content: str, has_image: bool = False) -> tuple:
-    """Check which required fields are missing or empty from the application.
-    Returns (missing_labels, flag_status) where:
-    - missing_labels: list of missing/empty field Chinese labels
-    - flag_status: "ok" / "missing" / "no_image"
-    """
+
+def _check_simple_fields(content: str) -> list:
+    """Check which SIMPLE (non-essay) fields are missing or empty.
+    Returns a list of missing/empty field Chinese labels (undecorated)."""
     missing = []
-    for zh, en in _APPLICATION_TEXT_FIELDS:
-        # Check if the label is present
+    for zh, en in _APPLICATION_SIMPLE_FIELDS:
         if zh not in content and en.lower() not in content.lower():
             missing.append(zh)
             continue
-        # Label is present — check if there's actual content after it
-        # Find the line with this label and check if anything follows the colon
         found_content = False
         for line in content.split("\n"):
             if zh in line or en.lower() in line.lower():
-                # Look for content after ：or :
                 for sep in ["：", ":"]:
                     if sep in line:
                         after = line.split(sep, 1)[1].strip()
@@ -8777,20 +8783,94 @@ def _check_application_fields(content: str, has_image: bool = False) -> tuple:
                         break
                 break
         if not found_content:
-            missing.append(f"{zh}（空白）")
+            missing.append(zh)
+    return missing
 
-    # Check flag field
-    flag_label_present = "國旗" in content or "flag" in content.lower()
-    if not flag_label_present:
-        missing.append("國旗")
-        flag_status = "missing"
-    elif not has_image:
-        missing.append("國旗（缺少圖片）")
-        flag_status = "no_image"
-    else:
-        flag_status = "ok"
 
-    return missing, flag_status
+def _essay_fallback_check(content: str, zh: str, en: str) -> bool:
+    """Heuristic fallback (no AI configured) for essay fields: grab the text
+    block between this label's line and the next label/blank divider, strip
+    the template noise ((50字) hints and the bilingual repeat line), and see
+    if meaningful text remains."""
+    import re as _re
+    lines = content.split("\n")
+    block = []
+    capturing = False
+    for line in lines:
+        if zh in line or en.lower() in line.lower():
+            capturing = True
+            continue
+        if capturing:
+            # Stop at the next numbered section / another known field label
+            if _re.match(r'^\s*[一二三四五六七八九十0-9]+[、.．]', line):
+                break
+            if any(z in line for z, _e in _APPLICATION_SIMPLE_FIELDS + _APPLICATION_ESSAY_FIELDS if z != zh):
+                break
+            block.append(line)
+    block_text = "\n".join(block)
+    # Strip word-count hints like （50字） and the bilingual template repeat
+    block_text = _re.sub(r'[（(]\s*\d+\s*(字|words?)\s*[）)]', '', block_text, flags=_re.IGNORECASE)
+    block_text = _re.sub(en, '', block_text, flags=_re.IGNORECASE)
+    block_text = block_text.strip()
+    return len(block_text) >= 5
+
+
+async def _verify_application_essays(content: str) -> dict:
+    """Use AI to read the FULL application text and judge whether the two
+    essay-style fields (申請目的與願景 / 國家簡介) actually contain a
+    substantive written answer — not just an empty/untouched template.
+    Returns {"vision": bool, "profile": bool}. Falls back to a text
+    heuristic if no AI is configured or the call fails."""
+    ps_ai = application_settings.get("ai_settings", {})
+    ai_url = ps_ai.get("api_url") or chat_ai_settings.get("api_url", "")
+    ai_key = ps_ai.get("api_key") or chat_ai_settings.get("api_key", "")
+    ai_model = ps_ai.get("model") or chat_ai_settings.get("model", "")
+
+    if not ai_url or not ai_key or not ai_model:
+        return {
+            "vision": _essay_fallback_check(content, "申請目的與願景", "Desired goals and vision"),
+            "profile": _essay_fallback_check(content, "國家簡介", "Country Profile"),
+        }
+
+    prompt = (
+        "以下是一份微國家組織的入盟申請書全文。申請書中有兩個「小作文」欄位：\n"
+        "1. 申請目的與願景（Desired goals and vision）\n"
+        "2. 國家簡介（Country Profile）\n\n"
+        "這兩個欄位的格式可能是：標籤自成一行，實際內容寫在標籤的下一行或下幾行"
+        "（不一定用冒號分隔），內容後面可能還跟著原本的雙語範本文字或字數提示"
+        "（如「（50字）」），請忽略這些範本雜訊，只判斷申請人「有沒有實際寫出"
+        "自己的內容」。\n\n"
+        "只要申請人有寫出任何有意義的文字（哪怕很簡短、口語、不完整），都算「已填寫」。"
+        "只有在該欄位完全空白、或只留下範本文字/字數提示、或整段被刪除的情況下，才算「未填寫」。\n\n"
+        "申請書全文：\n"
+        "```\n"
+        f"{content[:3000]}\n"
+        "```\n\n"
+        "請只回答 JSON（不要有其他文字）：\n"
+        '{"vision": true/false, "profile": true/false}'
+    )
+
+    try:
+        result = await call_chat_api(
+            [{"role": "user", "content": prompt}],
+            {"api_url": ai_url, "api_key": ai_key, "model": ai_model},
+            max_tokens=200,
+        )
+        text = result.get("content", "") if isinstance(result, dict) else ""
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = json_module.loads(text)
+        return {
+            "vision": bool(parsed.get("vision", False)),
+            "profile": bool(parsed.get("profile", False)),
+        }
+    except Exception as e:
+        print(f"⚠️ 申請小作文 AI 檢查失敗，改用文字啟發式判斷：{e}")
+        return {
+            "vision": _essay_fallback_check(content, "申請目的與願景", "Desired goals and vision"),
+            "profile": _essay_fallback_check(content, "國家簡介", "Country Profile"),
+        }
 
 
 async def _verify_flag_image(image_url: str) -> bool:
@@ -8932,23 +9012,73 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
 
     print(f"📝 偵測到入盟申請{'（編輯）' if is_edit else ''}：#{getattr(channel, 'name', '?')} by {message.author.display_name}")
 
-    # ── Check required text fields ──
+    # ── Sticky per-field pass tracking ──
+    # Once a field is verified as OK, it stays OK on every future re-check —
+    # we never re-flag a previously-passed field as missing again, even if
+    # this particular edit event doesn't carry the same evidence (e.g. the
+    # flag image was uploaded as a separate message, not as an attachment on
+    # this edited post; or the AI essay check already passed once before).
+    field_status = dict(existing_entry.get("field_status", {})) if existing_entry else {}
+
+    # 1) Simple line-based fields
+    simple_missing = set(_check_simple_fields(message.content))
+    for zh, _en in _APPLICATION_SIMPLE_FIELDS:
+        field_status[zh] = field_status.get(zh, False) or (zh not in simple_missing)
+
+    # 2) Essay fields — only ask the AI if not already passed (saves calls,
+    #    and honors "already-passed fields are never re-checked").
+    need_vision_check = not field_status.get("申請目的與願景", False)
+    need_profile_check = not field_status.get("國家簡介", False)
+    if need_vision_check or need_profile_check:
+        essay_result = await _verify_application_essays(message.content)
+        if need_vision_check:
+            field_status["申請目的與願景"] = essay_result.get("vision", False)
+        if need_profile_check:
+            field_status["國家簡介"] = essay_result.get("profile", False)
+
+    # 3) Flag image — sticky too. If already verified valid before (e.g. via
+    #    the separate flag-upload flow), skip re-verification entirely.
     has_image = bool(message.attachments)
     image_url = str(message.attachments[0].url) if has_image else ""
-    missing_fields, flag_status = _check_application_fields(message.content, has_image)
+    already_flag_ok = field_status.get("國旗", False) or bool(existing_entry and existing_entry.get("flag_valid"))
+    flag_label_present = "國旗" in message.content or "flag" in message.content.lower()
+    flag_reason = ""  # for display purposes only
+    if already_flag_ok:
+        flag_ok = True
+        flag_image_url = (existing_entry.get("flag_image_url") if existing_entry else "") or image_url
+    elif not flag_label_present:
+        flag_ok = False
+        flag_reason = "missing"
+        flag_image_url = ""
+    elif has_image:
+        flag_ok = await _verify_flag_image(image_url)
+        flag_reason = "" if flag_ok else "invalid"
+        flag_image_url = image_url if flag_ok else ""
+    else:
+        flag_ok = False
+        flag_reason = "no_image"
+        flag_image_url = ""
+    field_status["國旗"] = flag_ok
+    # Always prefer the verified flag image for display/thumbnail purposes —
+    # this may come from a previous separate flag-upload message, not
+    # necessarily from this specific message's own attachments.
+    image_url = flag_image_url or image_url
 
-    # ── Flag image verification via vision AI ──
-    flag_valid = False
-    if flag_status == "ok" and image_url:
-        # There's an image and the flag label is present — verify with vision AI
-        flag_valid = await _verify_flag_image(image_url)
-        if not flag_valid:
+    # ── Build missing_fields display list from current field_status ──
+    missing_fields = []
+    for zh, _en in _APPLICATION_SIMPLE_FIELDS + _APPLICATION_ESSAY_FIELDS:
+        if not field_status.get(zh, False):
+            missing_fields.append(f"{zh}（空白）")
+    if not field_status.get("國旗", False):
+        if flag_reason == "missing":
+            missing_fields.append("國旗")
+        elif flag_reason == "no_image":
+            missing_fields.append("國旗（缺少圖片）")
+        else:
             missing_fields.append("國旗（AI 判定非旗幟）")
-    elif flag_status == "ok" and not has_image:
-        # Label present but no image attached
-        missing_fields.append("國旗（缺少圖片）")
 
     all_pass = len(missing_fields) == 0
+    flag_valid = field_status.get("國旗", False)
 
     # Extract applicant nation name
     applicant_name = ""
@@ -8966,8 +9096,11 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
         entry = existing_entry
         entry["raw_content"] = message.content[:2000]
         entry["missing_fields"] = missing_fields
-        entry["flag_status"] = flag_status
+        entry["field_status"] = field_status
+        entry["flag_status"] = "ok" if flag_valid else (flag_reason or "missing")
         entry["flag_valid"] = flag_valid
+        if flag_valid and flag_image_url:
+            entry["flag_image_url"] = flag_image_url
         entry["last_checked"] = _time.strftime("%Y-%m-%d %H:%M")
         entry["applicant_nation"] = applicant_name or entry.get("applicant_nation", "")
     else:
@@ -8990,8 +9123,10 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
             "message_url": str(message.jump_url) if hasattr(message, 'jump_url') else "",
             "raw_content": message.content[:2000],
             "missing_fields": missing_fields,
-            "flag_status": flag_status,
+            "field_status": field_status,
+            "flag_status": "ok" if flag_valid else (flag_reason or "missing"),
             "flag_valid": flag_valid,
+            "flag_image_url": flag_image_url if flag_valid else "",
             "system_type": system_type,
             "status": "pending",
             "secretariat_notified": False,
