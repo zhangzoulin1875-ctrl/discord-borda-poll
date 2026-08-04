@@ -4089,30 +4089,35 @@ async def _drive_download(filename: str) -> str:
         return None
 
 
+_drive_file_hashes = {}  # filename -> last-uploaded content hash (for skip-unchanged)
+
 async def sync_to_drive():
-    """Sync ALL local data files to Google Drive.
-    Dynamically scans the local data/ directory for every *.json file —
-    no hardcoded filename list — so any new persistent state (present or
-    future) is automatically backed up without needing a code change."""
+    """Sync changed local data files to Google Drive.
+    Only uploads files whose content has actually changed since the last sync —
+    this avoids ~34 redundant API calls every 20s when most files are unchanged."""
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") and not os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"):
         return
-    has_oauth = bool(os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"))
-    has_sa = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"))
-    cid = os.getenv("GOOGLE_CLIENT_ID", "") or os.getenv("OAUTH_CLIENT_ID", "")
-    print(f"🔄 Drive 同步開始：OAuth={'✅' if has_oauth else '❌'} SA={'✅' if has_sa else '❌'} client_id={'✅' if cid else '❌'}")
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     if not os.path.isdir(data_dir):
         return
     ok_count = 0
     fail_count = 0
+    skip_count = 0
     json_filenames = [f for f in os.listdir(data_dir) if f.endswith(".json")]
     for filename in json_filenames:
         filepath = os.path.join(data_dir, filename)
         try:
             with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read()
-            success = await _drive_upload(filename, content)
+                file_content = f.read()
+            # Skip if content hasn't changed since last upload
+            import hashlib as _hashlib
+            content_hash = _hashlib.md5(file_content.encode("utf-8")).hexdigest()
+            if _drive_file_hashes.get(filename) == content_hash:
+                skip_count += 1
+                continue
+            success = await _drive_upload(filename, file_content)
             if success:
+                _drive_file_hashes[filename] = content_hash
                 ok_count += 1
             else:
                 fail_count += 1
@@ -4120,9 +4125,10 @@ async def sync_to_drive():
             fail_count += 1
             print(f"⚠️ Sync {filename} failed: {e}")
     if fail_count > 0:
-        print(f"⚠️ Drive 同步：{ok_count} 成功，{fail_count} 失敗（見上方詳細錯誤，共 {len(json_filenames)} 個檔案）")
-    else:
-        print(f"✅ Drive 同步完成：{ok_count}/{len(json_filenames)} 個檔案成功")
+        print(f"⚠️ Drive 同步：{ok_count} 成功，{fail_count} 失敗，{skip_count} 跳過（共 {len(json_filenames)} 個檔案）")
+    elif ok_count > 0:
+        print(f"✅ Drive 同步完成：{ok_count} 上傳，{skip_count} 跳過（共 {len(json_filenames)} 個檔案）")
+    # If everything was skipped, stay quiet — no point spamming logs every 20s
 
 
 async def load_from_drive():
@@ -4168,12 +4174,38 @@ async def load_from_drive():
     print(f"🔄 Drive 載入完成：{ok_count} 個成功，{fail_count} 個失敗（共 {len(json_files)} 個檔案）")
 
 
+def _cleanup_cooldowns():
+    """Trim cooldown dicts and other unbounded structures — keep only recent
+    entries. Called every 60s from drive_sync_loop."""
+    now = _time.time()
+    one_hour_ago = now - 3600
+    # Cooldown dicts
+    for d in (_correction_cooldowns, _feedback_cooldowns):
+        stale = [k for k, v in d.items() if v < one_hour_ago]
+        for k in stale:
+            d.pop(k, None)
+    # quiz_scores: remove users with 0 total score and old date (>7 days)
+    today = _time.strftime("%Y-%m-%d")
+    old_date = _time.strftime("%Y-%m-%d", _time.localtime(now - 7 * 86400))
+    stale_scores = [
+        uid for uid, e in quiz_scores.items()
+        if e.get("total_score", 0) == 0 and e.get("date", "") < old_date
+    ]
+    for uid in stale_scores:
+        quiz_scores.pop(uid, None)
+    if stale_scores:
+        print(f"🧹 清理 {len(stale_scores)} 個過期且零分的 quiz 玩家記錄")
+
+
 async def drive_sync_loop():
-    """Background task: sync local data to Google Drive every 20 seconds.
-    Kept short so a hot redeploy / crash never loses more than ~20s of state."""
+    """Background task: sync local data to Google Drive every 60 seconds.
+    Since we now skip unchanged files, 60s is fine — a crash loses at most
+    60s of state, but most cycles are no-ops anyway."""
     while True:
-        await asyncio.sleep(20)
+        await asyncio.sleep(60)
         await sync_to_drive()
+        # Periodic cleanup of cooldown dicts to prevent unbounded growth
+        _cleanup_cooldowns()
 
 
 async def api_get_chat_ai_settings(request):
@@ -4800,15 +4832,15 @@ async def setup_hook():
     for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup()]:
         try:
             bot.tree.add_command(grp)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ 無法註冊指令群組 {type(grp).__name__}: {e}")
 
     # Register message context-menu commands (right-click a message → Apps)
     for ctx_cmd in [ai_organize_agenda]:
         try:
             bot.tree.add_command(ctx_cmd)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ 無法註冊右鍵選單指令 {getattr(ctx_cmd, 'name', '?')}: {e}")
 
     # Global interaction check: block blacklisted users from ALL commands
     async def _tree_interaction_check(interaction: discord.Interaction) -> bool:
@@ -4818,8 +4850,8 @@ async def setup_hook():
                     "🚫 你已被列入黑名單，無法使用此機器人的任何功能。",
                     ephemeral=True,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ 黑名單通知發送失敗: {e}")
             print(f"🚫 黑名單用戶 {interaction.user.display_name} ({interaction.user.id}) 嘗試使用指令已攔截")
             return False
         return True
@@ -4979,8 +5011,8 @@ async def on_message(message):
         try:
             ref_msg = await message.channel.fetch_message(message.reference.message_id)
             is_reply_to_bot = ref_msg.author.id == bot.user.id if ref_msg else False
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ fetch ref_msg 例外: {e}")
 
     # Worthiness check
     worth, clean = _is_worth_replying(
@@ -4998,12 +5030,7 @@ async def on_message(message):
         perms = message.channel.permissions_for(message.guild.me)
         if not perms or not perms.send_messages:
             print(f"   ❌ Bot 沒有在 #{message.channel} 發送訊息的權限！請檢查頻道權限設定。")
-            try:
-                # Try sending via a different method — sometimes read_messages is enough
-                # to receive but send_messages is denied
-                pass
-            except Exception:
-                pass
+            # (no alternative send method — just return cleanly)
             return
 
     # ── Abuse detection: fast path (before AI call) ──
@@ -5089,8 +5116,8 @@ async def on_message(message):
             print(f"⚠️ AI 回覆為空，發送 fallback 訊息")
             try:
                 await message.reply("🤔 讓我想想...", mention_author=False)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ fallback 回覆發送失敗: {e}")
         # ── Abuse detection: AI path (after AI call) ──
         if mod_action and chat_ai_settings.get("abuse_detection_enabled", False):
             duration = min(mod_action, 86400)
@@ -5105,14 +5132,14 @@ async def on_message(message):
         print(f"⚠️ Chat AI timeout (API call took too long)")
         try:
             await message.reply("⏰ 回覆逾時，請稍後再試。", mention_author=False)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ AI 回覆後處理例外: {e}")
     except Exception as e:
         print(f"⚠️ Chat AI error: {e}")
         try:
             await message.reply("⚠️ 發生錯誤，請稍後再試。", mention_author=False)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"⚠️ on_message finally 例外: {e}")
     finally:
         _user_generating.discard(uid_str)
 
@@ -7843,6 +7870,10 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
             "guild_id": self.guild_id,
         }
         _corrections.setdefault("entries", []).append(entry)
+    # Cap pending corrections to prevent unbounded growth
+    if len(_corrections["entries"]) > 200:
+        # Keep the most recent 200
+        _corrections["entries"] = _corrections["entries"][-200:]
         save_corrections()
 
         # Log to AI log channel if configured
@@ -8013,6 +8044,9 @@ async def _process_new_proposal(message: discord.Message, channel):
         "reject_reason": "",
     }
     _proposals.setdefault("entries", []).append(entry)
+    # Cap proposals to prevent unbounded growth
+    if len(_proposals["entries"]) > 500:
+        _proposals["entries"] = _proposals["entries"][-500:]
     save_proposals()
 
     # ── 立即在原提案處回覆確認訊息（不論秘書處頻道是否設定成功都會顯示）──
@@ -8277,6 +8311,9 @@ def _create_feedback_entry(rating: str, reason: str, custom_text: str, question:
         "image_url": "",
     }
     _feedback.setdefault("entries", []).append(entry)
+    # Cap feedback entries to prevent unbounded growth
+    if len(_feedback["entries"]) > 500:
+        _feedback["entries"] = _feedback["entries"][-500:]
     save_feedback()
     _feedback_cooldowns[user_id] = now
     return entry
@@ -10658,6 +10695,9 @@ async def daily_summary_loop():
                     "guild": guild.name,
                     "message_count": messages_text.count("\n") + 1,
                 })
+                # Cap knowledge base at 365 entries to prevent unbounded growth
+                if len(_knowledge_base["summaries"]) > 365:
+                    _knowledge_base["summaries"] = _knowledge_base["summaries"][-365:]
                 save_knowledge_base()
                 print(f"📚 每日摘要已儲存：{date_str}（知識庫共 {len(_knowledge_base['summaries'])} 篇）")
 
