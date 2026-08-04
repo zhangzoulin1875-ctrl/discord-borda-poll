@@ -408,13 +408,17 @@ function navigate(view) {
 
 async function loadGuilds() {
   const data = await api('/api/guilds');
+  // api_guilds returns a plain array of {id, name, icon_url} — NOT {guilds:[...]}.
+  // (previous version read data.guilds, which was always undefined, so the
+  // list silently rendered empty — this is the actual "dashboard空了" bug.)
   if (data.error) { if (data.status === 401) { showOnly('login-view'); return; } showError('載入伺服器失敗：' + data.error); return; }
+  const guilds = Array.isArray(data) ? data : (data.guilds || []);
   const list = document.getElementById('guild-list');
-  list.innerHTML = data.guilds.map(g => `
+  if (!guilds.length) { list.innerHTML = '<p class="text-gray-400 text-sm col-span-full">找不到你有管理員權限的伺服器。</p>'; return; }
+  list.innerHTML = guilds.map(g => `
     <div class="bg-[#2b2d31] rounded-xl p-4 cursor-pointer hover:bg-[#3a3c43] transition" onclick="selectGuild('${g.id}','${escAttr(g.name)}')">
       ${g.icon_url ? `<img src="${g.icon_url}" class="w-12 h-12 rounded-xl mb-2">` : `<div class="w-12 h-12 rounded-xl bg-[#5865f2] flex items-center justify-center text-xl font-bold mb-2">${g.name[0]}</div>`}
       <h3 class="font-semibold text-sm">${escHtml(g.name)}</h3>
-      <p class="text-xs text-gray-400">${g.polls_count || 0} 個投票</p>
     </div>
   `).join('');
 }

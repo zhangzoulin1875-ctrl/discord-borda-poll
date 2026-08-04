@@ -161,6 +161,10 @@ async def api_list_nations(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
+    if not ge or not _is_guild_admin(ge):
+        return web.json_response({"error": "forbidden"}, status=403)
     entries = [e for e in _member_nations["entries"] if e.get("guild_id") == gid]
     # Strip internal fields, return safe dict
     out = []
@@ -185,6 +189,10 @@ async def api_create_nation(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
+    if not ge or not _is_guild_admin(ge):
+        return web.json_response({"error": "forbidden：僅管理員可註冊會員國"}, status=403)
     data = await request.json()
 
     name_zh = (data.get("name_zh") or "").strip()
@@ -237,6 +245,10 @@ async def api_update_nation(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
+    if not ge or not _is_guild_admin(ge):
+        return web.json_response({"error": "forbidden：僅管理員可編輯會員國"}, status=403)
     nid = request.match_info["nid"]
     data = await request.json()
 
@@ -272,6 +284,10 @@ async def api_delete_nation(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     gid = int(request.match_info["gid"])
+    guilds = await _fetch_guilds(user["access_token"])
+    ge = next((g for g in guilds if int(g["id"]) == gid), None)
+    if not ge or not _is_guild_admin(ge):
+        return web.json_response({"error": "forbidden：僅管理員可刪除會員國"}, status=403)
     nid = request.match_info["nid"]
 
     before = len(_member_nations["entries"])
@@ -9653,11 +9669,11 @@ class MemberNationGroup(app_commands.Group):
         rep2: discord.Member = None,
         rep3: discord.Member = None,
     ):
-        # Only bot owner or guild admins can register
+        # Registration is restricted to Administrator permission (or bot owner) —
+        # manage_guild alone is no longer sufficient.
         if not is_owner(interaction):
-            perms = interaction.user.guild_permissions
-            if not (perms.administrator or perms.manage_guild):
-                await interaction.response.send_message("❌ 此指令需要管理員權限。", ephemeral=True)
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
                 return
 
         name_zh = name_zh.strip()
@@ -9838,10 +9854,10 @@ class MemberNationGroup(app_commands.Group):
         app_commands.Choice(name="已除籍", value="removed"),
     ])
     async def recategorize(self, interaction: discord.Interaction, iso_code: str, category: app_commands.Choice[str]):
+        # Restricted to Administrator permission (or bot owner)
         if not is_owner(interaction):
-            perms = interaction.user.guild_permissions
-            if not (perms.administrator or perms.manage_guild):
-                await interaction.response.send_message("❌ 此指令需要管理員權限。", ephemeral=True)
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
                 return
 
         iso_code = iso_code.strip().upper()
