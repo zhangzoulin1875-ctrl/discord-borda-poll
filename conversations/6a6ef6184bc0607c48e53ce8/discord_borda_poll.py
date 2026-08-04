@@ -6394,8 +6394,8 @@ class SystemGroup(app_commands.Group):
         app_commands.Choice(name="查看最近評價", value="recent"),
     ])
     async def system_feedback(self, interaction: discord.Interaction, action: app_commands.Choice[str]):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
@@ -6456,8 +6456,8 @@ class SystemGroup(app_commands.Group):
         app_commands.Choice(name="拒絕", value="reject"),
     ])
     async def system_corrections(self, interaction: discord.Interaction, action: app_commands.Choice[str], entry_id: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
 
@@ -6729,8 +6729,8 @@ class SystemGroup(app_commands.Group):
     # ── 提案系統指令 ──
     @app_commands.command(name="proposal_toggle", description="開啟/關閉提案區 AI 自動受理系統（機器人擁有者限定）")
     async def proposal_toggle(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         proposal_settings["enabled"] = not proposal_settings.get("enabled", False)
         save_proposal_settings()
@@ -6742,8 +6742,8 @@ class SystemGroup(app_commands.Group):
     async def proposal_channel(self, interaction: discord.Interaction,
                                action: str,
                                channel: Union[discord.TextChannel, discord.ForumChannel] = None):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if action == "list":
             channels = proposal_settings.get("proposal_channels", [])
@@ -6779,8 +6779,8 @@ class SystemGroup(app_commands.Group):
     @app_commands.command(name="proposal_secretariat", description="設定秘書處通知頻道（機器人擁有者限定）")
     @app_commands.describe(channel="秘書處頻道（AI 會在此發送提案通知供管理員受理/駁回）")
     async def proposal_secretariat(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         proposal_settings["secretariat_channel"] = channel.id
         save_proposal_settings()
@@ -6788,8 +6788,8 @@ class SystemGroup(app_commands.Group):
 
     @app_commands.command(name="proposal_status", description="查看提案系統目前設定狀態（機器人擁有者限定）")
     async def proposal_status(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         enabled = proposal_settings.get("enabled", False)
         channels = proposal_settings.get("proposal_channels", [])
@@ -6818,8 +6818,8 @@ class SystemGroup(app_commands.Group):
     @app_commands.command(name="proposal_list", description="查看提案記錄（機器人擁有者限定）")
     @app_commands.describe(status="篩選狀態：pending=待審, accepted=已受理, rejected=已駁回, all=全部")
     async def proposal_list(self, interaction: discord.Interaction, status: str = "all"):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         entries = _proposals.get("entries", [])
@@ -6849,8 +6849,8 @@ class SystemGroup(app_commands.Group):
     # ── 入盟申請系統指令 ──
     @app_commands.command(name="application_toggle", description="開啟/關閉入盟申請自動回覆系統（機器人擁有者限定）")
     async def application_toggle(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         application_settings["enabled"] = not application_settings.get("enabled", False)
         save_application_settings()
@@ -6862,8 +6862,8 @@ class SystemGroup(app_commands.Group):
     async def application_channel(self, interaction: discord.Interaction,
                                   action: str,
                                   channel: Union[discord.TextChannel, discord.ForumChannel] = None):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if action == "list":
             channels = application_settings.get("application_channels", [])
@@ -6901,8 +6901,8 @@ class SystemGroup(app_commands.Group):
     async def application_council_channel(self, interaction: discord.Interaction,
                                             action: str,
                                             channel: Union[discord.TextChannel, discord.ForumChannel] = None):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         channels = application_settings.get("council_channels", [])
         if action == "list":
@@ -6934,8 +6934,8 @@ class SystemGroup(app_commands.Group):
     @app_commands.command(name="application_secretariat", description="設定入盟申請秘書處通知頻道（機器人擁有者限定）")
     @app_commands.describe(channel="秘書處頻道（系統會在此發送申請通知供管理員審核）")
     async def application_secretariat(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         application_settings["secretariat_channel"] = channel.id
         save_application_settings()
@@ -6944,8 +6944,8 @@ class SystemGroup(app_commands.Group):
     @app_commands.command(name="application_council", description="設定理事國審核通知頻道（機器人擁有者限定）")
     @app_commands.describe(channel="理事國頻道（系統會在此發送申請通知供理事國審核）")
     async def application_council(self, interaction: discord.Interaction, channel: Union[discord.TextChannel, discord.ForumChannel]):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         application_settings["council_channel"] = channel.id
         save_application_settings()
@@ -6953,8 +6953,8 @@ class SystemGroup(app_commands.Group):
 
     @app_commands.command(name="application_status", description="查看入盟申請系統目前設定狀態（機器人擁有者限定）")
     async def application_status(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         enabled = application_settings.get("enabled", False)
         channels = application_settings.get("application_channels", [])
@@ -7157,8 +7157,8 @@ class ChatGroup(app_commands.Group):
 
     @app_commands.command(name="abuse_toggle", description="開關濫用偵測系統（機器人擁有者限定）")
     async def chat_abuse_toggle(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         chat_ai_settings["abuse_detection_enabled"] = not chat_ai_settings.get("abuse_detection_enabled", False)
         save_chat_ai_settings()
@@ -7173,8 +7173,8 @@ class ChatGroup(app_commands.Group):
         app_commands.Choice(name="高（嚴格，輕微挑釁也禁）", value="high"),
     ])
     async def chat_abuse_level(self, interaction: discord.Interaction, level: app_commands.Choice[str]):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         chat_ai_settings["abuse_detection_strictness"] = level.value
         save_chat_ai_settings()
@@ -7183,8 +7183,8 @@ class ChatGroup(app_commands.Group):
     @app_commands.command(name="abuse_admins", description="設定是否允許禁言管理員（機器人擁有者限定）")
     @app_commands.describe(enabled="True=可以禁言管理員, False=跳過管理員")
     async def chat_abuse_admins(self, interaction: discord.Interaction, enabled: bool):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         chat_ai_settings["abuse_mute_admins"] = enabled
         save_chat_ai_settings()
@@ -7195,8 +7195,8 @@ class ChatGroup(app_commands.Group):
 
     @app_commands.command(name="abuse_log", description="查看最近的禁言記錄（機器人擁有者限定）")
     async def chat_abuse_log(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if not mod_action_log:
             await interaction.response.send_message("📋 目前沒有任何禁言記錄。", ephemeral=True)
@@ -7211,8 +7211,8 @@ class ChatGroup(app_commands.Group):
     @app_commands.command(name="abuse_unmute", description="手動解除禁言（機器人擁有者限定）")
     @app_commands.describe(user="要解除禁言的用戶")
     async def chat_abuse_unmute(self, interaction: discord.Interaction, user: discord.Member):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         try:
             await user.timeout(None, reason=f"由 {interaction.user.display_name} 手動解除禁言")
@@ -7535,8 +7535,8 @@ class ChatGroup(app_commands.Group):
         alias="人類可讀的別名（例如：偉廷微笑）。留空則清除該表情的別名",
     )
     async def system_emoji_alias(self, interaction: discord.Interaction, emoji: str, alias: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
 
         # Parse emoji: user may type the raw <:name:id> or just the name
@@ -8514,14 +8514,14 @@ class ProposalReviewView(discord.ui.View):
 
     @discord.ui.button(label="受理", style=discord.ButtonStyle.success, emoji="✅")
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_owner(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
             return
         await _handle_proposal_decision(interaction, self.proposal_id, "accepted", "")
 
     @discord.ui.button(label="駁回", style=discord.ButtonStyle.danger, emoji="❌")
     async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_owner(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
             return
         modal = ProposalRejectModal(self.proposal_id)
@@ -9352,14 +9352,14 @@ class ApplicationReviewView(discord.ui.View):
 
     @discord.ui.button(label="審核通過", style=discord.ButtonStyle.success, emoji="✅")
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_owner(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
             return
         await _handle_application_decision(interaction, self.app_id, "accepted", "")
 
     @discord.ui.button(label="退回", style=discord.ButtonStyle.danger, emoji="❌")
     async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_owner(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
             return
         modal = ApplicationRejectModal(self.app_id)
@@ -10241,8 +10241,8 @@ class QuizGroup(app_commands.Group):
 
     @app_commands.command(name="toggle", description="開啟/關閉 AI 問答功能（機器人擁有者限定）")
     async def quiz_toggle(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         quiz_settings["enabled"] = not quiz_settings.get("enabled", False)
         save_quiz_data()
@@ -10252,8 +10252,8 @@ class QuizGroup(app_commands.Group):
     @app_commands.command(name="channel", description="設定 AI 問答頻道（機器人擁有者限定）")
     @app_commands.describe(channel="要設為問答頻道的頻道")
     async def quiz_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         quiz_settings["channel_id"] = str(channel.id)
         quiz_settings["guild_id"] = str(interaction.guild.id) if interaction.guild else None
@@ -10267,8 +10267,8 @@ class QuizGroup(app_commands.Group):
     @app_commands.command(name="interval", description="設定出題間隔分鐘數（機器人擁有者限定）")
     @app_commands.describe(minutes="間隔分鐘數（預設 30）")
     async def quiz_interval(self, interaction: discord.Interaction, minutes: int):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if minutes < 5:
             await interaction.response.send_message("❌ 間隔至少 5 分鐘。", ephemeral=True)
@@ -10349,8 +10349,8 @@ class QuizGroup(app_commands.Group):
 
     @app_commands.command(name="now", description="立即出題（機器人擁有者限定）")
     async def quiz_now(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         channel_id = quiz_settings.get("channel_id")
         if not channel_id:
@@ -10423,8 +10423,8 @@ class BriefingGroup(app_commands.Group):
     @app_commands.command(name="daily_set", description="設定每日自動快報時間（機器人擁有者限定）")
     @app_commands.describe(time="執行時間 HH:MM（例如：23:00）", channel="發佈快報的頻道")
     async def daily_set(self, interaction: discord.Interaction, time: str, channel: discord.TextChannel):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         # Validate time format
         try:
@@ -10445,8 +10445,8 @@ class BriefingGroup(app_commands.Group):
 
     @app_commands.command(name="daily_off", description="關閉每日自動快報（機器人擁有者限定）")
     async def daily_off(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         briefing_settings["daily_enabled"] = False
         save_briefing_settings()
@@ -10455,8 +10455,8 @@ class BriefingGroup(app_commands.Group):
     @app_commands.command(name="daily_now", description="立即生成每日快報（機器人擁有者限定）")
     @app_commands.describe(channel="發佈快報的頻道（預設：當前頻道）")
     async def daily_now(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if not ai_settings["api_key"]:
             await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定。", ephemeral=True)
@@ -10481,8 +10481,8 @@ class BriefingGroup(app_commands.Group):
         app_commands.Choice(name="週日", value="6"),
     ])
     async def weekly_set(self, interaction: discord.Interaction, day: app_commands.Choice[str], time: str, channel: discord.TextChannel):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         try:
             h, m = time.strip().split(":")
@@ -10504,8 +10504,8 @@ class BriefingGroup(app_commands.Group):
 
     @app_commands.command(name="weekly_off", description="關閉每週自動公報（機器人擁有者限定）")
     async def weekly_off(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         briefing_settings["weekly_enabled"] = False
         save_briefing_settings()
@@ -10514,8 +10514,8 @@ class BriefingGroup(app_commands.Group):
     @app_commands.command(name="weekly_now", description="立即生成每週公報（機器人擁有者限定）")
     @app_commands.describe(channel="發佈公報的頻道（預設：當前頻道）")
     async def weekly_now(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if not ai_settings["api_key"]:
             await interaction.response.send_message("❌ 尚未設定 AI API Key。請到 Dashboard → ⚙️ AI 設定。", ephemeral=True)
@@ -11046,8 +11046,8 @@ class AnalyzeGroup(app_commands.Group):
     @app_commands.command(name="user", description="分析指定用戶的發言風格、MBTI 人格分析與一句話（機器人擁有者限定）")
     @app_commands.describe(user="要分析的用戶")
     async def analyze_user(self, interaction: discord.Interaction, user: discord.Member):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
 
         await interaction.response.defer()
