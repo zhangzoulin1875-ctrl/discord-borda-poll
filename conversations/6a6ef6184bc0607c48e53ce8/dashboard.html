@@ -250,7 +250,7 @@
         <h2 class="text-xl font-bold">🌐 全局百科掃描 — 關係譜圖</h2>
       </div>
       <div class="flex gap-2">
-        <button id="scan-start-btn" onclick="startGlobalScan()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">🚀 開始掃描</button>
+        <button id="scan-start-btn" onclick="startGlobalScan()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">🚀 掃描說明</button>
         <button id="scan-refresh-btn" onclick="loadScanResult()" class="bg-[#4e5058] hover:bg-[#3a3c43] px-4 py-2 rounded-lg text-sm font-semibold">🔄 重新載入</button>
       </div>
     </div>
@@ -750,13 +750,20 @@ async function showScanPanel() {
 
 async function startGlobalScan() {
   if (!currentGuild) { alert('請先選擇伺服器'); navigate('guilds'); return; }
-  if (!confirm('開始全局百科掃描？\n這會讀取 micropedia.site 上所有條目，分批用 AI 提取國家/人物關係。\n過程可能需要 10-30 分鐘，視條目數量而定。')) return;
-  const r = await api(`/api/guilds/${currentGuild}/global-scan/start`, 'POST');
-  if (r.error) {
-    if (r.status === 409) { alert('掃描正在進行中'); return; }
-    alert('啟動失敗：' + r.error); return;
-  }
-  showToast('🚀 全局掃描已啟動');
+  const renderUrl = window.location.origin;
+  const cmd = `python scan_runner.py --url ${renderUrl} --guild ${currentGuild}`;
+  alert(
+    '🔒 全局掃描已改為本地執行模式\n\n' +
+    'Render 的 CPU/RAM 不足以爬取全部百科條目。\n' +
+    '請在你自己的電腦上執行以下指令：\n\n' +
+    '1. 下載 scan_runner.py（從 GitHub repo）\n' +
+    '2. pip install aiohttp\n' +
+    '3. 執行:\n' +
+    cmd + '\n\n' +
+    '掃描完成後，結果會自動上傳到這裡。\n' +
+    '此頁面會即時顯示進度（每 5 秒更新）。'
+  );
+  // Start polling for progress even though we didn't start it locally
   startScanPolling();
 }
 

@@ -204,6 +204,9 @@ async def keep_alive_server():
     app.router.add_post("/api/guilds/{gid}/global-scan/start", api_global_scan_start)
     app.router.add_get("/api/guilds/{gid}/global-scan/status", api_global_scan_status)
     app.router.add_get("/api/guilds/{gid}/global-scan/result", api_global_scan_result)
+    app.router.add_post("/api/guilds/{gid}/global-scan/batch", api_global_scan_batch)
+    app.router.add_post("/api/guilds/{gid}/global-scan/init", api_global_scan_init)
+    app.router.add_post("/api/guilds/{gid}/global-scan/finish", api_global_scan_finish)
     print(f"📊 Dashboard routes registered")
 
     runner = web.AppRunner(app)
@@ -460,6 +463,149 @@ async def api_global_scan_result(request):
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     return web.json_response(_global_scan_result)
+
+
+def _check_scan_api_key(request):
+    """Validate the X-Scan-Key header for local script access."""
+    key = os.getenv("SCAN_API_KEY", "")
+    if not key:
+        return True  # No key set = open access (user can set one later)
+    provided = request.headers.get("X-Scan-Key", "")
+    return provided == key
+
+
+async def api_global_scan_init(request):
+    """Initialize a new scan session from the local runner script."""
+    if not _check_scan_api_key(request):
+        return web.json_response({"error": "invalid api key"}, status=403)
+    global _global_scan_state
+    try:
+        data = await request.json()
+        total = int(data.get("total", 0))
+        _global_scan_state = {
+            "status": "running",
+            "progress": 0,
+            "total": total,
+            "current_batch": "等待本地腳本傳送...",
+            "started_at": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S"),
+            "completed_at": "",
+            "error": "",
+            "batch_count": 0,
+            "mode": "local-runner",
+        }
+        _global_scan_result.setdefault("total_articles", total)
+        _save_global_scan_result()
+        return web.json_response({"status": "initialized", "total": total})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_global_scan_batch(request):
+    """Receive a batch of article texts from the local runner, run AI extraction."""
+    if not _check_scan_api_key(request):
+        return web.json_response({"error": "invalid api key"}, status=403)
+    global _global_scan_state
+    try:
+        data = await request.json()
+        articles = data.get("articles", [])
+        batch_idx = int(data.get("batch_idx", 0))
+        batch_count = int(data.get("batch_count", 0))
+
+        if not articles:
+            return web.json_response({"status": "empty", "extracted": None})
+
+        batch_text = "\n\n".join(
+            f"【{a.get('title', '?')}】\n{a.get('content', '')}" for a in articles
+        )
+
+        titles_preview = ", ".join(a.get("title", "?") for a in articles[:3])
+        _global_scan_state["current_batch"] = f"批次 {batch_idx + 1}/{batch_count}: {titles_preview}..."
+
+        system_prompt = (
+            '你是一位歷史學家與微國家學學者。請分析以下維基條目內容，'
+            '提取國家/組織/個人、關係、關鍵人物、重大事件。\n'
+            '請以繁體中文輸出嚴格 JSON 格式（不可使用 markdown 程式碼區塊），包含以下 4 個 key：\n'
+            '1. countries: [{"name": "...", "aliases": ["..."], "type": "micronation/organization/individual", '
+            '"description": "...", "status": "active/dissolved/unknown"}]\n'
+            '2. relationships: [{"from": "...", "to": "...", "type": "alliance/conflict/treaty/trade/diplomatic/cultural/personal", '
+            '"description": "...", "context": "...", "status": "active/historical/ended"}]\n'
+            '3. key_figures: [{"name": "...", "affiliation": "...", "role": "...", "description": "..."}]\n'
+            '4. major_events: [{"event": "...", "participants": ["..."], "date": "...", "description": "...", "consequences": "..."}]\n'
+            '僅輸出 JSON 物件，請勿附加任何額外文字。'
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": '條目內容:\n' + batch_text}
+        ]
+
+        extracted = None
+        try:
+            resp = await call_chat_api(messages, chat_ai_settings, max_tokens=4000)
+            ai_text = resp.get("content") or ""
+            ai_text_clean = ai_text.strip()
+            if ai_text_clean.startswith("```"):
+                ai_text_clean = re.sub(r"^```(?:json)?\s*", "", ai_text_clean, flags=re.IGNORECASE)
+                ai_text_clean = re.sub(r"\s*```$", "", ai_text_clean)
+                ai_text_clean = ai_text_clean.strip()
+
+            try:
+                extracted = json_module.loads(ai_text_clean)
+            except Exception:
+                m = re.search(r"\{.*\}", ai_text, re.DOTALL)
+                if m:
+                    try:
+                        extracted = json_module.loads(m.group(0))
+                    except Exception:
+                        extracted = None
+
+            if isinstance(extracted, dict):
+                _merge_scan_batch(extracted)
+        except Exception as aie:
+            print(f"⚠️ 本地掃描 AI 解析失敗 (批次 {batch_idx + 1}): {aie}")
+
+        _global_scan_state["progress"] += len(articles)
+        _global_scan_state["batch_count"] = batch_idx + 1
+        _global_scan_result["last_updated"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Consolidation every 10 batches
+        if (batch_idx + 1) % 10 == 0:
+            await _consolidate_global_scan_graph()
+
+        _save_global_scan_result()
+        return web.json_response({
+            "status": "ok",
+            "extracted_count": sum(len(extracted.get(k, [])) for k in ["countries", "relationships", "key_figures", "major_events"]) if isinstance(extracted, dict) else 0,
+            "progress": _global_scan_state["progress"],
+            "total": _global_scan_state["total"],
+        })
+
+    except Exception as e:
+        import traceback
+        print(f"❌ 本地掃描批次處理失敗: {e}\n{traceback.format_exc()}")
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_global_scan_finish(request):
+    """Run final consolidation and mark scan as completed."""
+    if not _check_scan_api_key(request):
+        return web.json_response({"error": "invalid api key"}, status=403)
+    global _global_scan_state
+    try:
+        await _consolidate_global_scan_graph()
+        _global_scan_state["status"] = "completed"
+        _global_scan_state["completed_at"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
+        _global_scan_result["last_updated"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
+        _save_global_scan_result()
+        return web.json_response({
+            "status": "completed",
+            "countries": len(_global_scan_result.get("countries", [])),
+            "relationships": len(_global_scan_result.get("relationships", [])),
+            "key_figures": len(_global_scan_result.get("key_figures", [])),
+            "major_events": len(_global_scan_result.get("major_events", [])),
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
 
 
 # ──────────────────────────────────────────────
