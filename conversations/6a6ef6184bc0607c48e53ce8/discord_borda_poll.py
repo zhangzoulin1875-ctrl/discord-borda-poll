@@ -3583,18 +3583,22 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # nuanced background knowledge about micronations beyond what a
         # single micropedia lookup can provide.
         if ai_refined_knowledge:
-            # Only inject the most recent 20 entries to keep prompt size sane
-            recent_knowledge = ai_refined_knowledge[-20:]
-            knowledge_lines = []
-            for k in recent_knowledge:
-                knowledge_lines.append(f"- [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
-            system_prompt += (
-                f"\n\n─── AI 精煉知識庫（交叉比對頻道與百科所得）───\n"
-                f"以下是系統長期累積的微國家知識，涵蓋成員國動態、冷門歷史、制度設計等。"
-                f"你可以利用這些背景知識來豐富你的回答，但仍以百科查詢結果為準。\n"
-                + "\n".join(knowledge_lines)
-            )
-            print(f"🔍 AI精煉: 已注入 {len(recent_knowledge)} 條知識到 AI 上下文")
+            # Only inject HIGH-confidence entries (wiki-sourced).
+            # Low-confidence entries (from Discord chatter) are excluded to
+            # prevent knowledge pollution.
+            high_confidence = [k for k in ai_refined_knowledge if k.get("confidence", "high") == "high"]
+            recent_knowledge = high_confidence[-10:]  # last 10 to keep prompt lean
+            if recent_knowledge:
+                knowledge_lines = []
+                for k in recent_knowledge:
+                    knowledge_lines.append(f"- [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
+                system_prompt += (
+                    f"\n\n─── 微國家百科冷知識（僅供參考，非絕對事實）───\n"
+                    f"以下是由百科文章中萃取的冷門知識摘要。這些僅是背景參考，"
+                    f"如果你不確定，請以即時百科查詢結果為準，不要直接引用這些摘要。\n"
+                    + "\n".join(knowledge_lines)
+                )
+                print(f"🔍 AI精煉: 已注入 {len(recent_knowledge)} 條高可信度知識 (篩掉 {len(ai_refined_knowledge) - len(high_confidence)} 條低可信度)")
 
         system_prompt += (
             f"\n\n─── search_micropedia 工具 ───\n"
@@ -7123,6 +7127,20 @@ class SystemGroup(app_commands.Group):
         save_refine_settings()
         await interaction.response.send_message(f"✅ AI 精煉間隔已設為 {minutes} 分鐘。", ephemeral=True)
 
+    @app_commands.command(name="refine_purge", description="清空 AI 精煉知識庫（機器人擁有者限定）")
+    async def refine_purge(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        count = len(ai_refined_knowledge)
+        ai_refined_knowledge.clear()
+        save_refine_knowledge()
+        await interaction.response.send_message(
+            f"🧹 已清空 AI 精煉知識庫（原本 {count} 條）。\n"
+            f"新的知識將在下次精煉時重新累積（僅接受高可信度百科知識）。",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="refine_status", description="查看 AI 精煉系統狀態（機器人擁有者限定）")
     async def refine_status(self, interaction: discord.Interaction):
         if not is_admin(interaction):
@@ -7150,7 +7168,12 @@ class SystemGroup(app_commands.Group):
         else:
             lines.append(f"動態間隔：{dynamic_secs} 秒（API 流量低 {cpm} calls/min，已加速）")
         lines.append(f"當前 API 速率：{cpm} calls/min")
+        # Confidence breakdown
+        high_count = sum(1 for k in ai_refined_knowledge if k.get("confidence", "high") == "high")
+        low_count = knowledge_count - high_count
         lines.append(f"知識庫：{knowledge_count}/{max_entries} ({kb_ratio:.0%})")
+        lines.append(f"  ├─ 高可信度（百科來源）：{high_count} 條")
+        lines.append(f"  └─ 低可信度（閒聊來源）：{low_count} 條（不會注入 AI 上下文）")
         if ch_id:
             lines.append(f"發布頻道：<#{ch_id}> (`{ch_id}`)")
         else:
@@ -10581,23 +10604,30 @@ async def _ai_refine_cross_reference(channel_snippets, wiki_text):
         return None
 
     system_prompt = (
-        "你是一個微國家知識精煉引擎。你會收到兩份資料：\n"
-        "1. Discord 伺服器中多個頻道的近期訊息摘要\n"
-        "2. 微國家百科的一篇百科文章\n\n"
-        "你的任務是交叉比對這兩份資料，找出以下類型的知識：\n"
-        "- 頻道討論中提到但百科未記載的微國家資訊（成員國動態、事件、人物）\n"
-        "- 百科中有但頻道成員可能不知道的冷門知識（歷史細節、制度設計、條約內容）\n"
-        "- 頻道討論與百科資料之間的關聯（例如某人提到的國家在百科中有詳細條目）\n"
-        "- 有趣但容易被忽略的微國家知識\n\n"
-        "每次只萃取一條最有價值的知識（不要貪多），格式如下 JSON：\n"
-        '{"topic": "簡短主題（10字以內）", "summary": "一句話摘要", "details": "詳細說明（50-200字）"}\n'
+        "你是一個微國家百科知識精煉引擎。你會收到兩份資料：\n"
+        "1. 微國家百科的一篇百科文章（可信來源）\n"
+        "2. Discord 伺服器中多個頻道的近期訊息摘要（不可信來源）\n\n"
+        "【重要原則】\n"
+        "- 百科文章是唯一可信的知識來源。你萃取的知識必須主要來自百科內容。\n"
+        "- Discord 訊息只是用戶閒聊，可能包含玩笑、猜測、錯誤資訊。\n"
+        "  絕對不要把 Discord 訊息中未經百科證實的內容當作「知識」來萃取。\n"
+        "- 你只能從百科文章中萃取冷門但有趣的知識（歷史細節、制度設計、條約內容、文化特色等）。\n"
+        "- 如果百科文章內容太少或沒有值得萃取的知識，直接回覆空結果。\n"
+        "- 不要為了「每次都要產出」而從 Discord 閒聊中編造知識。寧可空手而歸。\n\n"
+        "每次只萃取一條知識，格式如下 JSON：\n"
+        '{"topic": "簡短主題（10字以內）", "summary": "一句話摘要", "details": "詳細說明（50-200字）", "confidence": "high或low"}\n'
+        "- confidence=high：知識完全來自百科文章內容\n"
+        "- confidence=low：知識部分依賴 Discord 訊息（此類知識不會被長期使用）\n"
         "嚴格回覆 JSON，不要加 markdown code block 或其他文字。\n"
-        "如果資料中沒有值得萃取的知識，回覆 {\"topic\": \"\", \"summary\": \"\", \"details\": \"\"}"
+        "如果沒有值得萃取的百科知識，回覆 "
+        '{\"topic\": \"\", \"summary\": \"\", \"details\": \"\", \"confidence\": \"\"}'
     )
 
+    # Wiki goes FIRST as the primary/trusted source.
+    # Discord goes SECOND as unverified reference context only.
     user_content = (
-        f"── Discord 頻道訊息摘要 ──\n{channel_snippets[:3000]}\n\n"
-        f"── 微國家百科文章 ──\n{wiki_text[:2000]}"
+        f"── 【可信】微國家百科文章 ──\n{wiki_text[:2500]}\n\n"
+        f"── 【不可信】Discord 頻道訊息（僅供參考，不代表事實）──\n{channel_snippets[:1500]}"
     )
 
     messages = [
@@ -10644,17 +10674,25 @@ async def _ai_refine_cross_reference(channel_snippets, wiki_text):
     topic = data.get("topic", "").strip()
     summary = data.get("summary", "").strip()
     details = data.get("details", "").strip()
+    confidence = data.get("confidence", "").strip().lower()
     if not topic or not summary:
         return None
-    return {"topic": topic, "summary": summary, "details": details}
+    # Only accept high-confidence (wiki-sourced) knowledge.
+    # Low-confidence (Discord-sourced) entries are discarded.
+    if confidence != "high":
+        print(f"🔍 AI精煉: 拒絕低可信度知識「{topic}」 (confidence={confidence})")
+        return None
+    return {"topic": topic, "summary": summary, "details": details, "confidence": confidence}
 
 
 async def _ai_refine_post_to_channel(channel, knowledge_entry):
     """Post the refined knowledge as a self-talk message in the designated channel."""
+    conf = knowledge_entry.get("confidence", "high")
+    conf_label = "✅ 高可信度（百科來源）" if conf == "high" else "⚠️ 低可信度（僅供參考）"
     embed = discord.Embed(
         title=f"🔬 AI 精煉 — {knowledge_entry['topic']}",
-        description=knowledge_entry["summary"],
-        color=discord.Color.teal(),
+        description=f"{knowledge_entry['summary']}\n\n{conf_label}",
+        color=discord.Color.teal() if conf == "high" else discord.Color.orange(),
         timestamp=discord.utils.utcnow(),
     )
     embed.add_field(
@@ -10761,6 +10799,7 @@ async def ai_refine_loop():
                 "topic": knowledge["topic"],
                 "summary": knowledge["summary"],
                 "details": knowledge["details"],
+                "confidence": knowledge.get("confidence", "high"),
             }
             ai_refined_knowledge.append(entry)
             max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
