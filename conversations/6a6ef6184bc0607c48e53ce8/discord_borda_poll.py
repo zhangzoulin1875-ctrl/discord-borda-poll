@@ -7892,10 +7892,10 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
             "guild_id": self.guild_id,
         }
         _corrections.setdefault("entries", []).append(entry)
-    # Cap pending corrections to prevent unbounded growth
-    if len(_corrections["entries"]) > 200:
-        # Keep the most recent 200
-        _corrections["entries"] = _corrections["entries"][-200:]
+        # Cap pending corrections to prevent unbounded growth
+        if len(_corrections["entries"]) > 200:
+            # Keep the most recent 200
+            _corrections["entries"] = _corrections["entries"][-200:]
         save_corrections()
 
         # Log to AI log channel if configured
