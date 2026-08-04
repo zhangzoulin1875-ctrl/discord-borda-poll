@@ -4906,6 +4906,8 @@ async def setup_hook():
     load_blacklist()
     load_feedback()
     load_proposal_settings()
+    load_application_settings()
+    load_applications()
     load_proposals()
     # Load local files (will use Drive-downloaded data if available)
     load_polls_from_disk()
@@ -4939,26 +4941,38 @@ async def setup_hook():
 
 @bot.event
 async def on_thread_create(thread):
-    """Detect new forum threads in proposal channels and auto-analyze."""
-    if not proposal_settings.get("enabled"):
-        return
-    proposal_channels = proposal_settings.get("proposal_channels", [])
+    """Detect new forum threads in proposal/application channels and auto-process."""
     parent_id = thread.parent_id if hasattr(thread, 'parent_id') else None
-    if parent_id and parent_id in proposal_channels:
-        # Forum thread created in a proposal channel
-        try:
-            # Wait a moment for the starter message to be available
-            await asyncio.sleep(2)
-            starter = await thread.fetch_message(thread.id) if hasattr(thread, 'id') else None
-            if starter:
-                # Skip bot messages
-                if starter.author.bot:
-                    return
-                # Create a synthetic message-like call
-                await _process_new_proposal(starter, thread.parent)
-                print(f"📋 論壇貼文提案已處理：#{thread.name}")
-        except Exception as e:
-            print(f"⚠️ 論壇貼文提案處理失敗：{e}")
+
+    # ── 提案區偵測 ──
+    if proposal_settings.get("enabled"):
+        proposal_channels = proposal_settings.get("proposal_channels", [])
+        if parent_id and parent_id in proposal_channels:
+            try:
+                await asyncio.sleep(2)
+                starter = await thread.fetch_message(thread.id) if hasattr(thread, 'id') else None
+                if starter:
+                    if starter.author.bot:
+                        return
+                    await _process_new_proposal(starter, thread.parent)
+                    print(f"📋 論壇貼文提案已處理：#{thread.name}")
+            except Exception as e:
+                print(f"⚠️ 論壇貼文提案處理失敗：{e}")
+
+    # ── 入盟申請區偵測 ──
+    if application_settings.get("enabled"):
+        application_channels = application_settings.get("application_channels", [])
+        if parent_id and parent_id in application_channels:
+            try:
+                await asyncio.sleep(2)
+                starter = await thread.fetch_message(thread.id) if hasattr(thread, 'id') else None
+                if starter:
+                    if starter.author.bot:
+                        return
+                    await _process_new_application(starter, thread.parent)
+                    print(f"📝 論壇貼文入盟申請已處理：#{thread.name}")
+            except Exception as e:
+                print(f"⚠️ 論壇貼文入盟申請處理失敗：{e}")
 
 
 @bot.event
@@ -4980,6 +4994,18 @@ async def on_message(message):
                     await _process_new_proposal(message, message.channel)
                 except Exception as e:
                     print(f"⚠️ 提案處理錯誤：{e}")
+
+    # ── 入盟申請區偵測 ──
+    if application_settings.get("enabled") and message.guild:
+        application_channels = application_settings.get("application_channels", [])
+        ch_id = message.channel.id
+        parent_id = getattr(message.channel, 'parent_id', None)
+        if ch_id in application_channels or (parent_id and parent_id in application_channels):
+            if not message.author.bot:
+                try:
+                    await _process_new_application(message, message.channel)
+                except Exception as e:
+                    print(f"⚠️ 入盟申請處理錯誤：{e}")
 
     # Ignore bot messages
     if message.author.bot:
@@ -6654,6 +6680,92 @@ class ChatGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="chat", description="AI 聊天設定")
 
+    # ── 入盟申請系統指令 ──
+    @app_commands.command(name="application_toggle", description="開啟/關閉入盟申請自動回覆系統（機器人擁有者限定）")
+    async def application_toggle(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        application_settings["enabled"] = not application_settings.get("enabled", False)
+        save_application_settings()
+        status = "啟用" if application_settings["enabled"] else "停用"
+        await interaction.response.send_message(f"📝 入盟申請系統已{status}。", ephemeral=True)
+
+    @app_commands.command(name="application_channel", description="新增/移除入盟申請區頻道（機器人擁有者限定）")
+    @app_commands.describe(action="add=新增頻道, remove=移除頻道, list=列出所有頻道", channel="要新增/移除的頻道（支援文字頻道與論壇頻道）")
+    async def application_channel(self, interaction: discord.Interaction,
+                                  action: str,
+                                  channel: Union[discord.TextChannel, discord.ForumChannel] = None):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        if action == "list":
+            channels = application_settings.get("application_channels", [])
+            if not channels:
+                await interaction.response.send_message("📝 目前沒有設定任何入盟申請區頻道。", ephemeral=True)
+                return
+            lines = [f"• <#{cid}> (`{cid}`)" for cid in channels]
+            await interaction.response.send_message(f"📝 **入盟申請區頻道列表（{len(channels)} 個）**\n" + "\n".join(lines), ephemeral=True)
+            return
+        if not channel:
+            await interaction.response.send_message("❌ 請指定一個頻道。", ephemeral=True)
+            return
+        channels = application_settings.get("application_channels", [])
+        if action == "add":
+            if channel.id not in channels:
+                channels.append(channel.id)
+                application_settings["application_channels"] = channels
+                save_application_settings()
+                await interaction.response.send_message(f"✅ 已新增 #{channel.name} 為入盟申請區頻道。", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ #{channel.name} 已經是入盟申請區頻道。", ephemeral=True)
+        elif action == "remove":
+            if channel.id in channels:
+                channels.remove(channel.id)
+                application_settings["application_channels"] = channels
+                save_application_settings()
+                await interaction.response.send_message(f"✅ 已移除 #{channel.name} 的入盟申請區頻道設定。", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ #{channel.name} 不在入盟申請區頻道列表中。", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ action 只能是 add、remove 或 list。", ephemeral=True)
+
+    @app_commands.command(name="application_secretariat", description="設定入盟申請秘書處通知頻道（機器人擁有者限定）")
+    @app_commands.describe(channel="秘書處頻道（系統會在此發送申請通知供管理員審核）")
+    async def application_secretariat(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        application_settings["secretariat_channel"] = channel.id
+        save_application_settings()
+        await interaction.response.send_message(f"✅ 入盟申請秘書處通知頻道已設為 #{channel.name}。", ephemeral=True)
+
+    @app_commands.command(name="application_status", description="查看入盟申請系統目前設定狀態（機器人擁有者限定）")
+    async def application_status(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        enabled = application_settings.get("enabled", False)
+        channels = application_settings.get("application_channels", [])
+        sec_id = application_settings.get("secretariat_channel")
+
+        lines = [f"📝 **入盟申請系統狀態**", ""]
+        lines.append(f"啟用狀態：{'✅ 已啟用' if enabled else '❌ 已停用（用 /system application_toggle 開啟）'}")
+        if channels:
+            ch_list = "\n".join(f"  • <#{cid}> (`{cid}`)" for cid in channels)
+            lines.append(f"入盟申請區頻道（{len(channels)} 個）：\n{ch_list}")
+        else:
+            lines.append("入盟申請區頻道：❌ 尚未設定任何頻道")
+        if sec_id:
+            lines.append(f"秘書處通知頻道：<#{sec_id}> (`{sec_id}`)")
+        else:
+            lines.append("秘書處通知頻道：❌ 尚未設定（用 /system application_secretariat 設定）")
+        lines.append("")
+        lines.append(f"已收錄申請總數：{len(_applications.get('entries', []))} 筆")
+
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
     @app_commands.command(name="toggle", description="開啟/關閉 AI 聊天功能（機器人擁有者限定）")
     async def chat_toggle(self, interaction: discord.Interaction):
         if not is_owner(interaction):
@@ -8318,6 +8430,413 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
             print(f"❌ 頻道 {orig_ch} 不支援 send，無法通知提案人")
     except Exception as e:
         print(f"❌ 通知提案人失敗：{e}")
+
+
+# ════════════════════════════════════════════════════════════
+# 入盟申請自動回覆系統
+# When a new thread/message appears in a designated application channel,
+# auto-reply with confirmation, check required fields, and notify the
+# secretariat channel with 審核通過/退回 buttons.
+# ════════════════════════════════════════════════════════════
+
+APPLICATION_SETTINGS_FILE = os.path.join(DATA_DIR, "application_settings.json")
+APPLICATIONS_FILE = os.path.join(DATA_DIR, "applications.json")
+
+# Required fields in an 入盟申請書
+APPLICATION_REQUIRED_FIELDS = [
+    ("申請國家名稱", "Name of Applicant"),
+    ("國家成立日期", "Date of Establishment"),
+    ("聯絡代表姓名", "Name of Representative"),
+    ("聯絡方式", "Contact Information"),
+    ("國家代碼", "National Code"),
+    ("伺服器連結", "Server Link"),
+    ("國旗", "flag"),
+    ("申請目的與願景", "Desired goals and vision"),
+    ("國家簡介", "Country Profile"),
+]
+
+application_settings = {
+    "enabled": False,
+    "application_channels": [],     # list of channel IDs to monitor
+    "secretariat_channel": None,   # channel ID for admin notifications
+    "ai_settings": {               # optional: separate AI config
+        "api_url": "",
+        "api_key": "",
+        "model": "",
+    },
+}
+
+# Application records
+_applications = {"entries": []}
+
+
+def load_application_settings():
+    global application_settings
+    try:
+        if os.path.exists(APPLICATION_SETTINGS_FILE):
+            with open(APPLICATION_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+            # Merge: preserve defaults for missing keys
+            for key in application_settings:
+                if key in loaded:
+                    application_settings[key] = loaded[key]
+    except Exception as e:
+        print(f"⚠️ 載入入盟申請設定失敗：{e}")
+
+
+def save_application_settings():
+    _save_json_file(APPLICATION_SETTINGS_FILE, application_settings)
+
+
+def load_applications():
+    global _applications
+    try:
+        if os.path.exists(APPLICATIONS_FILE):
+            with open(APPLICATIONS_FILE, "r", encoding="utf-8") as f:
+                _applications = json_module.load(f)
+            if "entries" not in _applications:
+                _applications = {"entries": _applications if isinstance(_applications, list) else []}
+            print(f"✅ 載入入盟申請記錄：{len(_applications['entries'])} 筆")
+    except Exception as e:
+        print(f"⚠️ 載入入盟申請記錄失敗：{e}")
+
+
+def save_applications():
+    _save_json_file(APPLICATIONS_FILE, _applications)
+
+
+def _check_application_fields(content: str) -> list:
+    """Check which required fields are missing from the application.
+    Returns a list of missing field names (Chinese labels)."""
+    missing = []
+    for zh, en in APPLICATION_REQUIRED_FIELDS:
+        # Check if either the Chinese or English label appears in the content
+        if zh not in content and en.lower() not in content.lower():
+            missing.append(zh)
+    return missing
+
+
+async def _process_new_application(message: discord.Message, channel):
+    """Auto-reply to a membership application and notify secretariat."""
+    if not application_settings.get("enabled"):
+        return
+    application_channels = application_settings.get("application_channels", [])
+    if channel.id not in application_channels:
+        return
+
+    # Avoid re-processing the same message
+    msg_id = str(message.id)
+    existing = [a for a in _applications.get("entries", []) if a.get("message_id") == msg_id]
+    if existing:
+        return
+
+    print(f"📝 偵測到入盟申請：#{getattr(channel, 'name', '?')} by {message.author.display_name}")
+
+    # Check required fields
+    missing_fields = _check_application_fields(message.content)
+
+    # Extract applicant nation name (try to find it after the label)
+    applicant_name = ""
+    for line in message.content.split("\n"):
+        if "申請國家名稱" in line or "Name of Applicant" in line:
+            # Take everything after the colon
+            parts = line.split("：")
+            if len(parts) > 1:
+                applicant_name = parts[1].strip()[:50]
+            break
+
+    now = _time.time()
+    app_id = str(int(now * 1000))
+    entry = {
+        "id": app_id,
+        "date": _time.strftime("%Y-%m-%d %H:%M"),
+        "_ts": now,
+        "guild_id": message.guild.id if message.guild else 0,
+        "applicant_id": str(message.author.id),
+        "applicant_name": message.author.display_name,
+        "applicant_nation": applicant_name,
+        "channel_id": channel.id,
+        "channel_name": getattr(channel, 'name', ''),
+        "thread_id": (
+            str(message.channel.id) if hasattr(message, 'channel') and isinstance(message.channel, discord.Thread) and message.channel.id != channel.id
+            else (str(message.id) if hasattr(message, 'thread') and message.thread else None)
+        ),
+        "message_id": msg_id,
+        "message_url": str(message.jump_url) if hasattr(message, 'jump_url') else "",
+        "raw_content": message.content[:2000],
+        "missing_fields": missing_fields,
+        "status": "pending",
+        "reviewed_by": "",
+        "review_date": "",
+        "reject_reason": "",
+    }
+    _applications.setdefault("entries", []).append(entry)
+    # Cap to prevent unbounded growth
+    if len(_applications["entries"]) > 500:
+        _applications["entries"] = _applications["entries"][-500:]
+    save_applications()
+
+    # ── Auto-reply to the application post ──
+    if missing_fields:
+        fields_text = "\n".join(f"❌ {f}" for f in missing_fields)
+        ack_desc = (
+            f"📝 已收到入盟申請，正在轉交秘書處審核。\n\n"
+            f"**⚠️ 以下欄位似乎尚未填寫：**\n{fields_text}\n\n"
+            f"請補齊上述欄位後重新提交，或直接編輯此貼文補充。"
+        )
+        ack_color = discord.Color.orange()
+    else:
+        ack_desc = (
+            f"📝 已收到入盟申請，所有必填欄位齊全。\n\n"
+            f"申請已轉交秘書處審核，請耐心等候結果。"
+        )
+        ack_color = discord.Color.blue()
+
+    try:
+        ack_embed = discord.Embed(
+            title="✅ 入盟申請已收到",
+            description=ack_desc,
+            color=ack_color,
+        )
+        if applicant_name:
+            ack_embed.add_field(name="申請國家", value=applicant_name, inline=True)
+        ack_embed.add_field(name="申請人", value=message.author.display_name, inline=True)
+        ack_embed.set_footer(text="ICEA 國際總會 · 入盟申請審核系統")
+        await message.reply(embed=ack_embed, mention_author=False)
+    except Exception as e:
+        print(f"⚠️ 入盟申請確認訊息發送失敗（不影響審核流程）：{e}")
+
+    # Send notification to secretariat channel
+    sec_ch_id = application_settings.get("secretariat_channel")
+    if not sec_ch_id:
+        print("⚠️ 入盟申請系統：未設定秘書處頻道，無法發送通知")
+        return
+
+    sec_ch = None
+    for guild in bot.guilds:
+        ch = guild.get_channel(int(sec_ch_id))
+        if ch:
+            sec_ch = ch
+            break
+
+    if not sec_ch:
+        print(f"⚠️ 入盟申請系統：找不到秘書處頻道 {sec_ch_id}")
+        return
+
+    embed = discord.Embed(
+        title="📝 新入盟申請",
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="申請人", value=message.author.display_name, inline=True)
+    embed.add_field(name="申請頻道", value=f"#{getattr(channel, 'name', '?')}", inline=True)
+    embed.add_field(name="申請時間", value=entry["date"], inline=True)
+    if applicant_name:
+        embed.add_field(name="申請國家", value=applicant_name, inline=True)
+    if missing_fields:
+        embed.add_field(
+            name="⚠️ 缺漏欄位",
+            value=", ".join(missing_fields),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="欄位檢查", value="✅ 全部必填欄位齊全", inline=False)
+    embed.add_field(
+        name="原文連結",
+        value=message.jump_url if hasattr(message, 'jump_url') else "(無)",
+        inline=False,
+    )
+    embed.add_field(name="申請 ID", value=app_id, inline=False)
+    embed.set_footer(text="請管理員點擊下方按鈕審核通過或退回此申請")
+
+    view = ApplicationReviewView(app_id)
+    try:
+        await sec_ch.send(embed=embed, view=view)
+        print(f"✅ 入盟申請通知已發送至秘書處 #{sec_ch.name}")
+    except Exception as e:
+        print(f"❌ 入盟申請通知發送失敗：{e}")
+
+
+class ApplicationRejectModal(discord.ui.Modal, title="退回入盟申請原因"):
+    reason_input = discord.ui.TextInput(
+        label="請說明退回原因",
+        style=discord.TextStyle.paragraph,
+        placeholder="例：欄位不完整/資料有誤/不符合入盟標準...",
+        required=True,
+        max_length=300,
+    )
+
+    def __init__(self, app_id: str):
+        super().__init__(timeout=300)
+        self.app_id = app_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await _handle_application_decision(interaction, self.app_id, "rejected", self.reason_input.value.strip())
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        print(f"⚠️ 入盟申請駁回 Modal 錯誤：{error}")
+        try:
+            await interaction.response.send_message("⚠️ 提交退回原因時發生錯誤。", ephemeral=True)
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
+
+
+class ApplicationReviewView(discord.ui.View):
+    """審核通過/退回 buttons for application notifications in the secretariat channel."""
+
+    def __init__(self, app_id: str):
+        super().__init__(timeout=None)
+        self.app_id = app_id
+
+    @discord.ui.button(label="審核通過", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+            return
+        await _handle_application_decision(interaction, self.app_id, "accepted", "")
+
+    @discord.ui.button(label="退回", style=discord.ButtonStyle.danger, emoji="❌")
+    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+            return
+        modal = ApplicationRejectModal(self.app_id)
+        await interaction.response.send_modal(modal)
+
+
+async def _handle_application_decision(interaction: discord.Interaction, app_id: str,
+                                         decision: str, reject_reason: str):
+    """Process accept/reject of a membership application and notify the applicant."""
+    entry = None
+    for a in _applications.get("entries", []):
+        if a.get("id") == app_id:
+            entry = a
+            break
+
+    if not entry:
+        try:
+            await interaction.response.send_message("❌ 找不到此申請記錄（可能已被清除）。", ephemeral=True)
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
+        return
+
+    if entry["status"] != "pending":
+        try:
+            await interaction.response.send_message(
+                f"⚠️ 此申請已被{'審核通過' if entry['status']=='accepted' else '退回'}過了。",
+                ephemeral=True
+            )
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
+        return
+
+    # Update record
+    entry["status"] = decision
+    entry["reviewed_by"] = interaction.user.display_name
+    entry["review_date"] = _time.strftime("%Y-%m-%d %H:%M")
+    entry["reject_reason"] = reject_reason
+    save_applications()
+
+    # Update the secretariat notification
+    status_emoji = "✅" if decision == "accepted" else "❌"
+    status_text = "審核通過" if decision == "accepted" else "已退回"
+    embed = interaction.message.embeds[0] if interaction.message.embeds else None
+    if embed:
+        embed.color = discord.Color.green() if decision == "accepted" else discord.Color.red()
+        embed.add_field(
+            name=f"{status_emoji} 審核結果",
+            value=f"{status_text} by {interaction.user.display_name} ({entry['review_date']})"
+                  + (f"\n原因：{reject_reason}" if reject_reason else ""),
+            inline=False,
+        )
+        embed.set_footer(text=f"申請已{status_text}")
+        try:
+            await interaction.response.edit_message(embed=embed, view=None)
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
+    else:
+        try:
+            await interaction.response.send_message(f"{status_emoji} 申請已{status_text}。", ephemeral=True)
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
+
+    # ── Notify the applicant in the original channel/thread ──
+    orig_ch_id = entry.get("channel_id")
+    guild_id = entry.get("guild_id", 0)
+    thread_id = entry.get("thread_id")
+    orig_ch = None
+    target_thread = None
+    for guild in bot.guilds:
+        if guild.id == guild_id:
+            orig_ch = guild.get_channel(int(orig_ch_id)) if orig_ch_id else None
+            if thread_id:
+                try:
+                    target_thread = guild.get_thread(int(thread_id))
+                except Exception as e:
+                    print("⚠️ 靜默例外:", e)
+                if not target_thread and orig_ch:
+                    try:
+                        target_thread = await orig_ch.fetch_thread(int(thread_id))
+                    except Exception as e:
+                        print("⚠️ 靜默例外:", e)
+            break
+
+    if not orig_ch and not target_thread:
+        print(f"⚠️ 找不到原始申請頻道 {orig_ch_id}，無法通知申請人")
+        return
+
+    applicant_mention = f"<@{entry.get('applicant_id')}>"
+    nation_name = entry.get("applicant_nation", "")
+    if decision == "accepted":
+        notify_embed = discord.Embed(
+            title="🎉 入盟申請審核通過",
+            description=(
+                f"{applicant_mention} 你的入盟申請已通過審核！\n\n"
+                + (f"**申請國家：** {nation_name}\n" if nation_name else "")
+                + f"**審核人：** {interaction.user.display_name}\n"
+                f"**審核時間：** {entry['review_date']}\n\n"
+                f"歡迎正式加入 ICEA 國際總會！請留意後續的入盟程序與會員國權利義務說明。"
+            ),
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow(),
+        )
+    else:
+        notify_embed = discord.Embed(
+            title="❌ 入盟申請未通過",
+            description=(
+                f"{applicant_mention} 你的入盟申請未通過審核。\n\n"
+                + (f"**申請國家：** {nation_name}\n" if nation_name else "")
+                + f"**退回原因：** {reject_reason or '未提供'}\n"
+                f"**審核人：** {interaction.user.display_name}\n"
+                f"**審核時間：** {entry['review_date']}\n\n"
+                f"請根據退回原因修正後重新提交申請。"
+            ),
+            color=discord.Color.red(),
+            timestamp=discord.utils.utcnow(),
+        )
+
+    try:
+        if target_thread:
+            await target_thread.send(embed=notify_embed)
+            print(f"✅ 入盟申請結果已發送至論壇貼文 #{target_thread.name}")
+            return
+        msg_id = entry.get("message_id")
+        if msg_id and hasattr(orig_ch, 'fetch_message'):
+            try:
+                orig_msg = await orig_ch.fetch_message(int(msg_id))
+                await orig_msg.reply(embed=notify_embed, mention_author=True)
+                print(f"✅ 入盟申請結果已回覆至 #{orig_ch.name}")
+                return
+            except Exception as e:
+                print(f"⚠️ fetch_message 失敗 ({e})，改用頻道發送")
+        if hasattr(orig_ch, 'send'):
+            await orig_ch.send(embed=notify_embed)
+            print(f"✅ 入盟申請結果已發送至 #{orig_ch.name}")
+        else:
+            print(f"❌ 頻道 {orig_ch} 不支援 send，無法通知申請人")
+    except Exception as e:
+        print(f"❌ 通知申請人失敗：{e}")
+
 
 
 def _create_feedback_entry(rating: str, reason: str, custom_text: str, question: str,
