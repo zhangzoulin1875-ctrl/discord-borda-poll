@@ -4976,6 +4976,45 @@ async def on_thread_create(thread):
 
 
 @bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    """Detect edits to application posts and re-check them."""
+    # Only care about non-bot messages in application channels
+    if after.author.bot:
+        return
+    if not application_settings.get("enabled") or not after.guild:
+        return
+    application_channels = application_settings.get("application_channels", [])
+    ch_id = after.channel.id
+    parent_id = getattr(after.channel, 'parent_id', None)
+    if ch_id not in application_channels and (not parent_id or parent_id not in application_channels):
+        return
+
+    # Check if we already have an entry for this message
+    msg_id = str(after.id)
+    existing = [a for a in _applications.get("entries", []) if a.get("message_id") == msg_id]
+    if not existing:
+        # Not a tracked application — ignore
+        return
+
+    entry = existing[0]
+    # Only re-check if not yet sent to secretariat, or if it was sent but
+    # we want to re-validate (status is still pending)
+    if entry.get("status") in ("accepted", "rejected"):
+        return  # Already reviewed, don't re-process
+
+    print(f"📝 偵測到入盟申請編輯：msg {msg_id} by {after.author.display_name}")
+
+    try:
+        # Determine the channel object (parent for forum threads)
+        ch = after.channel
+        if isinstance(ch, discord.Thread) and parent_id and parent_id in application_channels:
+            ch = ch.parent
+        await _process_new_application(after, ch, is_edit=True)
+    except Exception as e:
+        print(f"⚠️ 入盟申請編輯處理錯誤：{e}")
+
+
+@bot.event
 async def on_message(message):
     global _last_global_reply
 
@@ -8505,98 +8544,303 @@ def save_applications():
     _save_json_file(APPLICATIONS_FILE, _applications)
 
 
-def _check_application_fields(content: str) -> list:
-    """Check which required fields are missing from the application.
-    Returns a list of missing field names (Chinese labels)."""
+# Fields that require actual content after the label (not just the label itself)
+_APPLICATION_TEXT_FIELDS = [
+    ("申請國家名稱", "Name of Applicant"),
+    ("國家成立日期", "Date of Establishment"),
+    ("聯絡代表姓名", "Name of Representative"),
+    ("聯絡方式", "Contact Information"),
+    ("國家代碼", "National Code"),
+    ("伺服器連結", "Server Link"),
+    ("申請目的與願景", "Desired goals and vision"),
+    ("國家簡介", "Country Profile"),
+]
+
+
+def _check_application_fields(content: str, has_image: bool = False) -> tuple:
+    """Check which required fields are missing or empty from the application.
+    Returns (missing_labels, flag_status) where:
+    - missing_labels: list of missing/empty field Chinese labels
+    - flag_status: "ok" / "missing" / "no_image"
+    """
     missing = []
-    for zh, en in APPLICATION_REQUIRED_FIELDS:
-        # Check if either the Chinese or English label appears in the content
+    for zh, en in _APPLICATION_TEXT_FIELDS:
+        # Check if the label is present
         if zh not in content and en.lower() not in content.lower():
             missing.append(zh)
-    return missing
+            continue
+        # Label is present — check if there's actual content after it
+        # Find the line with this label and check if anything follows the colon
+        found_content = False
+        for line in content.split("\n"):
+            if zh in line or en.lower() in line.lower():
+                # Look for content after ：or :
+                for sep in ["：", ":"]:
+                    if sep in line:
+                        after = line.split(sep, 1)[1].strip()
+                        if after:
+                            found_content = True
+                        break
+                break
+        if not found_content:
+            missing.append(f"{zh}（空白）")
+
+    # Check flag field
+    flag_label_present = "國旗" in content or "flag" in content.lower()
+    if not flag_label_present:
+        missing.append("國旗")
+        flag_status = "missing"
+    elif not has_image:
+        missing.append("國旗（缺少圖片）")
+        flag_status = "no_image"
+    else:
+        flag_status = "ok"
+
+    return missing, flag_status
 
 
-async def _process_new_application(message: discord.Message, channel):
-    """Auto-reply to a membership application and notify secretariat."""
+async def _verify_flag_image(image_url: str) -> bool:
+    """Use vision AI to verify the flag image is actually a flag (or flag-like).
+    Returns True if it looks like a flag, False otherwise."""
+    # Use application AI settings, falling back to chat AI settings
+    ps_ai = application_settings.get("ai_settings", {})
+    ai_url = ps_ai.get("api_url") or chat_ai_settings.get("api_url", "")
+    ai_key = ps_ai.get("api_key") or chat_ai_settings.get("api_key", "")
+    vision_model = ps_ai.get("vision_model") or chat_ai_settings.get("vision_model", "")
+
+    if not ai_url or not ai_key or not vision_model:
+        # No vision AI configured — accept any image as valid
+        print("📝 國旗檢查：未設定視覺模型，跳過 AI 驗證（接受任何圖片）")
+        return True
+
+    settings = {
+        "api_url": ai_url,
+        "api_key": ai_key,
+        "vision_model": vision_model,
+    }
+
+    # Normalize URL
+    norm_url = ai_url.rstrip("/")
+    if not norm_url.endswith("/chat/completions"):
+        if norm_url.endswith("/v1") or norm_url.endswith("/v2"):
+            norm_url += "/chat/completions"
+        else:
+            norm_url += "/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {ai_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": vision_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "這是一張入盟申請書中附上的國旗圖片。請判斷這張圖片是否確實是一面國旗或類似的旗幟設計。\n"
+                            "只需要回答 JSON：{\"is_flag\": true/false, \"description\": \"簡短描述\"}"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 200,
+        "temperature": 0.1,
+    }
+
+    try:
+        t0 = _time.time()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                norm_url, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=60, connect=10, sock_read=50),
+            ) as resp:
+                if resp.status != 200:
+                    print(f"⚠️ 國旗視覺檢查 API 返回 {resp.status}")
+                    return True  # Fail open — don't block on API errors
+                data = json_module.loads(await resp.text())
+                choices = data.get("choices", [])
+                if choices:
+                    text = choices[0].get("message", {}).get("content", "").strip()
+                    if text.startswith("```"):
+                        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                    try:
+                        parsed = json_module.loads(text)
+                        is_flag = parsed.get("is_flag", True)
+                        desc = parsed.get("description", "")
+                        print(f"🚩 國旗視覺檢查完成（{_time.time()-t0:.1f}s）：is_flag={is_flag}, desc={desc[:50]}")
+                        return bool(is_flag)
+                    except Exception:
+                        # If JSON parse fails, check for true/false in text
+                        if "true" in text.lower():
+                            return True
+                        elif "false" in text.lower():
+                            return False
+                        return True  # Fail open
+        return True
+    except Exception as e:
+        print(f"⚠️ 國旗視覺檢查失敗：{e}（接受圖片）")
+        return True
+
+
+async def _process_new_application(message: discord.Message, channel, is_edit: bool = False):
+    """Auto-reply to a membership application.
+
+    Two-phase flow:
+    1. First check — if fields are missing, reply with orange ⚠️ and tell the
+       applicant to EDIT their original post. Do NOT notify secretariat yet.
+    2. On edit re-check — when all fields pass (including flag image), reply
+       with blue ✅ and THEN notify the secretariat channel.
+    """
     if not application_settings.get("enabled"):
         return
     application_channels = application_settings.get("application_channels", [])
     if channel.id not in application_channels:
         return
 
-    # Avoid re-processing the same message
     msg_id = str(message.id)
-    existing = [a for a in _applications.get("entries", []) if a.get("message_id") == msg_id]
-    if existing:
+
+    # Check if this message already has an entry
+    existing_entry = None
+    for a in _applications.get("entries", []):
+        if a.get("message_id") == msg_id:
+            existing_entry = a
+            break
+
+    # Skip if already sent to secretariat (status is pending/accepted/rejected
+    # AND secretariat_notified is True)
+    if existing_entry and existing_entry.get("secretariat_notified") and not is_edit:
+        return
+    # If the application was already reviewed, don't re-process
+    if existing_entry and existing_entry.get("status") in ("accepted", "rejected"):
         return
 
-    print(f"📝 偵測到入盟申請：#{getattr(channel, 'name', '?')} by {message.author.display_name}")
+    print(f"📝 偵測到入盟申請{'（編輯）' if is_edit else ''}：#{getattr(channel, 'name', '?')} by {message.author.display_name}")
 
-    # Check required fields
-    missing_fields = _check_application_fields(message.content)
+    # ── Check required text fields ──
+    has_image = bool(message.attachments)
+    image_url = str(message.attachments[0].url) if has_image else ""
+    missing_fields, flag_status = _check_application_fields(message.content, has_image)
 
-    # Extract applicant nation name (try to find it after the label)
+    # ── Flag image verification via vision AI ──
+    flag_valid = False
+    if flag_status == "ok" and image_url:
+        # There's an image and the flag label is present — verify with vision AI
+        flag_valid = await _verify_flag_image(image_url)
+        if not flag_valid:
+            missing_fields.append("國旗（AI 判定非旗幟）")
+    elif flag_status == "ok" and not has_image:
+        # Label present but no image attached
+        missing_fields.append("國旗（缺少圖片）")
+
+    all_pass = len(missing_fields) == 0
+
+    # Extract applicant nation name
     applicant_name = ""
     for line in message.content.split("\n"):
         if "申請國家名稱" in line or "Name of Applicant" in line:
-            # Take everything after the colon
             parts = line.split("：")
             if len(parts) > 1:
                 applicant_name = parts[1].strip()[:50]
             break
 
     now = _time.time()
-    app_id = str(int(now * 1000))
-    entry = {
-        "id": app_id,
-        "date": _time.strftime("%Y-%m-%d %H:%M"),
-        "_ts": now,
-        "guild_id": message.guild.id if message.guild else 0,
-        "applicant_id": str(message.author.id),
-        "applicant_name": message.author.display_name,
-        "applicant_nation": applicant_name,
-        "channel_id": channel.id,
-        "channel_name": getattr(channel, 'name', ''),
-        "thread_id": (
-            str(message.channel.id) if hasattr(message, 'channel') and isinstance(message.channel, discord.Thread) and message.channel.id != channel.id
-            else (str(message.id) if hasattr(message, 'thread') and message.thread else None)
-        ),
-        "message_id": msg_id,
-        "message_url": str(message.jump_url) if hasattr(message, 'jump_url') else "",
-        "raw_content": message.content[:2000],
-        "missing_fields": missing_fields,
-        "status": "pending",
-        "reviewed_by": "",
-        "review_date": "",
-        "reject_reason": "",
-    }
-    _applications.setdefault("entries", []).append(entry)
-    # Cap to prevent unbounded growth
-    if len(_applications["entries"]) > 500:
-        _applications["entries"] = _applications["entries"][-500:]
+
+    if existing_entry:
+        # Update existing entry on edit
+        entry = existing_entry
+        entry["raw_content"] = message.content[:2000]
+        entry["missing_fields"] = missing_fields
+        entry["flag_status"] = flag_status
+        entry["flag_valid"] = flag_valid
+        entry["last_checked"] = _time.strftime("%Y-%m-%d %H:%M")
+        entry["applicant_nation"] = applicant_name or entry.get("applicant_nation", "")
+    else:
+        app_id = str(int(now * 1000))
+        entry = {
+            "id": app_id,
+            "date": _time.strftime("%Y-%m-%d %H:%M"),
+            "_ts": now,
+            "guild_id": message.guild.id if message.guild else 0,
+            "applicant_id": str(message.author.id),
+            "applicant_name": message.author.display_name,
+            "applicant_nation": applicant_name,
+            "channel_id": channel.id,
+            "channel_name": getattr(channel, 'name', ''),
+            "thread_id": (
+                str(message.channel.id) if hasattr(message, 'channel') and isinstance(message.channel, discord.Thread) and message.channel.id != channel.id
+                else (str(message.id) if hasattr(message, 'thread') and message.thread else None)
+            ),
+            "message_id": msg_id,
+            "message_url": str(message.jump_url) if hasattr(message, 'jump_url') else "",
+            "raw_content": message.content[:2000],
+            "missing_fields": missing_fields,
+            "flag_status": flag_status,
+            "flag_valid": flag_valid,
+            "status": "pending",
+            "secretariat_notified": False,
+            "reviewed_by": "",
+            "review_date": "",
+            "reject_reason": "",
+            "last_checked": _time.strftime("%Y-%m-%d %H:%M"),
+        }
+        _applications.setdefault("entries", []).append(entry)
+        if len(_applications["entries"]) > 500:
+            _applications["entries"] = _applications["entries"][-500:]
     save_applications()
 
-    # ── Auto-reply to the application post ──
-    if missing_fields:
+    # ── Phase 1: Fields missing → orange ⚠️, do NOT notify secretariat ──
+    if not all_pass:
         fields_text = "\n".join(f"❌ {f}" for f in missing_fields)
         ack_desc = (
-            f"📝 已收到入盟申請，正在轉交秘書處審核。\n\n"
-            f"**⚠️ 以下欄位似乎尚未填寫：**\n{fields_text}\n\n"
-            f"請補齊上述欄位後重新提交，或直接編輯此貼文補充。"
+            f"📝 已收到入盟申請，但以下欄位尚不完整：\n\n"
+            f"{fields_text}\n\n"
+            f"**請直接編輯原貼文補齊上述欄位**，系統會自動重新檢查。"
+            + ("\n⚠️ 國旗欄位需要附上圖片附件。" if "國旗" in str(missing_fields) else "")
+            + "\n補齊後才會送交秘書處審核。"
         )
         ack_color = discord.Color.orange()
-    else:
-        ack_desc = (
-            f"📝 已收到入盟申請，所有必填欄位齊全。\n\n"
-            f"申請已轉交秘書處審核，請耐心等候結果。"
-        )
-        ack_color = discord.Color.blue()
+        ack_title = "⚠️ 入盟申請尚不完整"
+
+        try:
+            ack_embed = discord.Embed(
+                title=ack_title,
+                description=ack_desc,
+                color=ack_color,
+            )
+            if applicant_name:
+                ack_embed.add_field(name="申請國家", value=applicant_name, inline=True)
+            ack_embed.add_field(name="申請人", value=message.author.display_name, inline=True)
+            ack_embed.set_footer(text="ICEA 國際總會 · 入盟申請審核系統 · 請編輯原貼文補齊")
+            if is_edit and existing_entry:
+                # On edit, try to edit the previous ack message or send new one
+                await message.reply(embed=ack_embed, mention_author=False)
+            else:
+                await message.reply(embed=ack_embed, mention_author=False)
+        except Exception as e:
+            print(f"⚠️ 入盟申請確認訊息發送失敗：{e}")
+
+        print(f"📝 入盟申請 {msg_id}：{len(missing_fields)} 個欄位待補齊，未通知秘書處")
+        return
+
+    # ── Phase 2: All fields pass → blue ✅, notify secretariat ──
+    ack_desc = (
+        f"✅ 入盟申請所有欄位齊全，已送交秘書處審核。\n\n"
+        f"請耐心等候審核結果。"
+    )
 
     try:
         ack_embed = discord.Embed(
-            title="✅ 入盟申請已收到",
+            title="✅ 入盟申請已送審",
             description=ack_desc,
-            color=ack_color,
+            color=discord.Color.blue(),
         )
         if applicant_name:
             ack_embed.add_field(name="申請國家", value=applicant_name, inline=True)
@@ -8604,9 +8848,13 @@ async def _process_new_application(message: discord.Message, channel):
         ack_embed.set_footer(text="ICEA 國際總會 · 入盟申請審核系統")
         await message.reply(embed=ack_embed, mention_author=False)
     except Exception as e:
-        print(f"⚠️ 入盟申請確認訊息發送失敗（不影響審核流程）：{e}")
+        print(f"⚠️ 入盟申請確認訊息發送失敗：{e}")
 
-    # Send notification to secretariat channel
+    # Mark as notified so we don't double-send
+    entry["secretariat_notified"] = True
+    save_applications()
+
+    # ── Send notification to secretariat channel ──
     sec_ch_id = application_settings.get("secretariat_channel")
     if not sec_ch_id:
         print("⚠️ 入盟申請系統：未設定秘書處頻道，無法發送通知")
@@ -8633,23 +8881,18 @@ async def _process_new_application(message: discord.Message, channel):
     embed.add_field(name="申請時間", value=entry["date"], inline=True)
     if applicant_name:
         embed.add_field(name="申請國家", value=applicant_name, inline=True)
-    if missing_fields:
-        embed.add_field(
-            name="⚠️ 缺漏欄位",
-            value=", ".join(missing_fields),
-            inline=False,
-        )
-    else:
-        embed.add_field(name="欄位檢查", value="✅ 全部必填欄位齊全", inline=False)
+    embed.add_field(name="欄位檢查", value="✅ 全部必填欄位齊全（含國旗圖片）", inline=False)
+    if image_url:
+        embed.set_thumbnail(url=image_url)
     embed.add_field(
         name="原文連結",
         value=message.jump_url if hasattr(message, 'jump_url') else "(無)",
         inline=False,
     )
-    embed.add_field(name="申請 ID", value=app_id, inline=False)
+    embed.add_field(name="申請 ID", value=entry["id"], inline=False)
     embed.set_footer(text="請管理員點擊下方按鈕審核通過或退回此申請")
 
-    view = ApplicationReviewView(app_id)
+    view = ApplicationReviewView(entry["id"])
     try:
         await sec_ch.send(embed=embed, view=view)
         print(f"✅ 入盟申請通知已發送至秘書處 #{sec_ch.name}")
