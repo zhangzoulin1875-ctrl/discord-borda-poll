@@ -6900,7 +6900,7 @@ class SystemGroup(app_commands.Group):
     @app_commands.describe(action="add=新增頻道, remove=移除頻道, list=列出已設定的頻道")
     async def application_council_channel(self, interaction: discord.Interaction,
                                             action: str,
-                                            channel: discord.TextChannel = None):
+                                            channel: Union[discord.TextChannel, discord.ForumChannel] = None):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
@@ -6943,7 +6943,7 @@ class SystemGroup(app_commands.Group):
 
     @app_commands.command(name="application_council", description="設定理事國審核通知頻道（機器人擁有者限定）")
     @app_commands.describe(channel="理事國頻道（系統會在此發送申請通知供理事國審核）")
-    async def application_council(self, interaction: discord.Interaction, channel: discord.TextChannel):
+    async def application_council(self, interaction: discord.Interaction, channel: Union[discord.TextChannel, discord.ForumChannel]):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
