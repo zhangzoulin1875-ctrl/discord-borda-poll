@@ -1920,7 +1920,35 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
     return True, clean
 
 
-async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120, is_background: bool = True) -> dict:
+# ── Fallback API rate limiter (chat: 6 req/min) ──
+_fallback_chat_timestamps: list = []
+_FALLBACK_CHAT_RATE_PER_MIN = 6
+
+def _is_api_unavailable(error_str: str) -> bool:
+    """Check if the error indicates the primary API is down (503/502/500 etc)."""
+    if not error_str:
+        return False
+    return any(code in str(error_str) for code in ["503", "502", "500", "504", "Service Unavailable", "service_unavailable"])
+
+_ENTERTAINMENT_UNAVAILABLE_MSG = "🔧 AI 系統暫時維護中，娛樂功能暫時關閉，請稍後再試～"
+
+def _check_fallback_chat_rate():
+    """Sliding-window rate limiter for chat fallback API usage.
+    Returns True if a new request is allowed, False if rate limit exceeded."""
+    now = _time.time()
+    _fallback_chat_timestamps[:] = [t for t in _fallback_chat_timestamps if now - t < 60]
+    if len(_fallback_chat_timestamps) >= _FALLBACK_CHAT_RATE_PER_MIN:
+        return False
+    _fallback_chat_timestamps.append(now)
+    return True
+
+
+async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120, is_background: bool = True, fallback_mode: str = "full") -> dict:
+    """fallback_mode:
+    - "full":          Always use fallback on provider errors (administrative)
+    - "rate_limited":  Use fallback but limited to 6 req/min (chat)
+    - "disabled":      Never use fallback — return error directly (entertainment/background)
+    """
     """Call the chat AI API (non-streaming, short replies).
     Returns the raw assistant message dict (content + possible tool_calls),
     so the caller can drive a tool-calling loop when `tools` is provided.
@@ -2302,7 +2330,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         _primary_error = msg.get("error", "")
     elif last_exc is not None:
         _primary_error = str(last_exc)
-    if _primary_error and settings.get("fallback_enabled"):
+    if _primary_error and settings.get("fallback_enabled") and fallback_mode != "disabled":
         _is_provider_error = any(
             code in _primary_error
             for code in ["503", "502", "500", "504", "Service Unavailable",
@@ -2311,36 +2339,41 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         "逾時", "Connection", "connection"]
         )
         if _is_provider_error:
-            _fb_url = settings.get("fallback_api_url", "").strip()
-            _fb_key = settings.get("fallback_api_key", "").strip()
-            _fb_model = settings.get("fallback_model", "").strip()
-            if _fb_url and _fb_key:
-                print(f"🔄 主要 API 錯誤（{_primary_error[:120]}），切換至備援 API（{_fb_model or _fb_url}）...")
-                _fb_settings = {
-                    **settings,
-                    "api_url": _fb_url,
-                    "api_key": _fb_key,
-                    "model": _fb_model or settings.get("model", "gpt-4o-mini"),
-                    "fallback_enabled": False,  # prevent infinite recursion
-                }
-                _fb_budget = max(5, int(_remaining()))
-                try:
-                    _fb_msg = await call_chat_api(
-                        messages, _fb_settings, tools=tools,
-                        max_tokens=max_tokens,
-                        timeout_total=_fb_budget,
-                        timeout_read=max(3, _fb_budget - 2),
-                        is_background=is_background,
-                    )
-                    if _fb_msg.get("content") or _fb_msg.get("tool_calls"):
-                        print(f"✅ 備援 API 成功！({_fb_msg.get('content', '')[:60]}...)")
-                        return _fb_msg
-                    else:
-                        print(f"⚠️ 備援 API 也失敗：{_fb_msg.get('error', 'unknown')}")
-                except Exception as _fb_exc:
-                    print(f"⚠️ 備援 API 例外：{_fb_exc}")
+            # Rate limiter for chat fallback
+            if fallback_mode == "rate_limited" and not _check_fallback_chat_rate():
+                print(f"⚠️ 備援 API 速率限制（{_FALLBACK_CHAT_RATE_PER_MIN}/min），聊天備援請求被拒絕")
             else:
-                print(f"⚠️ 備援 API 已啟用但未設定 URL/Key，跳過")
+                _fb_url = settings.get("fallback_api_url", "").strip()
+                _fb_key = settings.get("fallback_api_key", "").strip()
+                _fb_model = settings.get("fallback_model", "").strip()
+                if _fb_url and _fb_key:
+                    print(f"🔄 主要 API 錯誤（{_primary_error[:120]}），切換至備援 API（{_fb_model or _fb_url}）...")
+                    _fb_settings = {
+                        **settings,
+                        "api_url": _fb_url,
+                        "api_key": _fb_key,
+                        "model": _fb_model or settings.get("model", "gpt-4o-mini"),
+                        "fallback_enabled": False,  # prevent infinite recursion
+                    }
+                    _fb_budget = max(5, int(_remaining()))
+                    try:
+                        _fb_msg = await call_chat_api(
+                            messages, _fb_settings, tools=tools,
+                            max_tokens=max_tokens,
+                            timeout_total=_fb_budget,
+                            timeout_read=max(3, _fb_budget - 2),
+                            is_background=is_background,
+                            fallback_mode="disabled",  # fallback of fallback = no
+                        )
+                        if _fb_msg.get("content") or _fb_msg.get("tool_calls"):
+                            print(f"✅ 備援 API 成功！({_fb_msg.get('content', '')[:60]}...)")
+                            return _fb_msg
+                        else:
+                            print(f"⚠️ 備援 API 也失敗：{_fb_msg.get('error', 'unknown')}")
+                    except Exception as _fb_exc:
+                        print(f"⚠️ 備援 API 例外：{_fb_exc}")
+                else:
+                    print(f"⚠️ 備援 API 已啟用但未設定 URL/Key，跳過")
 
     # Ran out of retry budget without an exception (e.g. broke out of the
     # loop above) — return whatever we have, or a clean timeout error.
@@ -4805,7 +4838,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             # Single-round quick path: give it nearly the ENTIRE remaining budget.
             _call_tt = max(6, _ai_budget - 1.5)
         _call_tr = max(4, _call_tt - 2)
-        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False)
+        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False, fallback_mode="rate_limited")
         print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
@@ -4862,7 +4895,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # minus a small safety margin — not a hardcoded 8s.
         t2 = _time.time()
         _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
-        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False)
+        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False, fallback_mode="rate_limited")
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
@@ -4897,7 +4930,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # the whole chat feature down. Fall back to one plain, tool-free call.
         print(f"⚠️ 工具呼叫流程失敗，改用純文字模式重試：{e}")
         fallback_msg = await asyncio.wait_for(
-            call_chat_api(messages, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=10, timeout_read=8, is_background=False), timeout=12
+            call_chat_api(messages, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=10, timeout_read=8, is_background=False, fallback_mode="rate_limited"), timeout=12
         )
         raw_reply = fallback_msg.get("content") or ""
 
@@ -9204,7 +9237,7 @@ async def _deep_scan_community(guild) -> bool:
 
     try:
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings, max_tokens=4000), timeout=120
+            call_chat_api(messages, chat_ai_settings, max_tokens=4000, fallback_mode="disabled"), timeout=120
         )
     except Exception as e:
         print(f"📜 社群編年史：AI 分析失敗：{e}")
@@ -10783,7 +10816,7 @@ async def _generate_quiz_question() -> dict | None:
 
     try:
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings, max_tokens=600),
+            call_chat_api(messages, chat_ai_settings, max_tokens=600, fallback_mode="disabled"),
             timeout=30
         )
     except asyncio.TimeoutError:
@@ -10972,7 +11005,7 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
                 {"role": "user", "content": validation_prompt},
             ]
             val_result = await asyncio.wait_for(
-                call_chat_api(val_messages, chat_ai_settings, tools=None),
+                call_chat_api(val_messages, chat_ai_settings, tools=None, fallback_mode="disabled"),
                 timeout=20,
             )
             val_text = val_result.get("content", "").strip()
@@ -13142,7 +13175,7 @@ async def _ai_refine_extract_from_discord(channel_snippets: str, existing_topics
 
         try:
             result = await asyncio.wait_for(
-                call_chat_api(messages, chat_ai_settings, max_tokens=1500), timeout=40
+                call_chat_api(messages, chat_ai_settings, max_tokens=1500, fallback_mode="disabled"), timeout=40
             )
         except Exception as e:
             print(f"🔍 AI精煉: {prompt_label}失敗: {e}")
@@ -13335,7 +13368,7 @@ async def _ai_refine_verify_and_reorganize(preliminary_entries: list, wiki_artic
 
         try:
             result = await asyncio.wait_for(
-                call_chat_api(messages, chat_ai_settings, max_tokens=800), timeout=40
+                call_chat_api(messages, chat_ai_settings, max_tokens=800, fallback_mode="disabled"), timeout=40
             )
         except Exception as e:
             print(f"🔍 AI精煉: 驗證「{entry['topic']}」失敗: {e}")
@@ -13798,7 +13831,7 @@ async def _analyze_community(guild) -> bool:
 
     try:
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings, max_tokens=2500), timeout=60
+            call_chat_api(messages, chat_ai_settings, max_tokens=2500, fallback_mode="disabled"), timeout=60
         )
     except Exception as e:
         print(f"🧠 社群感知：AI 分析失敗：{e}")
@@ -14368,7 +14401,7 @@ async def _rate_nation_name(nation_name: str, ai_settings: dict, nation_info: st
         result = await call_chat_api(
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
-            max_tokens=1200,  # generous budget — reasoning models can burn
+            max_tokens=1200, fallback_mode="disabled",  # generous budget — reasoning models can burn
                               # a few hundred tokens on internal preamble
                               # before ever reaching the requested format
         )
@@ -14438,7 +14471,10 @@ class NationGroup(app_commands.Group):
         result = await _rate_nation_name(nation_name, ai_settings, nation_info, gov_info)
 
         if "error" in result:
-            await interaction.followup.send(f"❌ 評價失敗：{result['error']}")
+            if _is_api_unavailable(result["error"]):
+                await interaction.followup.send(_ENTERTAINMENT_UNAVAILABLE_MSG)
+            else:
+                await interaction.followup.send(f"❌ 評價失敗：{result['error']}")
             return
 
         score = result["score"]
@@ -14528,7 +14564,7 @@ async def _organize_agenda_items(raw_text: str, ai_settings: dict) -> dict:
         result = await call_chat_api(
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
-            max_tokens=1500,
+            max_tokens=1500, fallback_mode="disabled",
         )
         text = result.get("content", "") if isinstance(result, dict) else ""
         if not text:
@@ -14756,6 +14792,7 @@ async def _analyze_user(user_name: str, messages: list, ai_settings: dict) -> di
                 "model": ai_settings.get("model", "gpt-4o-mini"),
             },
             max_tokens=1500,
+            fallback_mode="disabled",
         )
         text = result.get("content", "") if isinstance(result, dict) else ""
         if not text:
@@ -14783,6 +14820,8 @@ async def _analyze_user(user_name: str, messages: list, ai_settings: dict) -> di
         return {"error": "AI 回應逾時，請稍後再試一次"}
     except Exception as e:
         print(f"⚠️ 用戶分析 AI 呼叫失敗：{e}")
+        if _is_api_unavailable(str(e)):
+            return {"error": _ENTERTAINMENT_UNAVAILABLE_MSG}
         return {"error": "AI 暫時沒有給出有效回覆，稍後再試一次應該就能過"}
 
 
@@ -14823,7 +14862,10 @@ class AnalyzeGroup(app_commands.Group):
         result = await _analyze_user(user_name, messages, ai_settings)
 
         if "error" in result:
-            await interaction.followup.send(f"❌ 分析失敗：{result['error']}")
+            if _is_api_unavailable(result.get("error", "")):
+                await interaction.followup.send(_ENTERTAINMENT_UNAVAILABLE_MSG)
+            else:
+                await interaction.followup.send(f"❌ 分析失敗：{result['error']}")
             return
 
         analysis = result["analysis"]
@@ -15622,7 +15664,7 @@ async def _generate_daily_summary(messages_text: str, date_str: str) -> str:
         result = await call_chat_api(
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
-            max_tokens=2500,  # briefing asks for 500-1500 中文字 output — needs a
+            max_tokens=2500, fallback_mode="disabled",  # briefing asks for 500-1500 中文字 output — needs a
                               # much bigger budget than the 300-token chat default,
                               # plus headroom for reasoning-model preamble
         )
