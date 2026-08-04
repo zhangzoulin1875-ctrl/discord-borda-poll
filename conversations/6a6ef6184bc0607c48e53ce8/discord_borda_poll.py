@@ -153,6 +153,134 @@ async def self_ping_loop():
 
 async def keep_alive_server():
     """啟動 HTTP keep-alive server（Render Web Service 用）。"""
+
+# ── Dashboard API: 會員國管理 ──
+
+async def api_list_nations(request):
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    gid = int(request.match_info["gid"])
+    entries = [e for e in _member_nations["entries"] if e.get("guild_id") == gid]
+    # Strip internal fields, return safe dict
+    out = []
+    for e in entries:
+        out.append({
+            "id": e["id"],
+            "name_zh": e["name_zh"],
+            "name_en": e["name_en"],
+            "iso_code": e["iso_code"],
+            "representatives": e.get("representatives", []),
+            "representative_names": e.get("representative_names", []),
+            "registered_by_name": e.get("registered_by_name", ""),
+            "registered_date": e.get("registered_date", ""),
+            "status": e.get("status", "active"),
+            "notes": e.get("notes", ""),
+        })
+    return web.json_response(out)
+
+
+async def api_create_nation(request):
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    gid = int(request.match_info["gid"])
+    data = await request.json()
+
+    name_zh = (data.get("name_zh") or "").strip()
+    name_en = (data.get("name_en") or "").strip()
+    iso_code = (data.get("iso_code") or "").strip().upper()
+    reps = data.get("representatives", [])
+    notes = (data.get("notes") or "").strip()
+
+    if not name_zh or not name_en or not iso_code:
+        return web.json_response({"error": "國名（中英）和 ISO 代碼皆為必填"}, status=400)
+    if len(iso_code) < 2 or len(iso_code) > 3:
+        return web.json_response({"error": "ISO 代碼應為 2-3 碼"}, status=400)
+
+    # Check duplicate
+    existing = [
+        e for e in _member_nations["entries"]
+        if e.get("guild_id") == gid
+        and e.get("iso_code", "").upper() == iso_code
+        and e.get("status") == "active"
+    ]
+    if existing:
+        return web.json_response({"error": f"ISO 代碼 {iso_code} 已被註冊"}, status=409)
+
+    import uuid as _uuid
+    entry = {
+        "id": str(_uuid.uuid4()),
+        "guild_id": gid,
+        "name_zh": name_zh,
+        "name_en": name_en,
+        "iso_code": iso_code,
+        "representatives": [int(r) for r in reps[:3]],
+        "representative_names": [],
+        "registered_by": user.get("user_id", 0),
+        "registered_by_name": user.get("username", ""),
+        "registered_date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        "status": "active",
+        "notes": notes,
+    }
+    _member_nations["entries"].append(entry)
+    save_member_nations()
+    return web.json_response({"ok": True, "id": entry["id"]})
+
+
+async def api_update_nation(request):
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    gid = int(request.match_info["gid"])
+    nid = request.match_info["nid"]
+    data = await request.json()
+
+    entry = next(
+        (e for e in _member_nations["entries"]
+         if e.get("guild_id") == gid and e["id"] == nid),
+        None,
+    )
+    if not entry:
+        return web.json_response({"error": "找不到該會員國"}, status=404)
+
+    if "name_zh" in data:
+        entry["name_zh"] = data["name_zh"].strip()
+    if "name_en" in data:
+        entry["name_en"] = data["name_en"].strip()
+    if "iso_code" in data:
+        entry["iso_code"] = data["iso_code"].strip().upper()
+    if "representatives" in data:
+        entry["representatives"] = [int(r) for r in data["representatives"][:3]]
+    if "status" in data:
+        entry["status"] = data["status"]
+    if "notes" in data:
+        entry["notes"] = data["notes"].strip()
+
+    save_member_nations()
+    return web.json_response({"ok": True})
+
+
+async def api_delete_nation(request):
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    gid = int(request.match_info["gid"])
+    nid = request.match_info["nid"]
+
+    before = len(_member_nations["entries"])
+    _member_nations["entries"] = [
+        e for e in _member_nations["entries"]
+        if not (e.get("guild_id") == gid and e["id"] == nid)
+    ]
+    if len(_member_nations["entries"]) == before:
+        return web.json_response({"error": "找不到該會員國"}, status=404)
+
+    save_member_nations()
+    return web.json_response({"ok": True})
+
+
+    """啟動 HTTP keep-alive server（Render Web Service 用）。"""
     port = int(os.getenv("PORT", 10000))
 
     async def health(request):
@@ -184,6 +312,11 @@ async def keep_alive_server():
     app.router.add_post("/api/guilds/{gid}/polls/{pid}/options", api_add_option)
     app.router.add_put("/api/guilds/{gid}/polls/{pid}/roles", api_set_roles)
     app.router.add_get("/oauth/drive/callback", oauth_drive_callback)
+    # Member nations API
+    app.router.add_get("/api/guilds/{gid}/nations", api_list_nations)
+    app.router.add_post("/api/guilds/{gid}/nations", api_create_nation)
+    app.router.add_put("/api/guilds/{gid}/nations/{nid}", api_update_nation)
+    app.router.add_delete("/api/guilds/{gid}/nations/{nid}", api_delete_nation)
     print(f"📊 Dashboard routes registered")
 
 
@@ -4544,7 +4677,7 @@ def _global_interaction_check(interaction: discord.Interaction) -> bool:
 
 async def setup_hook():
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception:
@@ -4577,6 +4710,7 @@ async def setup_hook():
     load_polls_from_disk()
     save_polls_to_disk()  # Create file if not exists
     load_briefing_settings()
+    load_member_nations()
     save_briefing_settings()  # Create file if not exists
     load_chat_ai_settings()
     save_chat_ai_settings()  # Create file if not exists
@@ -9419,6 +9553,203 @@ class AnalyzeGroup(app_commands.Group):
         embed.timestamp = interaction.created_at
 
         await interaction.followup.send(embed=embed)
+
+
+# ──────────────────────────────────────────────
+# 會員國註冊系統
+# ──────────────────────────────────────────────
+
+MEMBER_NATIONS_FILE = os.path.join(DATA_DIR, "member_nations.json")
+
+# Each entry:
+#   {id, guild_id, name_zh, name_en, iso_code, representatives: [user_id, ...],
+#    registered_by, registered_date, status: "active"|"inactive", notes}
+_member_nations = {"entries": []}
+
+
+def save_member_nations():
+    os.makedirs(os.path.dirname(MEMBER_NATIONS_FILE), exist_ok=True)
+    with open(MEMBER_NATIONS_FILE, "w", encoding="utf-8") as f:
+        json_module.dump(_member_nations, f, ensure_ascii=False, indent=2)
+
+
+def load_member_nations():
+    global _member_nations
+    try:
+        if os.path.exists(MEMBER_NATIONS_FILE):
+            with open(MEMBER_NATIONS_FILE, "r", encoding="utf-8") as f:
+                _member_nations = json_module.load(f)
+            if "entries" not in _member_nations:
+                _member_nations = {"entries": _member_nations if isinstance(_member_nations, list) else []}
+            print(f"✅ 載入會員國資料：{len(_member_nations['entries'])} 筆")
+    except Exception as e:
+        print(f"⚠️ 載入會員國資料失敗：{e}")
+
+
+# ── Discord slash command group ──
+
+class MemberNationGroup(app_commands.Group):
+    """會員國註冊與管理指令群組"""
+
+    def __init__(self):
+        super().__init__(name="nation", description="會員國註冊與管理")
+
+    @app_commands.command(name="register", description="註冊會員國")
+    @app_commands.describe(
+        name_zh="國名（中文）",
+        name_en="國名（英文）",
+        iso_code="ISO-3166 國家代碼（如 TW、JP、US，2-3碼）",
+        rep1="第一位派駐代表（@用戶）",
+        rep2="第二位派駐代表（選填）",
+        rep3="第三位派駐代表（選填）",
+    )
+    async def register(
+        self,
+        interaction: discord.Interaction,
+        name_zh: str,
+        name_en: str,
+        iso_code: str,
+        rep1: discord.Member,
+        rep2: discord.Member = None,
+        rep3: discord.Member = None,
+    ):
+        # Only bot owner or guild admins can register
+        if not is_owner(interaction):
+            perms = interaction.user.guild_permissions
+            if not (perms.administrator or perms.manage_guild):
+                await interaction.response.send_message("❌ 此指令需要管理員權限。", ephemeral=True)
+                return
+
+        name_zh = name_zh.strip()
+        name_en = name_en.strip()
+        iso_code = iso_code.strip().upper()
+
+        if not name_zh or not name_en or not iso_code:
+            await interaction.response.send_message("❌ 國名（中英）和 ISO 代碼皆為必填。", ephemeral=True)
+            return
+        if len(iso_code) < 2 or len(iso_code) > 3:
+            await interaction.response.send_message("❌ ISO 代碼應為 2-3 碼英文字母（如 TW、USA）。", ephemeral=True)
+            return
+
+        # Collect representatives (deduplicate, max 3)
+        reps_input = [rep1, rep2, rep3]
+        seen_ids = set()
+        rep_ids = []
+        rep_names = []
+        for r in reps_input:
+            if r and r.id not in seen_ids:
+                seen_ids.add(r.id)
+                rep_ids.append(r.id)
+                rep_names.append(r.display_name)
+
+        if not rep_ids:
+            await interaction.response.send_message("❌ 至少需要指定一位派駐代表。", ephemeral=True)
+            return
+
+        # Check for duplicate ISO code in same guild
+        guild_id = interaction.guild_id
+        existing = [
+            e for e in _member_nations["entries"]
+            if e.get("guild_id") == guild_id
+            and e.get("iso_code", "").upper() == iso_code
+            and e.get("status") == "active"
+        ]
+        if existing:
+            await interaction.response.send_message(
+                f"❌ ISO 代碼 `{iso_code}` 已被註冊：{existing[0]['name_zh']}（{existing[0]['name_en']}）",
+                ephemeral=True,
+            )
+            return
+
+        import uuid as _uuid
+        entry = {
+            "id": str(_uuid.uuid4()),
+            "guild_id": guild_id,
+            "name_zh": name_zh,
+            "name_en": name_en,
+            "iso_code": iso_code,
+            "representatives": rep_ids,
+            "representative_names": rep_names,  # for display, updated on load
+            "registered_by": interaction.user.id,
+            "registered_by_name": interaction.user.display_name,
+            "registered_date": interaction.created_at.strftime("%Y-%m-%d %H:%M"),
+            "status": "active",
+            "notes": "",
+        }
+
+        _member_nations["entries"].append(entry)
+        save_member_nations()
+
+        # Build confirmation embed
+        embed = discord.Embed(
+            title=f"🌍 會員國註冊成功",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="國名", value=f"{name_zh}（{name_en}）", inline=False)
+        embed.add_field(name="ISO 代碼", value=f"`{iso_code}`", inline=True)
+        rep_mentions = " ".join(f"<@{rid}>" for rid in rep_ids)
+        embed.add_field(name="派駐代表", value=rep_mentions, inline=False)
+        embed.set_footer(text=f"由 {interaction.user.display_name} 註冊")
+        embed.timestamp = interaction.created_at
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="list", description="列出所有已註冊的會員國")
+    async def list_nations(self, interaction: discord.Interaction):
+        guild_id = interaction.guildId if hasattr(interaction, 'guildId') else interaction.guild_id
+        entries = [e for e in _member_nations["entries"] if e.get("guild_id") == guild_id]
+
+        if not entries:
+            await interaction.response.send_message("📋 目前沒有已註冊的會員國。")
+            return
+
+        embed = discord.Embed(
+            title="🌍 會員國一覽",
+            color=discord.Color.blue(),
+        )
+        for e in entries:
+            status_emoji = "✅" if e.get("status") == "active" else "⚫"
+            reps = " ".join(f"<@{rid}>" for rid in e.get("representatives", []))
+            embed.add_field(
+                name=f"{status_emoji} {e['name_zh']}（{e['name_en']}）",
+                value=f"ISO: `{e['iso_code']}`\n代表：{reps or '未指定'}\n註冊日期：{e.get('registered_date', '未知')}",
+                inline=False,
+            )
+        embed.set_footer(text=f"共 {len(entries)} 個會員國")
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="info", description="查詢指定會員國的詳細資訊")
+    @app_commands.describe(iso_code="ISO-3166 國家代碼（如 TW、JP）")
+    async def nation_info(self, interaction: discord.Interaction, iso_code: str):
+        iso_code = iso_code.strip().upper()
+        guild_id = interaction.guildId if hasattr(interaction, 'guildId') else interaction.guild_id
+        entry = next(
+            (e for e in _member_nations["entries"]
+             if e.get("guild_id") == guild_id
+             and e.get("iso_code", "").upper() == iso_code),
+            None,
+        )
+
+        if not entry:
+            await interaction.response.send_message(f"❌ 找不到 ISO 代碼為 `{iso_code}` 的會員國。", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"🌍 {entry['name_zh']}（{entry['name_en']}）",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="ISO 代碼", value=f"`{entry['iso_code']}`", inline=True)
+        embed.add_field(name="狀態", value="✅ 活躍" if entry.get("status") == "active" else "⚫ 停用", inline=True)
+        reps = " ".join(f"<@{rid}>" for rid in entry.get("representatives", []))
+        embed.add_field(name="派駐代表", value=reps or "未指定", inline=False)
+        embed.add_field(name="註冊者", value=f"{entry.get('registered_by_name', '未知')}", inline=True)
+        embed.add_field(name="註冊日期", value=entry.get("registered_date", "未知"), inline=True)
+        if entry.get("notes"):
+            embed.add_field(name="備註", value=entry["notes"][:1024], inline=False)
+        embed.timestamp = interaction.created_at
+
+        await interaction.response.send_message(embed=embed)
 
 
 # ──────────────────────────────────────────────

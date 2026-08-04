@@ -5,6 +5,51 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ICEA official</title>
 <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Nation Modal -->
+  <div id="nation-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div class="bg-[#2b2d31] rounded-xl p-6 w-full max-w-md mx-4">
+      <h3 id="nation-modal-title" class="text-lg font-bold mb-4">註冊會員國</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-gray-400">國名（中文）*</label>
+          <input id="nation-name-zh" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：臺灣民國">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">國名（英文）*</label>
+          <input id="nation-name-en" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：Republic of Taiwan">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">ISO-3166 代碼 *</label>
+          <input id="nation-iso" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：TW" maxlength="3">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">派駐代表 Discord User ID（最多3位，逗號分隔）</label>
+          <input id="nation-reps" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：123456789,987654321">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">備註</label>
+          <textarea id="nation-notes" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2] resize-none" rows="2" placeholder="選填"></textarea>
+        </div>
+      </div>
+      <div class="flex gap-2 mt-4">
+        <button onclick="closeNationModal()" class="flex-1 bg-[#4e5058] hover:bg-[#3a3c43] text-white px-4 py-2 rounded-lg text-sm font-semibold">取消</button>
+        <button onclick="saveNation()" class="flex-1 bg-[#5865f2] hover:bg-[#4752c4] text-white px-4 py-2 rounded-lg text-sm font-semibold">儲存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nations -->
+  <div id="nations-view" class="hidden fade-in">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-3">
+        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+        <h2 class="text-xl font-bold">🌍 會員國管理</h2>
+      </div>
+      <button onclick="showNationModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">+ 註冊會員國</button>
+    </div>
+    <div id="nation-list" class="space-y-3"></div>
+  </div>
+
 <script>tailwind.config={darkMode:'class'}</script>
 <style>
   body{font-family:'Segoe UI',system-ui,sans-serif}
@@ -35,6 +80,7 @@
       <div class="nav-tab active" data-tab="polls" onclick="navigate('guilds')">📋 投票</div>
       <div class="nav-tab" data-tab="chat-ai" onclick="showChatAIPanel()">🤖 AI 聊天</div>
       <div class="nav-tab" data-tab="meeting-ai" onclick="showMeetingAIPanel()">📝 會議AI</div>
+      <div class="nav-tab" data-tab="nations" onclick="showNationsPanel()">🌍 會員國</div>
     </div>
   </div>
   <div id="nav-user" class="hidden flex items-center gap-3">
@@ -523,6 +569,100 @@ async function saveMeetingAISettings() {
   const r = await api('/api/ai-settings', 'PUT', data);
   if (r.error) { alert('儲存失敗：' + r.error); return; }
   showToast('✅ 會議 AI 設定已儲存！');
+}
+
+// ── 會員國管理 ──
+let editingNationId = null;
+
+async function showNationsPanel() {
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  document.getElementById('nations-view').classList.remove('hidden');
+  showOnly('main-view');
+  setActiveTab('nations');
+  await loadNations();
+}
+
+async function loadNations() {
+  const list = await api(`/api/guilds/${currentGuild}/nations`);
+  if (list.error) { if (list.status === 401) { showOnly('login-view'); return; } alert('載入失敗：' + list.error); return; }
+  const container = document.getElementById('nation-list');
+  if (!list.length) { container.innerHTML = '<p class="text-gray-400 text-sm">📋 尚無註冊會員國。點擊右上角「+ 註冊會員國」開始。</p>'; return; }
+  container.innerHTML = list.map(n => {
+    const reps = (n.representative_names && n.representative_names.length)
+      ? n.representative_names.join('、')
+      : (n.representatives && n.representatives.length ? n.representatives.map(r => '<@'+r+'>').join('、') : '未指定');
+    const statusBadge = n.status === 'active'
+      ? '<span class="text-green-400 text-xs">✅ 活躍</span>'
+      : '<span class="text-gray-500 text-xs">⚫ 停用</span>';
+    return `<div class="bg-[#2b2d31] rounded-xl p-4">
+      <div class="flex items-center justify-between mb-2">
+        <div><h3 class="font-bold">${escHtml(n.name_zh)}（${escHtml(n.name_en)}）</h3><div class="text-xs text-gray-400 mt-1">ISO: <code class="bg-[#1e1f22] px-1.5 py-0.5 rounded">${escHtml(n.iso_code)}</code> · ${statusBadge}</div></div>
+        <div class="flex gap-1">
+          <button onclick="editNation('${n.id}','${escAttr(n.name_zh)}','${escAttr(n.name_en)}','${escAttr(n.iso_code)}','${escAttr((n.representatives||[]).join(','))}','${escAttr(n.notes||'')}','${escAttr(n.status)}')" class="text-xs bg-[#4e5058] hover:bg-[#3a3c43] px-2.5 py-1 rounded">編輯</button>
+          <button onclick="deleteNation('${n.id}','${escAttr(n.name_zh)}')" class="text-xs bg-red-500/20 hover:bg-red-500/30 text-red-400 px-2.5 py-1 rounded">刪除</button>
+        </div>
+      </div>
+      <div class="text-sm text-gray-300"><span class="text-gray-500">派駐代表：</span>${escHtml(reps)}</div>
+      <div class="text-xs text-gray-500 mt-1">註冊者：${escHtml(n.registered_by_name||'未知')} · ${escHtml(n.registered_date||'')}</div>
+      ${n.notes ? `<div class="text-xs text-gray-400 mt-1 bg-[#1e1f22] rounded px-2 py-1">📝 ${escHtml(n.notes)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function showNationModal() {
+  editingNationId = null;
+  document.getElementById('nation-modal-title').textContent = '註冊會員國';
+  document.getElementById('nation-name-zh').value = '';
+  document.getElementById('nation-name-en').value = '';
+  document.getElementById('nation-iso').value = '';
+  document.getElementById('nation-reps').value = '';
+  document.getElementById('nation-notes').value = '';
+  document.getElementById('nation-modal').classList.remove('hidden');
+}
+
+function editNation(id, nameZh, nameEn, iso, reps, notes, status) {
+  editingNationId = id;
+  document.getElementById('nation-modal-title').textContent = '編輯會員國';
+  document.getElementById('nation-name-zh').value = nameZh;
+  document.getElementById('nation-name-en').value = nameEn;
+  document.getElementById('nation-iso').value = iso;
+  document.getElementById('nation-reps').value = reps;
+  document.getElementById('nation-notes').value = notes;
+  document.getElementById('nation-modal').classList.remove('hidden');
+}
+
+function closeNationModal() {
+  document.getElementById('nation-modal').classList.add('hidden');
+  editingNationId = null;
+}
+
+async function saveNation() {
+  const nameZh = document.getElementById('nation-name-zh').value.trim();
+  const nameEn = document.getElementById('nation-name-en').value.trim();
+  const iso = document.getElementById('nation-iso').value.trim().toUpperCase();
+  const repsStr = document.getElementById('nation-reps').value.trim();
+  const notes = document.getElementById('nation-notes').value.trim();
+  if (!nameZh || !nameEn || !iso) { alert('國名（中英）和 ISO 代碼為必填'); return; }
+  const reps = repsStr ? repsStr.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3) : [];
+  if (editingNationId) {
+    const r = await api(`/api/guilds/${currentGuild}/nations/${editingNationId}`, 'PUT', { name_zh: nameZh, name_en: nameEn, iso_code: iso, representatives: reps, notes: notes });
+    if (r.error) { alert('儲存失敗：' + r.error); return; }
+    showToast('✅ 會員國資料已更新！');
+  } else {
+    const r = await api(`/api/guilds/${currentGuild}/nations`, 'POST', { name_zh: nameZh, name_en: nameEn, iso_code: iso, representatives: reps, notes: notes });
+    if (r.error) { alert('註冊失敗：' + r.error); return; }
+    showToast('✅ 會員國註冊成功！');
+  }
+  closeNationModal();
+  loadNations();
+}
+
+async function deleteNation(id, name) {
+  if (!confirm(`確定刪除會員國「${name}」？此操作無法復原。`)) return;
+  const r = await api(`/api/guilds/${currentGuild}/nations/${id}`, 'DELETE');
+  if (r.error) { alert('刪除失敗：' + r.error); return; }
+  showToast('✅ 會員國已刪除');
+  loadNations();
 }
 
 init();
