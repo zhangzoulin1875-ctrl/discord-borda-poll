@@ -563,6 +563,7 @@ async function addOption() { const text=document.getElementById('option-text').v
 async function logout() { await fetch('/logout',{method:'POST',credentials:'include'}); location.reload(); }
 
 function escHtml(s) { return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escHtmlML(s) { return escHtml(s).replace(/\n/g, '<br>'); }
 function escAttr(s) { return String(s||'').replace(/'/g,"\\'"); }
 
 // ── Chat AI Settings ──
@@ -840,7 +841,7 @@ async function startGlobalScan() {
   if (!confirm('\u958b\u59cb\u5168\u5c40\u767e\u79d1\u6383\u63cf\uff1f\n\n\u700f\u89bd\u5668\u6703\u722c\u53d6 micropedia.site \u5168\u90e8\u689d\u76ee\uff0c\u5206\u6279\u9001\u7d66 AI \u5206\u6790\u3002\n\u8acb\u4fdd\u6301\u6b64\u5206\u9801\u958b\u555f\u76f4\u5230\u6383\u63cf\u5b8c\u6210\u3002\n\uff08\u5df2\u5927\u5e45\u63d0\u9ad8\u4e26\u767c\u6578\uff0c\u9810\u4f30\u53ef\u572820\u5206\u9418\u5167\u5b8c\u6210\uff09')) return;
 
   scanRunning = true;
-  const batchSize = 8;
+  const batchSize = 4; // 縮小批次以降低豐富抽取（恩怨/佚事/因果鏈）造成的輸出截斷風險
   const maxConcurrent = 80; // AI 後端無併發限制，大幅拉高以在短時間內跑完全部批次
   const startTime = Date.now();
 
@@ -1026,27 +1027,82 @@ async function loadScanResult() {
           ${f.affiliation ? `<span class="text-xs text-gray-400">(${escHtml(f.affiliation)})</span>` : ''}
         </div>
         <div class="text-sm text-gray-400">${escHtml(f.role||'')}</div>
-        <div class="text-sm text-gray-300 mt-1">${escHtml(f.description||'')}</div>
+        <div class="text-sm text-gray-300 mt-1">${escHtmlML(f.description||'')}</div>
+        ${f.disputes && f.disputes.length ? `
+          <div class="text-xs mt-2 bg-[#3a2a2a] rounded px-2 py-1">
+            <span class="text-red-400 font-semibold">\u2694\ufe0f \u6069\u6028/\u5c0d\u7acb\uff1a</span>
+            <ul class="list-disc list-inside text-gray-300 mt-0.5">
+              ${f.disputes.map(d => `<li>${escHtml(d)}</li>`).join('')}
+            </ul>
+          </div>` : ''}
+        ${f.anecdotes && f.anecdotes.length ? `
+          <div class="text-xs mt-2 bg-[#2a3040] rounded px-2 py-1">
+            <span class="text-blue-300 font-semibold">\ud83d\udcd6 \u8db3\u4e8b/\u8ef8\u4e8b\uff1a</span>
+            <ul class="list-disc list-inside text-gray-300 mt-0.5">
+              ${f.anecdotes.map(a => `<li>${escHtml(a)}</li>`).join('')}
+            </ul>
+          </div>` : ''}
       </div>
     `).join('');
   }
 
+  // ── Events: group into causal chains via leads_to/caused_by links ──
   const eventsDiv = document.getElementById('scan-events');
   if (!events.length) {
     eventsDiv.innerHTML = '<p class="text-gray-400 text-sm">\u5c1a\u7121\u4e8b\u4ef6\u8cc7\u6599\u3002</p>';
   } else {
-    eventsDiv.innerHTML = events.map(e => `
-      <div class="bg-[#2b2d31] rounded-xl p-4">
-        <div class="flex items-center gap-2 mb-1">
-          <span class="text-lg">\ud83d\udcdc</span>
-          <h3 class="font-bold">${escHtml(e.event||'')}</h3>
-          ${e.date ? `<span class="text-xs text-gray-400">${escHtml(e.date)}</span>` : ''}
-        </div>
-        ${e.participants && e.participants.length ? `<div class="text-xs text-gray-500 mb-1">\u53c3\u8207\u8005\uff1a${e.participants.map(escHtml).join('\u3001')}</div>` : ''}
-        <div class="text-sm text-gray-300">${escHtml(e.description||'')}</div>
-        ${e.consequences ? `<div class="text-xs text-gray-400 mt-1 bg-[#1e1f22] rounded px-2 py-1">\u5f71\u97ff\uff1a${escHtml(e.consequences)}</div>` : ''}
-      </div>
-    `).join('');
+    const byName = {};
+    events.forEach((e, i) => { if (e && e.event) byName[e.event.trim().toLowerCase()] = i; });
+
+    // Union-find style clustering via leads_to/caused_by edges (undirected for grouping).
+    const parent = events.map((_, i) => i);
+    function find(x) { while (parent[x] !== x) { x = parent[x]; } return x; }
+    function union(a, b) { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; }
+    events.forEach((e, i) => {
+      (e.leads_to || []).forEach(n => { const j = byName[String(n).trim().toLowerCase()]; if (j !== undefined) union(i, j); });
+      (e.caused_by || []).forEach(n => { const j = byName[String(n).trim().toLowerCase()]; if (j !== undefined) union(i, j); });
+    });
+
+    const clusters = {};
+    events.forEach((_, i) => { const r = find(i); (clusters[r] = clusters[r] || []).push(i); });
+
+    function yearOf(e) { const m = String(e.date || '').match(/\d{3,4}/); return m ? parseInt(m[0], 10) : 99999; }
+
+    function eventCard(e, opts) {
+      opts = opts || {};
+      return `
+        <div class="bg-[#2b2d31] rounded-xl p-4 ${opts.chained ? 'border-l-4 border-[#5865f2]' : ''}">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-lg">\ud83d\udcdc</span>
+            <h3 class="font-bold">${escHtml(e.event || '')}</h3>
+            ${e.date ? `<span class="text-xs text-gray-400">${escHtml(e.date)}</span>` : ''}
+          </div>
+          ${e.participants && e.participants.length ? `<div class="text-xs text-gray-500 mb-1">\u53c3\u8207\u8005\uff1a${e.participants.map(escHtml).join('\u3001')}</div>` : ''}
+          <div class="text-sm text-gray-300">${escHtmlML(e.description || '')}</div>
+          ${e.consequences ? `<div class="text-xs text-gray-400 mt-1 bg-[#1e1f22] rounded px-2 py-1">\u5f71\u97ff\uff1a${escHtmlML(e.consequences)}</div>` : ''}
+          ${(e.caused_by && e.caused_by.length) ? `<div class="text-xs text-[#8a93f5] mt-1">\u2b06 \u524d\u56e0\uff1a${e.caused_by.map(escHtml).join('\u3001')}</div>` : ''}
+          ${(e.leads_to && e.leads_to.length) ? `<div class="text-xs text-[#8a93f5] mt-1">\u2b07 \u5f8c\u679c\uff1a${e.leads_to.map(escHtml).join('\u3001')}</div>` : ''}
+        </div>`;
+    }
+
+    const clusterGroups = Object.values(clusters);
+    // Chains first (size > 1, sorted so the biggest chains lead), then standalone events.
+    clusterGroups.sort((a, b) => b.length - a.length);
+
+    eventsDiv.innerHTML = clusterGroups.map(idxs => {
+      if (idxs.length === 1) {
+        return eventCard(events[idxs[0]]);
+      }
+      const ordered = idxs.slice().sort((a, b) => yearOf(events[a]) - yearOf(events[b]));
+      return `
+        <div class="rounded-xl border border-[#3a3d44] p-3 mb-2">
+          <div class="text-xs text-[#8a93f5] font-semibold mb-2">\ud83d\udd17 \u56e0\u679c\u9023\u9396\uff08${ordered.length} \u5247\u4e8b\u4ef6\uff09</div>
+          ${ordered.map((i, pos) => `
+            ${eventCard(events[i], { chained: true })}
+            ${pos < ordered.length - 1 ? '<div class="text-center text-[#8a93f5] text-xs my-1">\u2b07\ufe0f \u5c0e\u81f4</div>' : ''}
+          `).join('')}
+        </div>`;
+    }).join('');
   }
 
   if (countries.length || rels.length || figures.length || events.length) {

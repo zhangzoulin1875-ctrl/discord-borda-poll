@@ -522,15 +522,31 @@ async def api_global_scan_batch(request):
         _global_scan_state["current_batch"] = f"批次 {batch_idx + 1}/{batch_count}: {titles_preview}..."
 
         system_prompt = (
-            '你是一位歷史學家與微國家學學者。請分析以下維基條目內容，'
-            '提取國家/組織/個人、關係、關鍵人物、重大事件。\n'
+            '你是一位嚴謹的歷史學家與微國家學學者，正在為一份完整的微國家百科關係圖譜做資料收錄工作。\n\n'
+            '【鐵律 — 絕對不可違反】\n'
+            '1. 條目中提到的每一個人物、國家/組織、事件都必須收錄，不論看起來多不重要、只被提及一次、'
+            '或只是配角。絕對不准因為「精簡」「統整」「篇幅」等理由省略任何一個人或國家或事件。\n'
+            '2. 每個事件的描述要完整還原條目中的細節與背景，不要壓縮成一句話簡述。\n'
+            '3. 對於人物，除了基本身份資訊外，務必仔細挖掘條目中提到的：'
+            '恩怨、對立、私人衝突、爭議（disputes）——是跟誰、為什麼；'
+            '以及軼事、趣聞、非正式的小故事（anecdotes）——這些往內容細節找，'
+            '通常藏在條目的敘述細節裡，不是每個人都會直接寫「恩怨」兩個字。\n'
+            '4. 對於事件，如果條目文字中有明確指出「這個事件是被什麼事件引發/導致的」（caused_by），'
+            '或「這個事件後來導致/促成了什麼事件」（leads_to），請把那些後續/前置事件的名稱列出來，'
+            '讓事件之間可以串成因果鏈。如果條目沒有明確講到前後因果的其他事件名稱，這兩個欄位留空陣列即可，'
+            '不要瞎猜或編造不存在的事件名稱。\n\n'
             '請以繁體中文輸出嚴格 JSON 格式（不可使用 markdown 程式碼區塊），包含以下 4 個 key：\n'
             '1. countries: [{"name": "...", "aliases": ["..."], "type": "micronation/organization/individual", '
             '"description": "...", "status": "active/dissolved/unknown"}]\n'
             '2. relationships: [{"from": "...", "to": "...", "type": "alliance/conflict/treaty/trade/diplomatic/cultural/personal", '
             '"description": "...", "context": "...", "status": "active/historical/ended"}]\n'
-            '3. key_figures: [{"name": "...", "affiliation": "...", "role": "...", "description": "..."}]\n'
-            '4. major_events: [{"event": "...", "participants": ["..."], "date": "...", "description": "...", "consequences": "..."}]\n'
+            '3. key_figures: [{"name": "...", "affiliation": "...", "role": "...", "description": "...", '
+            '"disputes": ["與某某因為某事產生衝突/對立...", "..."], '
+            '"anecdotes": ["軼事描述...", "..."]}]\n'
+            '   （disputes 與 anecdotes 若條目中完全沒提到，輸出空陣列 []，不要編造）\n'
+            '4. major_events: [{"event": "...", "participants": ["..."], "date": "...", "description": "...", '
+            '"consequences": "...", "leads_to": ["後續事件名稱（僅限條目明確提到的）", "..."], '
+            '"caused_by": ["前置事件名稱（僅限條目明確提到的）", "..."]}]\n'
             '僅輸出 JSON 物件，請勿附加任何額外文字。'
         )
 
@@ -541,7 +557,7 @@ async def api_global_scan_batch(request):
 
         extracted = None
         try:
-            resp = await call_chat_api(messages, chat_ai_settings, max_tokens=4000)
+            resp = await call_chat_api(messages, chat_ai_settings, max_tokens=8000)
             ai_text = resp.get("content") or ""
             ai_text_clean = ai_text.strip()
             if ai_text_clean.startswith("```"):
@@ -558,6 +574,15 @@ async def api_global_scan_batch(request):
                         extracted = json_module.loads(m.group(0))
                     except Exception:
                         extracted = None
+                if extracted is None:
+                    # Full parse failed (likely truncated by max_tokens). Salvage
+                    # whichever of the 4 fields DID finish generating cleanly,
+                    # instead of throwing the entire batch's extraction away.
+                    salvaged = _salvage_scan_extraction(ai_text_clean or ai_text)
+                    if salvaged:
+                        extracted = salvaged
+                        print(f"♻️ 批次 {batch_idx + 1} JSON 被截斷，搶救回 "
+                              f"{sum(len(v) for v in salvaged.values())} 項資料（而非整批捨棄）")
 
             if isinstance(extracted, dict):
                 _merge_scan_batch(extracted)
@@ -591,12 +616,15 @@ async def api_global_scan_batch(request):
 
 
 async def api_global_scan_finish(request):
-    """Run final consolidation and mark scan as completed."""
+    """Run the additive causal-chain linking pass and mark scan as completed.
+    NOTE: this never rewrites or drops any already-recorded entry — see
+    _link_event_causal_chains for why the old destructive full-graph
+    regeneration was replaced."""
     if not _check_scan_api_key(request):
         return web.json_response({"error": "invalid api key"}, status=403)
     global _global_scan_state
     try:
-        await _consolidate_global_scan_graph()
+        await _link_event_causal_chains()
         _global_scan_state["status"] = "completed"
         _global_scan_state["completed_at"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
         _global_scan_result["last_updated"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
@@ -1144,6 +1172,86 @@ def _load_json_file(filepath: str, default=None):
     except (json_module.JSONDecodeError, Exception) as e:
         print(f"⚠️ 載入 {os.path.basename(filepath)} 失敗（使用預設值）: {e}")
     return default if default is not None else {}
+
+
+def _salvage_json_array_field(raw_text: str, key: str) -> list:
+    """Best-effort recovery of one top-level JSON array field from a
+    possibly truncated/malformed AI response. If the model's output got
+    cut off mid-generation (hit max_tokens), a plain json.loads() on the
+    whole text fails and — without this — we'd throw away EVERY field,
+    including ones that finished fine before the cutoff. This walks the
+    text looking for `"key": [ ... ]`, tracks bracket/string depth by hand
+    (ignoring brackets inside string literals), and:
+      - if the array closes cleanly, parses and returns it whole;
+      - if it's truncated mid-array, trims back to the last complete
+        top-level object in that array and closes it there, so we keep
+        every item that DID finish generating instead of losing the lot.
+    Returns [] if the key isn't found or nothing salvageable exists."""
+    marker = f'"{key}"'
+    m_idx = raw_text.find(marker)
+    if m_idx == -1:
+        return []
+    start = raw_text.find("[", m_idx)
+    if start == -1:
+        return []
+
+    depth = 0
+    in_string = False
+    escape = False
+    last_complete_item_end = None  # index just after a top-level "},"
+    i = start
+    n = len(raw_text)
+    while i < n:
+        ch = raw_text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "[" or ch == "{":
+                depth += 1
+            elif ch == "]" or ch == "}":
+                depth -= 1
+                if ch == "}" and depth == 1:
+                    last_complete_item_end = i + 1
+                if depth == 0:
+                    # Clean close — try the whole thing first.
+                    candidate = raw_text[start:i + 1]
+                    try:
+                        parsed = json_module.loads(candidate)
+                        return parsed if isinstance(parsed, list) else []
+                    except Exception:
+                        break
+        i += 1
+
+    # Truncated (or the clean parse above failed) — salvage up to the last
+    # fully-formed object we saw, if any.
+    if last_complete_item_end is not None:
+        candidate = raw_text[start:last_complete_item_end].rstrip().rstrip(",") + "]"
+        try:
+            parsed = json_module.loads(candidate)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _salvage_scan_extraction(raw_text: str) -> dict:
+    """Recover as much as possible from a batch-extraction AI response that
+    failed a straight json.loads() — per-field, so a cutoff in one field
+    (usually the last one, major_events) doesn't also sacrifice fields that
+    finished generating cleanly before it."""
+    result = {}
+    for key in ("countries", "relationships", "key_figures", "major_events"):
+        arr = _salvage_json_array_field(raw_text, key)
+        if arr:
+            result[key] = arr
+    return result
 
 
 def _save_json_file(filepath: str, data, indent=2) -> bool:
@@ -7514,11 +7622,51 @@ def _load_global_scan_result():
         print(f'全球掃描結果載入失敗: {e}')
 
 
+def _append_unique_text(existing: str, addition: str) -> str:
+    """Append `addition` onto `existing` unless it's already substantively
+    present — never discards existing text, only grows it. This is the core
+    primitive that lets repeated mentions of the same entity across many
+    articles ACCUMULATE detail instead of one mention overwriting/dropping
+    another (the user's hard 'never delete for the sake of merging' rule)."""
+    existing = (existing or "").strip()
+    addition = (addition or "").strip()
+    if not addition:
+        return existing
+    if not existing:
+        return addition
+    if addition in existing:
+        return existing
+    return existing + "\n" + addition
+
+
+def _merge_unique_list(existing: list, addition: list) -> list:
+    """Union two lists of strings/dicts, preserving order, de-duplicating
+    only EXACT repeats (never drops distinct items)."""
+    existing = existing if isinstance(existing, list) else []
+    addition = addition if isinstance(addition, list) else []
+    seen = set()
+    out = []
+    for item in existing + addition:
+        key = json_module.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, (dict, list)) else str(item).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
 def _merge_scan_batch(extracted: dict):
+    """Fold one batch's extraction into the running global scan result.
+    HARD RULE: this function must never delete or overwrite-away existing
+    data. Every dedupe path below ENRICHES the existing entry (unions list
+    fields, appends genuinely-new description text) rather than skipping or
+    replacing — a person/event/country mentioned across many articles keeps
+    accumulating detail (disputes, anecdotes, causal links) instead of only
+    the first or the AI's-preferred mention surviving."""
     if not isinstance(extracted, dict):
         return
 
-    # 1. countries (dedupe by name)
+    # 1. countries (dedupe by name — enrich, never overwrite)
     existing_countries = {
         c.get("name", "").strip().lower(): c
         for c in _global_scan_result.get("countries", [])
@@ -7533,8 +7681,7 @@ def _merge_scan_batch(extracted: dict):
             existing_aliases = set(curr.get("aliases", [])) if isinstance(curr.get("aliases"), list) else set()
             new_aliases = c.get("aliases", []) if isinstance(c.get("aliases"), list) else []
             curr["aliases"] = list(existing_aliases.union(new_aliases))
-            if c.get("description") and len(c["description"]) > len(curr.get("description", "")):
-                curr["description"] = c["description"]
+            curr["description"] = _append_unique_text(curr.get("description", ""), c.get("description", ""))
             if c.get("status") and c["status"] != "unknown":
                 curr["status"] = c["status"]
             if c.get("type"):
@@ -7543,7 +7690,7 @@ def _merge_scan_batch(extracted: dict):
             existing_countries[name_key] = c
             _global_scan_result.setdefault("countries", []).append(c)
 
-    # 2. relationships (dedupe by from + to + type)
+    # 2. relationships (dedupe by from + to + type — enrich, never overwrite)
     existing_rels = {
         (r.get("from", "").strip().lower(), r.get("to", "").strip().lower(), r.get("type", "").strip().lower()): r
         for r in _global_scan_result.get("relationships", [])
@@ -7553,11 +7700,17 @@ def _merge_scan_batch(extracted: dict):
         if not isinstance(r, dict) or not r.get("from") or not r.get("to"):
             continue
         rel_key = (r.get("from", "").strip().lower(), r.get("to", "").strip().lower(), r.get("type", "").strip().lower())
-        if rel_key not in existing_rels:
+        if rel_key in existing_rels:
+            curr = existing_rels[rel_key]
+            curr["description"] = _append_unique_text(curr.get("description", ""), r.get("description", ""))
+            curr["context"] = _append_unique_text(curr.get("context", ""), r.get("context", ""))
+            if r.get("status"):
+                curr["status"] = r["status"]
+        else:
             existing_rels[rel_key] = r
             _global_scan_result.setdefault("relationships", []).append(r)
 
-    # 3. key_figures (dedupe by name)
+    # 3. key_figures (dedupe by name — enrich: union disputes/anecdotes, never skip)
     existing_figs = {
         f.get("name", "").strip().lower(): f
         for f in _global_scan_result.get("key_figures", [])
@@ -7567,11 +7720,22 @@ def _merge_scan_batch(extracted: dict):
         if not isinstance(f, dict) or not f.get("name"):
             continue
         fig_key = f["name"].strip().lower()
-        if fig_key not in existing_figs:
+        if fig_key in existing_figs:
+            curr = existing_figs[fig_key]
+            curr["description"] = _append_unique_text(curr.get("description", ""), f.get("description", ""))
+            if f.get("affiliation") and not curr.get("affiliation"):
+                curr["affiliation"] = f["affiliation"]
+            if f.get("role") and not curr.get("role"):
+                curr["role"] = f["role"]
+            curr["disputes"] = _merge_unique_list(curr.get("disputes", []), f.get("disputes", []))
+            curr["anecdotes"] = _merge_unique_list(curr.get("anecdotes", []), f.get("anecdotes", []))
+        else:
+            f.setdefault("disputes", [])
+            f.setdefault("anecdotes", [])
             existing_figs[fig_key] = f
             _global_scan_result.setdefault("key_figures", []).append(f)
 
-    # 4. major_events (dedupe by event name)
+    # 4. major_events (dedupe by event name — enrich: union participants/leads_to/caused_by)
     existing_events = {
         e.get("event", "").strip().lower(): e
         for e in _global_scan_result.get("major_events", [])
@@ -7581,68 +7745,145 @@ def _merge_scan_batch(extracted: dict):
         if not isinstance(e, dict) or not e.get("event"):
             continue
         ev_key = e["event"].strip().lower()
-        if ev_key not in existing_events:
+        if ev_key in existing_events:
+            curr = existing_events[ev_key]
+            curr["description"] = _append_unique_text(curr.get("description", ""), e.get("description", ""))
+            curr["consequences"] = _append_unique_text(curr.get("consequences", ""), e.get("consequences", ""))
+            curr["participants"] = _merge_unique_list(curr.get("participants", []), e.get("participants", []))
+            curr["leads_to"] = _merge_unique_list(curr.get("leads_to", []), e.get("leads_to", []))
+            curr["caused_by"] = _merge_unique_list(curr.get("caused_by", []), e.get("caused_by", []))
+            if e.get("date") and not curr.get("date"):
+                curr["date"] = e["date"]
+        else:
+            e.setdefault("leads_to", [])
+            e.setdefault("caused_by", [])
             existing_events[ev_key] = e
             _global_scan_result.setdefault("major_events", []).append(e)
 
 
-async def _consolidate_global_scan_graph():
-    """Use AI to consolidate accumulated global scan result graph (merge duplicate entities, resolve conflicts, keep compact)."""
-    current_data = {
-        "countries": _global_scan_result.get("countries", []),
-        "relationships": _global_scan_result.get("relationships", []),
-        "key_figures": _global_scan_result.get("key_figures", []),
-        "major_events": _global_scan_result.get("major_events", []),
-    }
-    if not any(current_data.values()):
+async def _link_event_causal_chains():
+    """Build causal chains between already-extracted events WITHOUT ever
+    rewriting or deleting the events themselves — this is a purely additive
+    pass that only fills in `leads_to`/`caused_by` cross-references.
+
+    The old approach dumped the ENTIRE accumulated graph (which only grows
+    as the scan progresses — potentially thousands of entries) into one AI
+    call asking it to regenerate a 'consolidated, compact' version. That can
+    NEVER satisfy 'never drop anything' once the dataset is large: no output
+    token budget fits thousands of full entries, so the AI was forced to
+    summarize/drop things every single time. This replaces that with an
+    approach that scales with dataset size instead of choking on it:
+
+    1. Group events by shared participant (a country/person appearing in
+       both events is a strong signal they're causally related — treaties,
+       conflicts, and their consequences tend to involve the same actors).
+    2. For each group (chunked to a safe size), send ONLY light-weight
+       {event, date, description, consequences} — never the disputes/
+       anecdotes/full text — and ask for nothing but link references:
+       [{"event": "...", "leads_to": [...], "caused_by": [...]}], where
+       every name referenced MUST be one of the events actually given in
+       that chunk (never invented).
+    3. Merge those references into the existing event records via
+       _merge_unique_list — additive only, so nothing already recorded via
+       _merge_scan_batch is ever touched, let alone dropped.
+
+    This runs once at /finish. It scales because each AI call's input/output
+    is bounded by chunk size, not by total corpus size — doubling the number
+    of events just means more (small) chunks, not one impossibly large call."""
+    events = _global_scan_result.get("major_events", [])
+    if not events or len(events) < 2:
         return
 
-    system_prompt = (
-        '你是一位資料庫整合專家與微國家歷史學家。請審視並整合以下微國家關係圖譜資料，'
-        '合併重複條目、融合別名與敘述、整合矛盾狀態，並保持資料精簡與精準。\n'
-        '請以繁體中文輸出嚴格 JSON 格式（不可使用 markdown 程式碼區塊），包含以下 4 個 key：\n'
-        '1. countries: [{"name": "...", "aliases": ["..."], "type": "micronation/organization/individual", '
-        '"description": "...", "status": "active/dissolved/unknown"}]\n'
-        '2. relationships: [{"from": "...", "to": "...", "type": "alliance/conflict/treaty/trade/diplomatic/cultural/personal", '
-        '"description": "...", "context": "...", "status": "active/historical/ended"}]\n'
-        '3. key_figures: [{"name": "...", "affiliation": "...", "role": "...", "description": "..."}]\n'
-        '4. major_events: [{"event": "...", "participants": ["..."], "date": "...", "description": "...", "consequences": "..."}]\n'
-        '僅輸出 JSON 物件，請勿附加任何額外文字。'
-    )
+    # Group event *indices* by participant so related events land in the
+    # same chunk together (an event can belong to multiple groups).
+    groups: dict = {}
+    for idx, e in enumerate(events):
+        if not isinstance(e, dict):
+            continue
+        for p in (e.get("participants") or []):
+            key = str(p).strip().lower()
+            if key:
+                groups.setdefault(key, set()).add(idx)
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": '當前圖譜資料:\n' + json_module.dumps(current_data, ensure_ascii=False)}
-    ]
+    CHUNK_SIZE = 35
+    chunks_seen: list = []  # frozenset(idx) already processed, to skip near-duplicate groups
+    processed_chunks = 0
 
-    try:
-        resp = await call_chat_api(messages, chat_ai_settings, max_tokens=4000)
-        ai_text = resp.get("content") or ""
-        ai_text_clean = ai_text.strip()
-        if ai_text_clean.startswith("```"):
-            ai_text_clean = re.sub(r"^```(?:json)?\s*", "", ai_text_clean, flags=re.IGNORECASE)
-            ai_text_clean = re.sub(r"\s*```$", "", ai_text_clean)
-            ai_text_clean = ai_text_clean.strip()
+    for participant, idx_set in groups.items():
+        if len(idx_set) < 2:
+            continue
+        idx_list = sorted(idx_set)
+        sub_chunks = [idx_list[i:i + CHUNK_SIZE] for i in range(0, len(idx_list), CHUNK_SIZE)]
 
-        consolidated = None
-        try:
-            consolidated = json_module.loads(ai_text_clean)
-        except Exception:
-            m = re.search(r"\{.*\}", ai_text, re.DOTALL)
-            if m:
+        for chunk_idxs in sub_chunks:
+            frz = frozenset(chunk_idxs)
+            if frz in chunks_seen:
+                continue
+            chunks_seen.append(frz)
+
+            light_events = [
+                {
+                    "event": events[i].get("event", ""),
+                    "date": events[i].get("date", ""),
+                    "description": (events[i].get("description") or "")[:300],
+                    "consequences": (events[i].get("consequences") or "")[:300],
+                }
+                for i in chunk_idxs
+            ]
+
+            system_prompt = (
+                '你是微國家歷史學家，正在分析以下這組事件（它們都跟同一位參與者「' + str(participant) + '」有關），'
+                '找出事件之間明確的因果關係鏈：哪個事件導致了哪個事件。\n'
+                '規則：\n'
+                '1. 只能引用下面清單中「已經存在」的事件名稱，絕對不能編造清單以外的事件名稱。\n'
+                '2. 如果兩個事件之間沒有明確因果關係，不要硬湊，寧可留空。\n'
+                '3. leads_to 指這個事件之後導致了哪些清單中的其他事件；caused_by 指這個事件是被清單中'
+                '哪些其他事件所導致。\n'
+                '請以嚴格 JSON 陣列輸出（不可使用 markdown 程式碼區塊），格式：\n'
+                '[{"event": "事件名稱（須完全match清單中的名稱）", "leads_to": ["..."], "caused_by": ["..."]}]\n'
+                '只需要輸出有因果關係的事件，沒有關係的事件不用輸出。若完全沒有因果關係，輸出 []。'
+            )
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json_module.dumps(light_events, ensure_ascii=False)}
+            ]
+
+            try:
+                resp = await call_chat_api(messages, chat_ai_settings, max_tokens=2000)
+                ai_text = (resp.get("content") or "").strip()
+                if ai_text.startswith("```"):
+                    ai_text = re.sub(r"^```(?:json)?\s*", "", ai_text, flags=re.IGNORECASE)
+                    ai_text = re.sub(r"\s*```$", "", ai_text).strip()
                 try:
-                    consolidated = json_module.loads(m.group(0))
+                    links = json_module.loads(ai_text)
                 except Exception:
-                    consolidated = None
+                    m = re.search(r"\[.*\]", ai_text, re.DOTALL)
+                    links = json_module.loads(m.group(0)) if m else []
 
-        if isinstance(consolidated, dict):
-            for k in ["countries", "relationships", "key_figures", "major_events"]:
-                if k in consolidated and isinstance(consolidated[k], list):
-                    _global_scan_result[k] = consolidated[k]
-            _save_global_scan_result()
-            print("✨ 全球掃描圖譜彙整完成")
-    except Exception as e:
-        print(f"⚠️ 全球掃描圖譜彙整失敗: {e}")
+                if not isinstance(links, list):
+                    continue
+
+                valid_names = {events[i].get("event", "").strip().lower() for i in chunk_idxs}
+                by_name = {events[i].get("event", "").strip().lower(): events[i] for i in chunk_idxs}
+
+                for link in links:
+                    if not isinstance(link, dict):
+                        continue
+                    ev_name = str(link.get("event", "")).strip().lower()
+                    target = by_name.get(ev_name)
+                    if not target:
+                        continue
+                    leads_to = [n for n in (link.get("leads_to") or []) if str(n).strip().lower() in valid_names]
+                    caused_by = [n for n in (link.get("caused_by") or []) if str(n).strip().lower() in valid_names]
+                    target["leads_to"] = _merge_unique_list(target.get("leads_to", []), leads_to)
+                    target["caused_by"] = _merge_unique_list(target.get("caused_by", []), caused_by)
+                processed_chunks += 1
+            except Exception as e:
+                print(f"⚠️ 因果鏈分析失敗（參與者：{participant}）: {e}")
+                continue
+
+    _save_global_scan_result()
+    print(f"✨ 事件因果鏈分析完成，共處理 {processed_chunks} 個關聯群組（原始資料完全保留，僅新增因果標註）")
 
 
 async def _run_global_micropedia_scan():
@@ -7758,15 +7999,11 @@ async def _run_global_micropedia_scan():
                 _global_scan_state["progress"] += len(batch)
                 _global_scan_result["last_updated"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
 
-                # Consolidation every 10 batches
-                if (b_idx + 1) % 10 == 0:
-                    await _consolidate_global_scan_graph()
-
                 _save_global_scan_result()
                 await asyncio.sleep(0.5)
 
-            # Final consolidation pass
-            await _consolidate_global_scan_graph()
+            # Final pass: additive causal-chain linking only (never rewrites/drops data)
+            await _link_event_causal_chains()
 
             _global_scan_state["status"] = "completed"
             _global_scan_state["completed_at"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
