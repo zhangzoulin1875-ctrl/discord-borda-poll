@@ -9038,18 +9038,32 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
 
     # 3) Flag image — sticky too. If already verified valid before (e.g. via
     #    the separate flag-upload flow), skip re-verification entirely.
+    #
+    # IMPORTANT: this is judged purely by "is there an actual image", NOT by
+    # whether the literal text label "國旗" appears anywhere in the post.
+    # Gating on the label text was fragile — an applicant who attaches the
+    # flag image but doesn't retype/keep the "國旗" heading (e.g. after
+    # editing other fields) would have a perfectly good image rejected as
+    # "completely missing". An attached image (or a directly-pasted image
+    # link that Discord auto-unfurls) is unambiguous evidence on its own.
     has_image = bool(message.attachments)
     image_url = str(message.attachments[0].url) if has_image else ""
+    if not has_image:
+        # Fall back to a directly-pasted image link (Discord unfurls it into
+        # an embed with type=="image"). Do NOT use rich-link thumbnails
+        # (e.g. the server-invite preview from the 伺服器連結 field) — only
+        # a genuine image embed counts.
+        for emb in getattr(message, "embeds", []) or []:
+            if getattr(emb, "type", None) == "image" and emb.image and emb.image.url:
+                image_url = str(emb.image.url)
+                has_image = True
+                break
+
     already_flag_ok = field_status.get("國旗", False) or bool(existing_entry and existing_entry.get("flag_valid"))
-    flag_label_present = "國旗" in message.content or "flag" in message.content.lower()
     flag_reason = ""  # for display purposes only
     if already_flag_ok:
         flag_ok = True
         flag_image_url = (existing_entry.get("flag_image_url") if existing_entry else "") or image_url
-    elif not flag_label_present:
-        flag_ok = False
-        flag_reason = "missing"
-        flag_image_url = ""
     elif has_image:
         flag_ok = await _verify_flag_image(image_url)
         flag_reason = "" if flag_ok else "invalid"
@@ -9070,9 +9084,7 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
         if not field_status.get(zh, False):
             missing_fields.append(f"{zh}（空白）")
     if not field_status.get("國旗", False):
-        if flag_reason == "missing":
-            missing_fields.append("國旗")
-        elif flag_reason == "no_image":
+        if flag_reason == "no_image":
             missing_fields.append("國旗（缺少圖片）")
         else:
             missing_fields.append("國旗（AI 判定非旗幟）")
