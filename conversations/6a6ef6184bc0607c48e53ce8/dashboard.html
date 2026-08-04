@@ -5,108 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ICEA official</title>
 <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Nation Modal -->
-  <div id="nation-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-    <div class="bg-[#2b2d31] rounded-xl p-6 w-full max-w-md mx-4">
-      <h3 id="nation-modal-title" class="text-lg font-bold mb-4">註冊會員國</h3>
-      <div class="space-y-3">
-        <div>
-          <label class="text-xs text-gray-400">國名（中文）*</label>
-          <input id="nation-name-zh" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：臺灣民國">
-        </div>
-        <div>
-          <label class="text-xs text-gray-400">國名（英文）*</label>
-          <input id="nation-name-en" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：Republic of Taiwan">
-        </div>
-        <div>
-          <label class="text-xs text-gray-400">ISO-3166 代碼 *</label>
-          <input id="nation-iso" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：TW" maxlength="3">
-        </div>
-        <div>
-          <label class="text-xs text-gray-400">派駐代表 Discord User ID（最多3位，逗號分隔）</label>
-          <input id="nation-reps" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：123456789,987654321">
-        </div>
-        <div>
-          <label class="text-xs text-gray-400">類別</label>
-          <select id="nation-category" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]">
-            <option value="member">🟢 成員國</option>
-            <option value="council">🔵 理事國</option>
-            <option value="observer">🟡 觀察國</option>
-            <option value="removed">⚫ 已除籍</option>
-          </select>
-        </div>
-        <div>
-          <label class="text-xs text-gray-400">備註</label>
-          <textarea id="nation-notes" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2] resize-none" rows="2" placeholder="選填"></textarea>
-        </div>
-      </div>
-      <div class="flex gap-2 mt-4">
-        <button onclick="closeNationModal()" class="flex-1 bg-[#4e5058] hover:bg-[#3a3c43] text-white px-4 py-2 rounded-lg text-sm font-semibold">取消</button>
-        <button onclick="saveNation()" class="flex-1 bg-[#5865f2] hover:bg-[#4752c4] text-white px-4 py-2 rounded-lg text-sm font-semibold">儲存</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Nations -->
-  <div id="nations-view" class="hidden fade-in">
-    <div class="flex items-center justify-between mb-4">
-      <div class="flex items-center gap-3">
-        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
-        <h2 class="text-xl font-bold">🌍 會員國管理</h2>
-      </div>
-      <button onclick="showNationModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">+ 註冊會員國</button>
-    </div>
-    <div id="nation-list" class="space-y-3"></div>
-  </div>
-
-  <!-- Global Scan / Relationship Graph -->
-  <div id="scan-view" class="hidden fade-in">
-    <div class="flex items-center justify-between mb-4">
-      <div class="flex items-center gap-3">
-        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
-        <h2 class="text-xl font-bold">🌐 全局百科掃描 — 關係譜圖</h2>
-      </div>
-      <div class="flex gap-2">
-        <button id="scan-start-btn" onclick="startGlobalScan()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">🚀 開始掃描</button>
-        <button id="scan-refresh-btn" onclick="loadScanResult()" class="bg-[#4e5058] hover:bg-[#3a3c43] px-4 py-2 rounded-lg text-sm font-semibold">🔄 重新載入</button>
-      </div>
-    </div>
-
-    <!-- Status Bar -->
-    <div id="scan-status-bar" class="bg-[#2b2d31] rounded-xl p-4 mb-4">
-      <div class="flex items-center justify-between mb-2">
-        <div class="flex items-center gap-2">
-          <span id="scan-status-icon" class="text-2xl">⚪</span>
-          <div>
-            <div id="scan-status-text" class="font-semibold text-sm">尚未開始</div>
-            <div id="scan-status-detail" class="text-xs text-gray-400">點擊「開始掃描」讀取百科全部條目並建立關係譜圖</div>
-          </div>
-        </div>
-        <div id="scan-progress-text" class="text-sm text-gray-400"></div>
-      </div>
-      <div id="scan-progress-bar-bg" class="w-full bg-[#1e1f22] rounded-full h-2 mt-2 hidden">
-        <div id="scan-progress-bar" class="bg-[#5865f2] rounded-full h-2 transition-all duration-500" style="width: 0%"></div>
-      </div>
-    </div>
-
-    <!-- Tab switcher for result views -->
-    <div id="scan-tabs" class="flex gap-2 mb-4 hidden">
-      <button onclick="showScanTab('countries')" id="scan-tab-countries" class="scan-tab-btn active px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#5865f2]">🏰 國家/組織</button>
-      <button onclick="showScanTab('relationships')" id="scan-tab-relationships" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">🔗 關係</button>
-      <button onclick="showScanTab('figures')" id="scan-tab-figures" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">👤 關鍵人物</button>
-      <button onclick="showScanTab('events')" id="scan-tab-events" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">📜 重大事件</button>
-    </div>
-
-    <!-- Countries View -->
-    <div id="scan-countries" class="space-y-2 hidden"></div>
-    <!-- Relationships View -->
-    <div id="scan-relationships" class="space-y-2 hidden"></div>
-    <!-- Figures View -->
-    <div id="scan-figures" class="space-y-2 hidden"></div>
-    <!-- Events View -->
-    <div id="scan-events" class="space-y-2 hidden"></div>
-  </div>
-
 <script>tailwind.config={darkMode:'class'}</script>
 <style>
   body{font-family:'Segoe UI',system-ui,sans-serif}
@@ -331,7 +229,110 @@
       <button onclick="saveMeetingAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存會議 AI 設定</button>
     </div>
   </div>
+
+<!-- Nations -->
+  <div id="nations-view" class="hidden fade-in">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-3">
+        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+        <h2 class="text-xl font-bold">🌍 會員國管理</h2>
+      </div>
+      <button onclick="showNationModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">+ 註冊會員國</button>
+    </div>
+    <div id="nation-list" class="space-y-3"></div>
+  </div>
+
+<!-- Global Scan / Relationship Graph -->
+  <div id="scan-view" class="hidden fade-in">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-3">
+        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+        <h2 class="text-xl font-bold">🌐 全局百科掃描 — 關係譜圖</h2>
+      </div>
+      <div class="flex gap-2">
+        <button id="scan-start-btn" onclick="startGlobalScan()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">🚀 開始掃描</button>
+        <button id="scan-refresh-btn" onclick="loadScanResult()" class="bg-[#4e5058] hover:bg-[#3a3c43] px-4 py-2 rounded-lg text-sm font-semibold">🔄 重新載入</button>
+      </div>
+    </div>
+
+    <!-- Status Bar -->
+    <div id="scan-status-bar" class="bg-[#2b2d31] rounded-xl p-4 mb-4">
+      <div class="flex items-center justify-between mb-2">
+        <div class="flex items-center gap-2">
+          <span id="scan-status-icon" class="text-2xl">⚪</span>
+          <div>
+            <div id="scan-status-text" class="font-semibold text-sm">尚未開始</div>
+            <div id="scan-status-detail" class="text-xs text-gray-400">點擊「開始掃描」讀取百科全部條目並建立關係譜圖</div>
+          </div>
+        </div>
+        <div id="scan-progress-text" class="text-sm text-gray-400"></div>
+      </div>
+      <div id="scan-progress-bar-bg" class="w-full bg-[#1e1f22] rounded-full h-2 mt-2 hidden">
+        <div id="scan-progress-bar" class="bg-[#5865f2] rounded-full h-2 transition-all duration-500" style="width: 0%"></div>
+      </div>
+    </div>
+
+    <!-- Tab switcher for result views -->
+    <div id="scan-tabs" class="flex gap-2 mb-4 hidden">
+      <button onclick="showScanTab('countries')" id="scan-tab-countries" class="scan-tab-btn active px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#5865f2]">🏰 國家/組織</button>
+      <button onclick="showScanTab('relationships')" id="scan-tab-relationships" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">🔗 關係</button>
+      <button onclick="showScanTab('figures')" id="scan-tab-figures" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">👤 關鍵人物</button>
+      <button onclick="showScanTab('events')" id="scan-tab-events" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">📜 重大事件</button>
+    </div>
+
+    <!-- Countries View -->
+    <div id="scan-countries" class="space-y-2 hidden"></div>
+    <!-- Relationships View -->
+    <div id="scan-relationships" class="space-y-2 hidden"></div>
+    <!-- Figures View -->
+    <div id="scan-figures" class="space-y-2 hidden"></div>
+    <!-- Events View -->
+    <div id="scan-events" class="space-y-2 hidden"></div>
+  </div>
+
 </div>
+
+<!-- Nation Modal -->
+<div id="nation-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+    <div class="bg-[#2b2d31] rounded-xl p-6 w-full max-w-md mx-4">
+      <h3 id="nation-modal-title" class="text-lg font-bold mb-4">註冊會員國</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs text-gray-400">國名（中文）*</label>
+          <input id="nation-name-zh" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：臺灣民國">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">國名（英文）*</label>
+          <input id="nation-name-en" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：Republic of Taiwan">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">ISO-3166 代碼 *</label>
+          <input id="nation-iso" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：TW" maxlength="3">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">派駐代表 Discord User ID（最多3位，逗號分隔）</label>
+          <input id="nation-reps" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：123456789,987654321">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">類別</label>
+          <select id="nation-category" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]">
+            <option value="member">🟢 成員國</option>
+            <option value="council">🔵 理事國</option>
+            <option value="observer">🟡 觀察國</option>
+            <option value="removed">⚫ 已除籍</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">備註</label>
+          <textarea id="nation-notes" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2] resize-none" rows="2" placeholder="選填"></textarea>
+        </div>
+      </div>
+      <div class="flex gap-2 mt-4">
+        <button onclick="closeNationModal()" class="flex-1 bg-[#4e5058] hover:bg-[#3a3c43] text-white px-4 py-2 rounded-lg text-sm font-semibold">取消</button>
+        <button onclick="saveNation()" class="flex-1 bg-[#5865f2] hover:bg-[#4752c4] text-white px-4 py-2 rounded-lg text-sm font-semibold">儲存</button>
+      </div>
+    </div>
+  </div>
 
 <!-- Create Modal -->
 <div id="create-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
@@ -451,7 +452,7 @@ function showLoading(msg) { document.getElementById('loading-msg').textContent =
 
 function navigate(view) {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   showOnly('main-view');
   if (view === 'guilds') { document.getElementById('guilds-view').classList.remove('hidden'); loadGuilds(); setActiveTab('polls'); }
   else if (view === 'polls') { document.getElementById('polls-view').classList.remove('hidden'); setActiveTab('polls'); }
@@ -566,7 +567,7 @@ function escAttr(s) { return String(s||'').replace(/'/g,"\\'"); }
 
 // ── Chat AI Settings ──
 async function showChatAIPanel() {
-  ['guilds-view','polls-view','detail-view','meeting-ai-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('chat-ai-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('chat-ai');
@@ -611,7 +612,7 @@ async function saveChatAISettings() {
 
 // ── Meeting AI Settings ──
 async function showMeetingAIPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('meeting-ai-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('meeting-ai');
@@ -640,7 +641,7 @@ async function saveMeetingAISettings() {
 let editingNationId = null;
 
 async function showNationsPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('nations-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('nations');
@@ -739,7 +740,7 @@ async function deleteNation(id, name) {
 let scanPollTimer = null;
 
 async function showScanPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('scan-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('scan');
