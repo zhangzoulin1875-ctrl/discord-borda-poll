@@ -184,6 +184,8 @@ async def keep_alive_server():
     app.router.add_post("/api/guilds/{gid}/polls/{pid}/options", api_add_option)
     app.router.add_put("/api/guilds/{gid}/polls/{pid}/roles", api_set_roles)
     app.router.add_get("/oauth/drive/callback", oauth_drive_callback)
+    # Debug endpoint (no auth) — returns count + first entry keys
+    app.router.add_get("/api/debug/nations", api_debug_nations)
     # Member nations API
     app.router.add_get("/api/guilds/{gid}/nations", api_list_nations)
     app.router.add_post("/api/guilds/{gid}/nations", api_create_nation)
@@ -199,6 +201,32 @@ async def keep_alive_server():
 
 
 # ── Dashboard API: 會員國管理 ──
+
+async def api_debug_nations(request):
+    """Debug endpoint — no auth required. Returns basic diagnostics."""
+    try:
+        mn = _member_nations
+        entry_count = len(mn.get("entries", [])) if isinstance(mn, dict) else f"NOT_DICT:{type(mn)}"
+        sample = []
+        if isinstance(mn, dict) and mn.get("entries"):
+            for e in mn["entries"][:3]:
+                sample.append({
+                    "id": e.get("id", "MISSING"),
+                    "guild_id": e.get("guild_id", "MISSING"),
+                    "name_zh": e.get("name_zh", "MISSING"),
+                    "keys": list(e.keys()),
+                })
+        return web.json_response({
+            "type": str(type(mn)),
+            "is_dict": isinstance(mn, dict),
+            "has_entries": isinstance(mn, dict) and "entries" in mn,
+            "entry_count": entry_count,
+            "sample": sample,
+        })
+    except Exception as ex:
+        import traceback
+        return web.json_response({"error": str(ex), "trace": traceback.format_exc()[:500]}, status=500)
+
 
 async def api_list_nations(request):
     try:

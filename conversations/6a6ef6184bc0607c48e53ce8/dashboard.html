@@ -369,8 +369,11 @@ async function api(path, method = 'GET', body = null) {
   try {
     const res = await fetch(path, opts);
     if (res.status === 401) return { error: 'unauthorized', status: 401 };
-    if (res.status === 403) return { error: 'forbidden', status: 403 };
-    if (!res.ok) return { error: `HTTP ${res.status}`, status: res.status };
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try { const j = await res.json(); if (j.error) detail = j.error; } catch {}
+      return { error: detail, status: res.status };
+    }
     return res.json();
   } catch (e) {
     return { error: e.message };
