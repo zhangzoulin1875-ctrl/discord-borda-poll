@@ -3597,23 +3597,27 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # nuanced background knowledge about micronations beyond what a
         # single micropedia lookup can provide.
         if ai_refined_knowledge:
-            # Only inject HIGH-confidence entries (wiki-sourced).
-            # Low-confidence entries (from Discord chatter) are excluded to
-            # prevent knowledge pollution.
+            # Inject ALL refined knowledge — both high (wiki-verified) and
+            # low (community-sourced, not yet verified). Both have value:
+            # - high: verified facts from community discussions, cross-checked with wiki
+            # - low: community insights/knowledge that wiki didn't cover yet
+            # They're labeled so the AI knows which to trust more.
             high_confidence = [k for k in ai_refined_knowledge if k.get("confidence", "high") == "high"]
-            recent_knowledge = high_confidence[-10:]  # last 10 to keep prompt lean
+            low_confidence = [k for k in ai_refined_knowledge if k.get("confidence", "high") != "high"]
+            recent_knowledge = ai_refined_knowledge[-12:]  # last 12 to keep prompt lean
             if recent_knowledge:
                 knowledge_lines = []
                 for k in recent_knowledge:
-                    knowledge_lines.append(f"- [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
+                    conf_tag = "✅" if k.get("confidence", "high") == "high" else "⚠️"
+                    knowledge_lines.append(f"- {conf_tag} [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
                 system_prompt += (
-                    f"\n\n─── 微國家百科精煉知識（社群話題 × 百科驗證）───\n"
-                    f"以下是根據社群近期討論話題，從百科文章中萃取整理的知識摘要。"
-                    f"這些知識已過濾不可靠來源，可信度較高。"
-                    f"回答相關問題時可優先參考這些摘要，但仍可自行搜尋百科確認。\n"
+                    f"\n\n─── 微國家精煉知識庫 ───\n"
+                    f"以下是從社群討論中萃取、經百科驗證修正的知識摘要。\n"
+                    f"✅ = 已經百科驗證（可信），⚠️ = 社群討論但百科未覆蓋（僅供參考）。\n"
+                    f"回答相關問題時優先參考 ✅ 條目，⚠️ 條目可作為補充但需自行判斷。\n"
                     + "\n".join(knowledge_lines)
                 )
-                print(f"🔍 AI精煉: 已注入 {len(recent_knowledge)} 條高可信度知識 (篩掉 {len(ai_refined_knowledge) - len(high_confidence)} 條低可信度)")
+                print(f"🔍 AI精煉: 已注入 {len(high_confidence)} 條高可信 + {len(low_confidence)} 條低可信知識")
 
         system_prompt += (
             f"\n\n─── search_micropedia 工具 ───\n"
@@ -7187,8 +7191,8 @@ class SystemGroup(app_commands.Group):
         high_count = sum(1 for k in ai_refined_knowledge if k.get("confidence", "high") == "high")
         low_count = knowledge_count - high_count
         lines.append(f"知識庫：{knowledge_count}/{max_entries} ({kb_ratio:.0%})")
-        lines.append(f"  ├─ 高可信度（百科來源）：{high_count} 條")
-        lines.append(f"  └─ 低可信度（閒聊來源）：{low_count} 條（不會注入 AI 上下文）")
+        lines.append(f"  ├─ 高可信度（百科驗證）：{high_count} 條")
+        lines.append(f"  └─ 低可信度（社群未驗證）：{low_count} 條（仍會注入 AI 上下文）")
         if _refine_empty_streak > 0:
             lines.append(f"⚠️ 連續空手：{_refine_empty_streak} 次（找不到新知識，已觸發退避）")
         if ch_id:
@@ -10599,182 +10603,304 @@ async def _ai_refine_fetch_channel_snippets(guild, max_channels=15, msgs_per_cha
     return "\n\n".join(snippets)
 
 
-async def _ai_refine_fetch_wiki_batch(channel_snippets: str) -> str:
-    """Fetch 3-5 micropedia articles in parallel. Search terms come from
-    keywords found in Discord snippets + random fallback terms.
-    No AI API call needed — just parallel HTTP fetches."""
-    # Extract keywords from Discord (no API)
-    keywords = _ai_refine_extract_keywords_sync(channel_snippets) if channel_snippets else []
-
-    # Build search terms: keywords + random fallback to reach 5 total
-    fallback_terms = [
-        "共和國", "聯邦", "王國", "帝國", "公國", "自由邦",
-        "城邦", "聯盟", "組織", "條約", "宣言", "憲法",
-        "政府", "選舉", "文化", "歷史", "外交", "國旗",
-    ]
-    # Add random terms until we have 5
-    search_terms = list(keywords)
-    for term in fallback_terms:
-        if term not in search_terms:
-            search_terms.append(term)
-        if len(search_terms) >= 5:
-            break
-    search_terms = search_terms[:5]
-
-    print(f"🔍 AI精煉: 百科搜尋詞: {search_terms}")
-
-    async def _safe_fetch(term):
-        try:
-            return await asyncio.wait_for(_fetch_micropedia(term, max_results=1), timeout=8)
-        except Exception:
-            return ""
-
-    results = await asyncio.gather(*[_safe_fetch(t) for t in search_terms], return_exceptions=True)
-    articles = []
-    for r in results:
-        if isinstance(r, str) and r.strip():
-            articles.append(r.strip())
-
-    if not articles:
-        return ""
-    # Truncate each article to keep total under ~4000 chars
-    total_budget = 4000
-    per_article = total_budget // max(1, len(articles))
-    truncated = [a[:per_article] for a in articles]
-    return "\n\n── 下一篇 ──\n\n".join(truncated)
-
-
-def _ai_refine_extract_keywords_sync(channel_snippets: str) -> list:
-    """Synchronous version of keyword extraction for use in batch fetch."""
-    if not channel_snippets:
-        return []
-    keyword_patterns = [
-        "共和國", "聯邦", "王國", "帝國", "公國", "自由邦",
-        "城邦", "聯盟", "組織", "條約", "宣言", "憲法",
-        "政府", "選舉", "文化", "歷史", "外交", "國旗",
-        "理事", "秘書", "議會", "主席", "首相", "總統",
-        "公民", "投票", "罷免", "提案", "修正",
-    ]
-    found = []
-    for kw in keyword_patterns:
-        if kw in channel_snippets and kw not in found:
-            found.append(kw)
-        if len(found) >= 3:
-            break
-    return found
-
-
-async def _ai_refine_synthesize(wiki_text: str, channel_snippets: str, existing_topics: list) -> list:
-    """Single AI call: given multiple wiki articles + existing knowledge base,
-    extract up to 3 NEW knowledge entries. Returns a list of dicts.
-    This is the ONLY API call in the pipeline — 1 call for up to 3 entries."""
-    if not chat_ai_settings.get("api_key") or not wiki_text:
+async def _ai_refine_extract_from_discord(channel_snippets: str, existing_topics: list) -> list:
+    """STEP 1 (API call 1): Extract PRELIMINARY knowledge from Discord
+    community discussions. This is raw community knowledge — may contain
+    errors, jokes, or speculation. That's OK; Step 2 will verify it.
+    Returns a list of {topic, summary, details, search_terms} dicts.
+    Retries once with a different prompt if the result is empty/garbage."""
+    if not chat_ai_settings.get("api_key") or not channel_snippets:
         return []
 
-    existing_list = ", ".join(existing_topics[-50:]) if existing_topics else "（無）"
+    existing_list = ", ".join(existing_topics[-30:]) if existing_topics else "（無）"
 
     system_prompt = (
-        "你是一個微國家百科知識精煉引擎。你會收到多篇微國家百科文章。\n"
-        "你的任務是從這些文章中萃取最多 3 條有價值的知識。\n\n"
-        "每條知識的萃取要求：\n"
-        "1. 綜合整理：如果多篇文章涉及同一主題，整合出完整脈絡\n"
-        "2. 深入解讀：找出容易被忽略但有意義的細節（制度設計巧思、歷史因果等）\n"
-        "3. 不要照搬原文，要重新組織成簡潔的知識條目\n\n"
-        "重要規則：\n"
-        "- 知識必須完全來自百科文章，不要加入百科沒有的推測\n"
-        "- 如果文章內容太少或沒有值得萃取的知識，回傳空陣列\n"
-        "- 不要萃取跟現有知識庫重複的主題\n\n"
-        f"現有知識庫主題（請勿重複）：{existing_list}\n\n"
+        "你是一個微國家社群知識萃取師。你會收到 Discord 伺服器中多個頻道的近期訊息。\n"
+        "你的任務是從這些社群討論中萃取 1-3 條「初步知識」——也就是社群成員在討論中\n"
+        "提到或推導出的、跟微國家相關的知識或見解。\n\n"
+        "初步知識的特徵：\n"
+        "- 來自社群成員的討論，不是從百科查的\n"
+        "- 可能是成員分享的經驗、對制度的觀察、對事件的解讀、對歷史的討論等\n"
+        "- 可能包含不完全準確的內容——這沒關係，後續會用百科驗證\n"
+        "- 必須是實質的知識或見解，不是純閒聊、打招呼、表情符號\n\n"
+        "每條初步知識需要：\n"
+        '- topic: 簡短主題（10字以內）\n'
+        '- summary: 一句話摘要\n'
+        '- details: 詳細說明（50-200字）\n'
+        '- search_terms: 用於百科搜尋的關鍵詞（1-3個，用於驗證這條知識）\n\n'
+        f"現有知識庫已有這些主題（請勿重複）：{existing_list}\n\n"
         "嚴格回覆 JSON 陣列，不要加 markdown code block 或其他文字：\n"
-        '[{"topic": "簡短主題（10字以內）", "summary": "一句話摘要", "details": "詳細說明（50-200字）"}]\n'
-        "如果沒有值得萃取的知識，回傳 []"
-    )
-
-    # Include a brief Discord context so the AI can prioritize community-relevant topics
-    discord_context = ""
-    if channel_snippets:
-        discord_context = f"\n\n── 社群近期討論（僅供參考話題方向，不可作為知識來源）──\n{channel_snippets[:500]}"
-
-    user_content = (
-        f"── 微國家百科文章（可信來源）──\n{wiki_text}"
-        f"{discord_context}"
+        '[{"topic": "...", "summary": "...", "details": "...", "search_terms": ["詞1", "詞2"]}]\n'
+        "如果訊息中沒有值得萃取的微國家知識，回傳 []"
     )
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
+        {"role": "user", "content": channel_snippets[:3500]},
     ]
 
-    try:
-        result = await asyncio.wait_for(call_chat_api(messages, chat_ai_settings), timeout=45)
-    except Exception as e:
-        print(f"🔍 AI精煉: AI 合成失敗: {e}")
+    for attempt in range(2):  # Max 2 attempts
+        prompt_label = "首次萃取" if attempt == 0 else "重試萃取（放寬標準）"
+        print(f"🔍 AI精煉: {prompt_label} from Discord...")
+
+        if attempt == 1:
+            # Loosen the prompt for retry
+            messages[0]["content"] = messages[0]["content"].replace(
+                "必須是實質的知識或見解",
+                "即使是稍微牽強的知識或見解也可以，只要跟微國家有關"
+            )
+
+        try:
+            result = await asyncio.wait_for(call_chat_api(messages, chat_ai_settings), timeout=40)
+        except Exception as e:
+            print(f"🔍 AI精煉: {prompt_label}失敗: {e}")
+            continue
+
+        raw = result.get("content", "")
+        if not raw:
+            tool_calls = result.get("tool_calls", [])
+            if tool_calls:
+                raw = tool_calls[0].get("function", {}).get("arguments", "")
+
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1] if "\n" in raw else raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+        try:
+            data = json_module.loads(raw)
+        except Exception:
+            import re
+            match = re.search(r'\[.*\]', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json_module.loads(match.group())
+                except Exception:
+                    print(f"🔍 AI精煉: {prompt_label}無法解析: {raw[:200]}")
+                    continue
+            else:
+                print(f"🔍 AI精煉: {prompt_label}無法解析: {raw[:200]}")
+                continue
+
+        if not isinstance(data, list):
+            if isinstance(data, dict) and data.get("topic"):
+                data = [data]
+            else:
+                print(f"🔍 AI精煉: {prompt_label}結果非陣列，跳過")
+                continue
+
+        # Filter: must have topic + summary, not duplicate
+        entries = []
+        for item in data[:3]:
+            if not isinstance(item, dict):
+                continue
+            topic = item.get("topic", "").strip()
+            summary = item.get("summary", "").strip()
+            details = item.get("details", "").strip()
+            search_terms = item.get("search_terms", [])
+            if not isinstance(search_terms, list):
+                search_terms = [str(search_terms)]
+            search_terms = [str(t).strip() for t in search_terms if t and str(t).strip()]
+            if not topic or not summary or len(summary) < 5:
+                continue
+            if topic in existing_topics:
+                print(f"🔍 AI精煉: 跳過重複主題「{topic}」")
+                continue
+            entries.append({
+                "topic": topic,
+                "summary": summary,
+                "details": details,
+                "search_terms": search_terms or [topic],
+                "confidence": "preliminary",
+            })
+
+        if entries:
+            print(f"🔍 AI精煉: {prompt_label}產出 {len(entries)} 條初步知識")
+            return entries
+        else:
+            print(f"🔍 AI精煉: {prompt_label}結果為空或無效")
+
+    return []  # Both attempts failed
+
+
+async def _ai_refine_fetch_wiki_for_knowledge(preliminary_entries: list) -> dict:
+    """STEP 2 (no API): For each preliminary knowledge entry, search the
+    encyclopedia using the entry's search_terms. Returns a dict mapping
+    entry index → wiki article text. No AI API calls — just parallel HTTP."""
+    if not preliminary_entries:
+        return {}
+
+    async def _safe_fetch(term):
+        try:
+            return await asyncio.wait_for(_fetch_micropedia(term, max_results=2), timeout=8)
+        except Exception:
+            return ""
+
+    # Collect all unique search terms across all entries
+    all_terms = []
+    for entry in preliminary_entries:
+        for term in entry.get("search_terms", [entry["topic"]]):
+            if term and term not in all_terms:
+                all_terms.append(term)
+    all_terms = all_terms[:8]  # Cap at 8 total searches
+
+    print(f"🔍 AI精煉: 百科搜尋詞: {all_terms}")
+    results = await asyncio.gather(*[_safe_fetch(t) for t in all_terms], return_exceptions=True)
+
+    # Map search term → article text
+    term_to_article = {}
+    for i, r in enumerate(results):
+        if isinstance(r, str) and r.strip():
+            term_to_article[all_terms[i]] = r.strip()[:2000]
+
+    # For each entry, collect relevant articles based on its search terms
+    entry_wiki = {}
+    for i, entry in enumerate(preliminary_entries):
+        articles = []
+        for term in entry.get("search_terms", [entry["topic"]]):
+            if term in term_to_article:
+                articles.append(term_to_article[term])
+        if articles:
+            entry_wiki[i] = "\n\n── 下一篇 ──\n\n".join(articles)
+
+    print(f"🔍 AI精煉: 百科找到 {len(entry_wiki)}/{len(preliminary_entries)} 條知識的相關文章")
+    return entry_wiki
+
+
+async def _ai_refine_verify_and_reorganize(preliminary_entries: list, wiki_articles: dict) -> list:
+    """STEP 3 (API call 2): Take preliminary knowledge from Discord + wiki
+    articles from encyclopedia. For each entry:
+    - Cross-reference with wiki to remove errors
+    - Add context or corrections from wiki
+    - Reorganize into a clean, verified knowledge entry
+    - If wiki contradicts the knowledge entirely, mark it low-confidence
+    Returns list of verified knowledge entries."""
+    if not chat_ai_settings.get("api_key"):
         return []
 
-    raw = result.get("content", "")
-    if not raw:
-        tool_calls = result.get("tool_calls", [])
-        if tool_calls:
-            raw = tool_calls[0].get("function", {}).get("arguments", "")
+    verified = []
+    for i, entry in enumerate(preliminary_entries):
+        wiki_text = wiki_articles.get(i, "")
+        has_wiki = bool(wiki_text)
 
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[-1] if "\n" in raw else raw[3:]
-    if raw.endswith("```"):
-        raw = raw[:-3]
-    raw = raw.strip()
-
-    try:
-        data = json_module.loads(raw)
-    except Exception:
-        import re
-        # Try to find a JSON array in the response
-        match = re.search(r'\[.*\]', raw, re.DOTALL)
-        if match:
-            try:
-                data = json_module.loads(match.group())
-            except Exception:
-                print(f"🔍 AI精煉: 無法解析回覆: {raw[:200]}")
-                return []
+        if has_wiki:
+            system_prompt = (
+                "你是一個微國家知識驗證師。你會收到：\n"
+                "1. 一條從 Discord 社群討論中萃取的「初步知識」（可能包含錯誤）\n"
+                "2. 相關的百科文章（可信參考資料）\n\n"
+                "你的任務是：\n"
+                "1. 對照百科文章，檢查初步知識中是否有錯誤\n"
+                "2. 移除錯誤內容，補充百科中提供的正確資訊\n"
+                "3. 重新統整成一條乾淨、準確的知識條目\n"
+                "4. 如果百科文章完全否定了初步知識（整條都是錯的），回傳空結果\n"
+                "5. 如果百科沒有覆蓋到該主題，保留初步知識但標記為低可信度\n\n"
+                "嚴格回覆 JSON，不要加 markdown code block：\n"
+                '{"topic": "修正後主題", "summary": "修正後摘要", "details": "修正後詳細說明", "confidence": "high或low"}\n'
+                "- confidence=high：百科文章有覆蓋該主題，知識已驗證\n"
+                "- confidence=low：百科文章沒有覆蓋，僅保留社群討論內容\n"
+                "如果整條知識都是錯的，回傳 "
+                '{\"topic\": \"\", \"summary\": \"\", \"details\": \"\", \"confidence\": \"\"}'
+            )
+            user_content = (
+                f"── 初步知識（來自社群討論，可能有誤）──\n"
+                f"主題：{entry['topic']}\n"
+                f"摘要：{entry['summary']}\n"
+                f"詳細：{entry['details']}\n\n"
+                f"── 百科文章（可信參考資料）──\n{wiki_text[:2500]}"
+            )
         else:
-            print(f"🔍 AI精煉: 無法解析回覆: {raw[:200]}")
-            return []
+            # No wiki article found — keep as low confidence
+            system_prompt = (
+                "你是一個微國家知識整理師。你會收到一條從 Discord 社群討論中\n"
+                "萃取的初步知識。沒有找到相關百科文章來驗證。\n\n"
+                "你的任務是：\n"
+                "1. 整理這條知識，讓它更清晰簡潔\n"
+                "2. 移除明顯的推測或不確定語氣\n"
+                "3. 標記為低可信度（未經百科驗證）\n\n"
+                "嚴格回覆 JSON：\n"
+                '{"topic": "...", "summary": "...", "details": "...", "confidence": "low"}\n'
+                "如果這條知識明顯是玩笑或無意義，回傳空結果"
+            )
+            user_content = (
+                f"主題：{entry['topic']}\n"
+                f"摘要：{entry['summary']}\n"
+                f"詳細：{entry['details']}"
+            )
 
-    if not isinstance(data, list):
-        # Single dict → wrap in list
-        if isinstance(data, dict) and data.get("topic"):
-            data = [data]
-        else:
-            return []
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
 
-    entries = []
-    seen_topics = set()
-    for item in data[:3]:
-        if not isinstance(item, dict):
+        try:
+            result = await asyncio.wait_for(call_chat_api(messages, chat_ai_settings), timeout=40)
+        except Exception as e:
+            print(f"🔍 AI精煉: 驗證「{entry['topic']}」失敗: {e}")
             continue
-        topic = item.get("topic", "").strip()
-        summary = item.get("summary", "").strip()
-        details = item.get("details", "").strip()
+
+        raw = result.get("content", "")
+        if not raw:
+            tool_calls = result.get("tool_calls", [])
+            if tool_calls:
+                raw = tool_calls[0].get("function", {}).get("arguments", "")
+
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1] if "\n" in raw else raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+
+        try:
+            data = json_module.loads(raw)
+        except Exception:
+            import re
+            match = re.search(r'\{[^{}]*"topic"[^{}]*\}', raw, re.DOTALL)
+            if match:
+                try:
+                    data = json_module.loads(match.group())
+                except Exception:
+                    print(f"🔍 AI精煉: 驗證「{entry['topic']}」無法解析: {raw[:200]}")
+                    continue
+            else:
+                print(f"🔍 AI精煉: 驗證「{entry['topic']}」無法解析: {raw[:200]}")
+                continue
+
+        if not isinstance(data, dict):
+            continue
+
+        topic = data.get("topic", "").strip()
+        summary = data.get("summary", "").strip()
+        details = data.get("details", "").strip()
+        confidence = data.get("confidence", "low").strip().lower()
+
         if not topic or not summary:
+            print(f"🔍 AI精煉: 驗證結果為空（「{entry['topic']}」可能整條有誤，丟棄）")
             continue
-        if topic in existing_topics or topic in seen_topics:
-            print(f"🔍 AI精煉: 跳過重複主題「{topic}」")
-            continue
-        seen_topics.add(topic)
-        entries.append({
+
+        # Normalize confidence
+        if confidence in ("high", "高", "true", "1"):
+            confidence = "high"
+        else:
+            confidence = "low"
+
+        print(f"🔍 AI精煉: 驗證完成「{topic}」(confidence={confidence})")
+        verified.append({
             "topic": topic,
             "summary": summary,
             "details": details,
-            "confidence": "high",
+            "confidence": confidence,
         })
 
-    return entries
+    return verified
 
 
 async def _ai_refine_post_to_channel(channel, knowledge_entry):
     """Post the refined knowledge as a self-talk message in the designated channel."""
     conf = knowledge_entry.get("confidence", "high")
-    conf_label = "✅ 高可信度（百科來源）" if conf == "high" else "⚠️ 低可信度（僅供參考）"
+    conf_label = "✅ 高可信度（百科驗證）" if conf == "high" else "⚠️ 低可信度（社群未驗證）"
     embed = discord.Embed(
         title=f"🔬 AI 精煉 — {knowledge_entry['topic']}",
         description=f"{knowledge_entry['summary']}\n\n{conf_label}",
@@ -10843,52 +10969,60 @@ async def ai_refine_loop():
             # Mark as running NOW — prevents infinite retry loop on exception
             _refine_last_run = now
 
-            # Step 1: Fetch Discord channel snippets (no API)
+            # Step 0: Fetch Discord channel snippets (no API)
             channel_snippets = await _ai_refine_fetch_channel_snippets(guild)
             if isinstance(channel_snippets, Exception):
                 print(f"🔍 AI精煉: 頻道抓取失敗: {channel_snippets}")
                 channel_snippets = ""
 
-            # Step 2: Fetch 3-5 wiki articles in parallel (no API)
-            # Keywords extracted from Discord via simple string matching
-            wiki_text = await _ai_refine_fetch_wiki_batch(channel_snippets)
-            if not wiki_text:
-                print("🔍 AI精煉: 百科抓取失敗，跳過")
+            if not channel_snippets:
+                print("🔍 AI精煉: 無頻道訊息，跳過")
                 _refine_empty_streak += 1
                 await asyncio.sleep(20)
                 continue
 
-            print(f"🔍 AI精煉: 百科文章 {len(wiki_text)} 字，1 次 API 萃取最多 3 條...")
-
-            # Step 3: Single AI call — synthesize up to 3 knowledge entries
+            # Step 1 (API call 1): Extract preliminary knowledge from Discord
             existing_topics = [k.get("topic", "") for k in ai_refined_knowledge]
-            entries = await _ai_refine_synthesize(wiki_text, channel_snippets, existing_topics)
+            preliminary = await _ai_refine_extract_from_discord(channel_snippets, existing_topics)
 
-            if not entries:
-                print(f"🔍 AI精煉: 本次未萃取到知識（連續空手 {_refine_empty_streak + 1} 次）")
+            if not preliminary:
+                print(f"🔍 AI精煉: Discord 萃取為空（連續空手 {_refine_empty_streak + 1} 次）")
                 _refine_empty_streak += 1
                 await asyncio.sleep(20)
                 continue
 
-            # Step 4: Save all new entries + post to channel
+            # Step 2 (no API): Search encyclopedia for each entry's search terms
+            wiki_articles = await _ai_refine_fetch_wiki_for_knowledge(preliminary)
+
+            # Step 3 (API call 2): Verify, correct, and reorganize using wiki
+            verified = await _ai_refine_verify_and_reorganize(preliminary, wiki_articles)
+
+            if not verified:
+                print(f"🔍 AI精煉: 驗證後無有效知識（連續空手 {_refine_empty_streak + 1} 次）")
+                _refine_empty_streak += 1
+                await asyncio.sleep(20)
+                continue
+
+            # Step 4: Save all verified entries + post to channel
             max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
-            for entry_data in entries:
+            for entry_data in verified:
                 entry = {
                     "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
                     "_ts": now,
                     "topic": entry_data["topic"],
                     "summary": entry_data["summary"],
                     "details": entry_data["details"],
-                    "confidence": "high",
+                    "confidence": entry_data.get("confidence", "low"),
                 }
                 ai_refined_knowledge.append(entry)
                 if len(ai_refined_knowledge) > max_entries:
                     ai_refined_knowledge = ai_refined_knowledge[-max_entries:]
-                print(f"🔍 AI精煉: 已儲存「{entry['topic']}」 (累計 {len(ai_refined_knowledge)} 條)")
+                print(f"🔍 AI精煉: 已儲存「{entry['topic']}」({entry['confidence']}) (累計 {len(ai_refined_knowledge)} 條)")
                 await _ai_refine_post_to_channel(channel, entry)
 
             save_refine_knowledge()
-            print(f"🔍 AI精煉: 本輪產出 {len(entries)} 條知識（1 次 API call）")
+            api_calls = 1 + len(verified)  # 1 for extraction + 1 per entry for verification
+            print(f"🔍 AI精煉: 本輪產出 {len(verified)} 條知識（{api_calls} 次 API call）")
             _refine_empty_streak = 0  # Reset backoff
 
         except Exception as e:
