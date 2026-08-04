@@ -5730,8 +5730,9 @@ async def on_ready():
                 _norm += "/chat/completions"
             else:
                 _norm += "/v1/chat/completions"
-        if _norm not in _tools_unsupported_apis:
-            asyncio.ensure_future(_probe_tools_support(chat_ai_settings, _norm))
+        # Always probe — the model may have changed since last startup.
+        # (Previously skipped if endpoint was in _tools_unsupported_apis, but that meant switching models never re-tested tool support.)
+        asyncio.ensure_future(_probe_tools_support(chat_ai_settings, _norm))
 
     # ── 啟動時檢查所有伺服器的暱稱 ──
     for guild in bot.guilds:
@@ -9231,6 +9232,50 @@ def _get_community_chronicle_context() -> str:
     )
 
     return "\n".join(lines)
+
+
+
+    @app_commands.command(name="clear_tool_cache", description="清除 AI 工具支援快取並重新探測（機器人擁有者限定）")
+    async def clear_tool_cache(self, interaction: discord.Interaction):
+        """Clear the tools_supported/tools_unsupported cache for the current
+        chat AI endpoint and re-probe immediately. Use after switching models
+        — the old model may not have supported function calling, but the new
+        one might."""
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+
+        global _tools_unsupported_apis, _tools_supported_apis
+
+        _norm = chat_ai_settings.get("api_url", "").rstrip("/")
+        if not _norm.endswith("/chat/completions"):
+            if _norm.endswith("/v1") or _norm.endswith("/v2"):
+                _norm += "/chat/completions"
+            else:
+                _norm += "/v1/chat/completions"
+
+        was_unsupported = _norm in _tools_unsupported_apis
+        was_supported = _norm in _tools_supported_apis
+
+        _tools_unsupported_apis.discard(_norm)
+        _tools_supported_apis.discard(_norm)
+        save_tools_unsupported()
+        save_tools_supported()
+
+        msg = f"🧹 已清除工具快取：\n- 不支援名單：{'已移除' if was_unsupported else '原本就沒有'}\n- 支援名單：{'已移除' if was_supported else '原本就沒有'}\n\n⏳ 正在重新探測..."
+
+        await interaction.response.send_message(msg, ephemeral=True)
+
+        # Re-probe
+        await _probe_tools_support(chat_ai_settings, _norm)
+
+        # Report result
+        if _norm in _tools_supported_apis:
+            await interaction.edit_original_response(content=f"✅ 探測完成：`{_norm}` **支援** function calling！\n工具功能（web_search、search_micropedia 等）現在可以使用了。")
+        elif _norm in _tools_unsupported_apis:
+            await interaction.edit_original_response(content=f"❌ 探測完成：`{_norm}` **不支援** function calling。\n目前 model 可能不支援 tools 參數，請確認 model 設定。")
+        else:
+            await interaction.edit_original_response(content=f"⚠️ 探測結果未知（可能逾時或錯誤），請查看 Render 日誌。")
 
 
 # ──────────────────────────────────────────────
