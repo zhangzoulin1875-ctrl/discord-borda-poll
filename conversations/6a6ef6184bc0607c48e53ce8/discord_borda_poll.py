@@ -90,8 +90,8 @@ import functools
 try:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
-except Exception:
-    pass
+except Exception as e:
+    print("⚠️ 靜默例外:", e)
 print = functools.partial(print, flush=True)
 
 import discord
@@ -304,10 +304,10 @@ async def api_create_nation(request):
     if cat not in ("member", "council", "observer", "removed"):
         cat = "member"
 
-    # Check duplicate (excluding 已除籍)
+    # Check duplicate (excluding 已除籍) — use int() for type safety
     existing = [
         e for e in _member_nations["entries"]
-        if e.get("guild_id") == gid
+        if int(e.get("guild_id", 0)) == gid
         and e.get("iso_code", "").upper() == iso_code
         and e.get("category") != "removed"
     ]
@@ -315,6 +315,15 @@ async def api_create_nation(request):
         return web.json_response({"error": f"ISO 代碼 {iso_code} 已被註冊"}, status=409)
 
     import uuid as _uuid
+    # Parse representatives safely — frontend may send strings, ints, or nulls
+    rep_ids = []
+    for r in (reps or [])[:3]:
+        try:
+            if r is not None and str(r).strip():
+                rep_ids.append(int(str(r).strip()))
+        except (ValueError, TypeError):
+            pass
+
     entry = {
         "id": str(_uuid.uuid4()),
         "guild_id": gid,
@@ -322,7 +331,7 @@ async def api_create_nation(request):
         "name_en": name_en,
         "iso_code": iso_code,
         "category": cat,
-        "representatives": [int(r) for r in reps[:3]],
+        "representatives": rep_ids,
         "representative_names": [],
         "registered_by": user.get("user_id", 0),
         "registered_by_name": user.get("username", ""),
@@ -1066,8 +1075,8 @@ async def run_briefing(target_channel: discord.TextChannel, hours: int, mode: st
                     display = header + accumulated[:max_body] + "\n⏳..."
                 try:
                     await live_msg.edit(content=display)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("⚠️ 靜默例外:", e)
 
         # Final output
         full_text = f"{title}\n" + accumulated
@@ -2135,8 +2144,8 @@ async def _execute_mute(message, duration: int, reason: str):
         print(f"🛡️ 濫用偵測：Bot 沒有 Moderate Members 權限，無法禁言")
         try:
             await message.channel.send(f"⚠️ 偵測到濫用行為但 Bot 缺少「禁言成員」權限。請給 Bot「Moderate Members」權限。")
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
         return False
 
     try:
@@ -2408,12 +2417,8 @@ async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> s
     if not message_text or len(message_text.strip()) < 2:
         return ""
     try:
-        own_session = False
-        session = _shared_session if (_shared_session and not _shared_session.closed) else None
-        if session is None:
-            session = aiohttp.ClientSession()
-            own_session = True
-        try:
+        if _shared_session and not _shared_session.closed:
+            session = _shared_session
             titles = await _get_micropedia_titles(session)
             if not titles:
                 return ""
@@ -2421,11 +2426,17 @@ async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> s
             if not matched:
                 return ""
             print(f"📚 Micropedia: 自動比對到 {len(matched)} 篇文章: {matched}")
-            content = await _micropedia_fetch_content(session, matched)
-            return content
-        finally:
-            if own_session:
-                await session.close()
+            return await _micropedia_fetch_content(session, matched)
+        else:
+            async with aiohttp.ClientSession() as session:
+                titles = await _get_micropedia_titles(session)
+                if not titles:
+                    return ""
+                matched = _fuzzy_match_titles(message_text, titles, top_n=max_results)
+                if not matched:
+                    return ""
+                print(f"📚 Micropedia: 自動比對到 {len(matched)} 篇文章: {matched}")
+                return await _micropedia_fetch_content(session, matched)
     except Exception as e:
         print(f"📚 Micropedia: 自動比對錯誤：{e}")
         return ""
@@ -2524,6 +2535,21 @@ async def _micropedia_fetch_content(session, titles: list) -> str:
     return "\n\n".join(content_parts)
 
 
+async def _fetch_micropedia_inner_body(session, query, max_results, cache_key):
+    """Inner body of _fetch_micropedia_inner — extracted for session safety."""
+    print(f"📚 Micropedia: 搜尋 '{query}'")
+    titles = await _micropedia_search_api(session, query, max_results)
+    if not titles:
+        print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果")
+        _micropedia_cache[cache_key] = (_time.time(), "")
+        return ""
+    print(f"📚 Micropedia: 找到 {len(titles)} 篇相關文章: {titles[:5]}")
+    result = await _micropedia_fetch_content(session, titles)
+    _micropedia_cache[cache_key] = (_time.time(), result)
+    print(f"📚 Micropedia: 取得內容 ({len(result)} chars)")
+    return result
+
+
 async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
     """Single search + content-fetch attempt (one query, no internal retries —
     the AI itself decides whether/how to retry with a different query via the
@@ -2539,26 +2565,19 @@ async def _fetch_micropedia_inner(query: str, max_results: int = 5) -> str:
             return cached_content
 
     try:
-        own_session = False
-        session = _shared_session if (_shared_session and not _shared_session.closed) else None
-        if session is None:
-            session = aiohttp.ClientSession()
-            own_session = True
-        try:
-            print(f"📚 Micropedia: 搜尋 '{query}'")
-            titles = await _micropedia_search_api(session, query, max_results)
-            if not titles:
-                print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果")
-                _micropedia_cache[cache_key] = (_time.time(), "")
-                return ""
-            print(f"📚 Micropedia: 找到 {len(titles)} 篇相關文章: {titles[:5]}")
-            result = await _micropedia_fetch_content(session, titles)
-            _micropedia_cache[cache_key] = (_time.time(), result)
-            print(f"📚 Micropedia: 取得內容 ({len(result)} chars)")
-            return result
-        finally:
-            if own_session:
-                await session.close()
+        if _shared_session and not _shared_session.closed:
+            session = _shared_session
+        else:
+            # Use context manager to ensure session is always closed
+            # even on cancellation/timeout
+            async with aiohttp.ClientSession() as session:
+                return await _fetch_micropedia_inner_body(
+                    session, query, max_results, cache_key
+                )
+        # Reuse shared session
+        return await _fetch_micropedia_inner_body(
+            session, query, max_results, cache_key
+        )
     except asyncio.TimeoutError:
         print(f"📚 Micropedia: 搜尋逾時 for '{query}'")
         return ""
@@ -2822,8 +2841,8 @@ async def _refresh_forum_index(guild) -> list:
                         await asyncio.wait_for(_walk_replies(), timeout=8)
                     except asyncio.TimeoutError:
                         print(f"⚠️ 討論串「{thread.name}」回覆讀取逾時，改用已讀到的部分")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print("⚠️ 靜默例外:", e)
 
                     if reply_lines:
                         text_parts.append("─── 討論串回覆（含後續進展/狀態更新）───")
@@ -4827,13 +4846,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                     print(f"❌ 恢復暱稱失敗：{e}")
 
 
-def _global_interaction_check(interaction: discord.Interaction) -> bool:
-    """Global check: reject all interactions from blacklisted users."""
-    if interaction.user and is_blacklisted(interaction.user.id):
-        return False
-    return True
-
-
 async def setup_hook():
     # 🔑 CRITICAL: bind the HTTP port FIRST, before any Drive downloads or
     # data loading. Render's port-scanner only waits a limited window after
@@ -4862,6 +4874,7 @@ async def setup_hook():
 
     # Global interaction check: block blacklisted users from ALL commands
     async def _tree_interaction_check(interaction: discord.Interaction) -> bool:
+        # Block blacklisted users
         if interaction.user and is_blacklisted(interaction.user.id):
             try:
                 await interaction.response.send_message(
@@ -4871,6 +4884,17 @@ async def setup_hook():
             except Exception as e:
                 print(f"⚠️ 黑名單通知發送失敗: {e}")
             print(f"🚫 黑名單用戶 {interaction.user.display_name} ({interaction.user.id}) 嘗試使用指令已攔截")
+            return False
+        # Guild-only: most commands require a server context
+        # Allow DM usage only for the bot owner
+        if not interaction.guild and interaction.user.id != BOT_OWNER_ID:
+            try:
+                await interaction.response.send_message(
+                    "❌ 此指令只能在伺服器中使用，無法在私訊中使用。",
+                    ephemeral=True,
+                )
+            except Exception as e:
+                print("⚠️ 靜默例外:", e)
             return False
         return True
 
@@ -7342,23 +7366,23 @@ class MeetingGroup(app_commands.Group):
                         display = header + accumulated[:max_body] + "\n⏳..."
                     try:
                         await live_msg.edit(content=display)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print("⚠️ 靜默例外:", e)
 
             # Final edit with complete content
             full_text = header + accumulated
             if len(full_text) <= 2000:
                 try:
                     await live_msg.edit(content=full_text)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("⚠️ 靜默例外:", e)
             else:
                 # Too long for one message — send as file
                 import io
                 try:
                     await live_msg.edit(content=header + "✅ 會議紀錄已生成（完整內容見下方附件）")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("⚠️ 靜默例外:", e)
                 file_content = f"# 會議紀錄 — #{channel.name}\n# 整理範圍：{after_time.strftime('%Y-%m-%d %H:%M')} UTC 起\n# 共 {count} 則訊息\n# 由 {interaction.user.display_name} 整理\n# AI 模型：{ai_settings['model']}\n\n---\n\n{accumulated}"
                 file = discord.File(
                     io.BytesIO(file_content.encode("utf-8")),
@@ -7899,8 +7923,8 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
                         f"**AI 審核：** {entry['validation_status']} — {ai_reason[:100]}\n"
                         f"**ID：** {entry_id}"
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                print("⚠️ 靜默例外:", e)
 
         if entry["validation_status"] == "approved":
             await interaction.followup.send(
@@ -7926,8 +7950,8 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
                 "⚠️ 提交修正時發生錯誤，請稍後再試。",
                 ephemeral=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
 
 
 # ════════════════════════════════════════════════════════════
@@ -8133,8 +8157,8 @@ class ProposalRejectModal(discord.ui.Modal, title="駁回提案原因"):
         print(f"⚠️ 駁回 Modal 錯誤：{error}")
         try:
             await interaction.response.send_message("⚠️ 提交駁回原因時發生錯誤。", ephemeral=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
 
 
 class ProposalReviewView(discord.ui.View):
@@ -8173,15 +8197,15 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
     if not entry:
         try:
             await interaction.response.send_message("❌ 找不到此提案記錄（可能已被清除）。", ephemeral=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
         return
 
     if entry["status"] != "pending":
         try:
             await interaction.response.send_message(f"⚠️ 此提案已被{'受理' if entry['status']=='accepted' else '駁回'}過了。", ephemeral=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
         return
 
     # Update proposal record
@@ -8206,13 +8230,13 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
         embed.set_footer(text=f"提案已{status_text}")
         try:
             await interaction.response.edit_message(embed=embed, view=None)
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
     else:
         try:
             await interaction.response.send_message(f"{status_emoji} 提案已{status_text}。", ephemeral=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
 
     # ── Notify the original proposer in the original channel/thread ──
     orig_ch_id = entry.get("channel_id")
@@ -8227,14 +8251,14 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
             if thread_id:
                 try:
                     target_thread = guild.get_thread(int(thread_id))
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("⚠️ 靜默例外:", e)
                 if not target_thread and orig_ch:
                     # Forum channel: thread might be archived, try to fetch it
                     try:
                         target_thread = await orig_ch.fetch_thread(int(thread_id))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print("⚠️ 靜默例外:", e)
             break
 
     if not orig_ch and not target_thread:
@@ -8350,8 +8374,8 @@ async def _log_feedback(interaction: discord.Interaction, entry: dict):
             text += f"\n**附圖：** {entry['image_url']}"
         text += f"\n**ID：** {entry.get('id', '')}"
         await log_ch.send(text)
-    except Exception:
-        pass
+    except Exception as e:
+        print("⚠️ 靜默例外:", e)
 
 
 async def _prompt_image_upload(interaction: discord.Interaction, entry: dict, user_id: str, channel_id: int):
@@ -8366,8 +8390,8 @@ async def _prompt_image_upload(interaction: discord.Interaction, entry: dict, us
             ephemeral=True,
             wait=True,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print("⚠️ 靜默例外:", e)
 
     def _check(m: discord.Message) -> bool:
         return (
@@ -8384,16 +8408,16 @@ async def _prompt_image_upload(interaction: discord.Interaction, entry: dict, us
         if msg:
             try:
                 await msg.edit(content="✅ 已收到你的評價與附圖，感謝回饋！")
-            except Exception:
-                pass
+            except Exception as e:
+                print("⚠️ 靜默例外:", e)
     except asyncio.TimeoutError:
         if msg:
             try:
                 await msg.edit(content="✅ 已記錄你的評價（未附圖）。")
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as e:
+                print("⚠️ 靜默例外:", e)
+    except Exception as e:
+        print("⚠️ 靜默例外:", e)
 
     await _log_feedback(interaction, entry)
 
@@ -8448,8 +8472,8 @@ class FeedbackOtherReasonModal(discord.ui.Modal, title="請說明給予這個評
         print(f"⚠️ 評價原因 Modal 錯誤：{error}")
         try:
             await interaction.response.send_message("⚠️ 提交評價時發生錯誤，請稍後再試。", ephemeral=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
 
 
 class LikeReasonView(discord.ui.View):
@@ -8479,8 +8503,8 @@ class LikeReasonView(discord.ui.View):
             child.disabled = True
         try:
             await interaction.response.edit_message(content=f"👍 你選擇了「{reason}」", view=self)
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
         entry = _create_feedback_entry(
             rating="like", reason=reason, custom_text="",
             question=self.question, ai_answer=self.original_answer,
@@ -8546,8 +8570,8 @@ class DislikeReasonView(discord.ui.View):
             child.disabled = True
         try:
             await interaction.response.edit_message(content=f"👎 你選擇了「{reason}」", view=self)
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
         entry = _create_feedback_entry(
             rating="dislike", reason=reason, custom_text="",
             question=self.question, ai_answer=self.original_answer,
@@ -8776,8 +8800,8 @@ class QuizAnswerView(discord.ui.View):
                     f"（今日累積 {user_entry['daily_score']} 分）",
                     ephemeral=False
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print("⚠️ 靜默例外:", e)
             print(f"🎉 Quiz: {interaction.user.display_name} answered correctly (+5 pts, daily={user_entry['daily_score']})")
         else:
             # Wrong answer — one strike and you're out
@@ -9157,6 +9181,11 @@ class QuizGroup(app_commands.Group):
             await interaction.followup.send("❌ 出題失敗，請稍後再試。", ephemeral=True)
             return
         channel = bot.get_channel(int(channel_id))
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(int(channel_id))
+            except Exception as e:
+                print("⚠️ 靜默例外:", e)
         if not channel:
             await interaction.followup.send("❌ 找不到問答頻道。", ephemeral=True)
             return
@@ -9710,8 +9739,8 @@ async def _fetch_user_messages(guild, user_id: int, limit: int = 100, overall_ti
                 sources.append((thread, f"📋 {ch.name} > {thread.name}"))
         except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError):
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
 
     print(f"📊 用戶訊息掃描：{len(sources)} 個頻道/討論串，開始並行抓取（總預算 {overall_timeout:.0f}s）...")
 
@@ -9734,8 +9763,8 @@ async def _fetch_user_messages(guild, user_id: int, limit: int = 100, overall_ti
     for t in done:
         try:
             messages_collected.extend(t.result())
-        except Exception:
-            pass
+        except Exception as e:
+            print("⚠️ 靜默例外:", e)
 
     elapsed = _time.time() - _t0
     _timeout_note = f"（{len(pending)} 個來源逾時被取消）" if pending else ""
@@ -10027,7 +10056,7 @@ class MemberNationGroup(app_commands.Group):
         guild_id = interaction.guild_id
         existing = [
             e for e in _member_nations["entries"]
-            if e.get("guild_id") == guild_id
+            if int(e.get("guild_id", 0)) == guild_id
             and e.get("iso_code", "").upper() == iso_code
             and e.get("category") != "removed"
         ]
@@ -10402,6 +10431,23 @@ def save_blacklist():
         _save_json_file(BLACKLIST_FILE, _blacklist)
     except Exception as e:
         print(f"⚠️ 黑名單儲存失敗：{e}")
+
+
+
+
+async def _check_guild(interaction: discord.Interaction) -> bool:
+    """Returns True if guild is available, sends error message if not."""
+    if not interaction.guild:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ 此指令只能在伺服器中使用，無法在私訊中使用。", ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                "❌ 此指令只能在伺服器中使用，無法在私訊中使用。", ephemeral=True
+            )
+        return False
+    return True
 
 
 def is_blacklisted(user_id) -> bool:
