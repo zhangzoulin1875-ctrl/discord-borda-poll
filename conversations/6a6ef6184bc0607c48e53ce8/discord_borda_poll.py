@@ -127,7 +127,9 @@ from aiohttp import web
 # ──────────────────────────────────────────────
 
 async def self_ping_loop():
-    """每 5 分鐘 self-ping 一次，防止 Render 休眠。"""
+    """每 5 分鐘 self-ping 一次，防止 Render 休眠。
+    Uses aiohttp (async) instead of urllib (blocking) to avoid freezing the
+    event loop for up to 10 seconds on network timeouts."""
     await asyncio.sleep(30)  # 等 bot 完全上線後再開始
     # 支援多種環境變數名稱（SELF_URL 優先，其次 RENDER_EXTERNAL_URL）
     base_url = (
@@ -141,14 +143,18 @@ async def self_ping_loop():
         return
     health_url = base_url.rstrip("/") + "/health"
     print(f"🔁 Self-ping 已啟動，目標：{health_url}")
-    while True:
-        try:
-            req = urllib.request.Request(health_url, headers={"User-Agent": "SelfPing/1.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                print(f"🏓 Self-ping OK ({resp.status})")
-        except Exception as e:
-            print(f"⚠️  Self-ping 失敗：{e}")
-        await asyncio.sleep(270)  # 每 4.5 分鐘 ping 一次（Render 15分鐘休眠，保留充裕緩衝）
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(
+                    health_url,
+                    headers={"User-Agent": "SelfPing/1.0"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    print(f"🏓 Self-ping OK ({resp.status})")
+            except Exception as e:
+                print(f"⚠️  Self-ping 失敗：{e}")
+            await asyncio.sleep(270)  # 每 4.5 分鐘 ping 一次
 
 
 async def keep_alive_server():
@@ -966,8 +972,7 @@ BRIEFING_DATA_FILE = os.path.join(DATA_DIR, "briefing_settings.json")
 def save_briefing_settings():
     try:
         os.makedirs(os.path.dirname(BRIEFING_DATA_FILE), exist_ok=True)
-        with open(BRIEFING_DATA_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(briefing_settings, f, ensure_ascii=False)
+        _save_json_file(BRIEFING_DATA_FILE, briefing_settings, indent=None)
     except Exception as e:
         print(f"⚠️ Failed to save briefing settings: {e}")
 
@@ -1192,8 +1197,7 @@ token_usage = {
 
 def save_token_usage():
     try:
-        with open(TOKEN_USAGE_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(token_usage, f, ensure_ascii=False, indent=2)
+        _save_json_file(TOKEN_USAGE_FILE, token_usage)
     except Exception as e:
         print(f"⚠️ Token usage save failed: {e}")
 
@@ -1311,8 +1315,7 @@ def _append_user_history(user_id: str, user_text: str, assistant_text: str):
 def save_user_memories():
     try:
         os.makedirs(os.path.dirname(USER_MEMORIES_FILE), exist_ok=True)
-        with open(USER_MEMORIES_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(user_memories, f, ensure_ascii=False)
+        _save_json_file(USER_MEMORIES_FILE, user_memories, indent=None)
     except Exception as e:
         print(f"⚠️ Failed to save user memories: {e}")
 
@@ -1365,8 +1368,7 @@ def _update_user_memory(user_id: str, user_name: str, new_facts: list):
 def save_chat_ai_settings():
     try:
         os.makedirs(os.path.dirname(CHAT_AI_DATA_FILE), exist_ok=True)
-        with open(CHAT_AI_DATA_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(chat_ai_settings, f, ensure_ascii=False)
+        _save_json_file(CHAT_AI_DATA_FILE, chat_ai_settings, indent=None)
     except Exception as e:
         print(f"⚠️ Failed to save chat AI settings: {e}")
 
@@ -2220,11 +2222,7 @@ _TOOLS_SUPPORTED_FILE = os.path.join(DATA_DIR, "tools_supported_apis.json")
 
 def save_tools_supported():
     """Persist the set of API URLs known to support tool calling."""
-    try:
-        with open(_TOOLS_SUPPORTED_FILE, "w") as f:
-            json_module.dump(list(_tools_supported_apis), f)
-    except Exception as e:
-        print(f"⚠️ save_tools_supported failed: {e}")
+    _save_json_file(_TOOLS_SUPPORTED_FILE, list(_tools_supported_apis))
 
 
 def load_tools_supported():
@@ -2240,12 +2238,7 @@ def load_tools_supported():
 TOOLS_UNSUPPORTED_FILE = os.path.join(DATA_DIR, "tools_unsupported_apis.json")
 
 def save_tools_unsupported():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    try:
-        with open(TOOLS_UNSUPPORTED_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(list(_tools_unsupported_apis), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"⚠️ tools_unsupported_apis save failed: {e}")
+    _save_json_file(TOOLS_UNSUPPORTED_FILE, list(_tools_unsupported_apis))
 
 def load_tools_unsupported():
     global _tools_unsupported_apis
@@ -4575,16 +4568,16 @@ def save_polls_to_disk():
     try:
         os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
         serializable = {}
-        for gid, polls in guild_polls.items():
+        for gid, polls in list(guild_polls.items()):
             serializable[str(gid)] = {}
-            for pid, poll in polls.items():
+            for pid, poll in list(polls.items()):
                 serializable[str(gid)][pid] = {
                     "poll_id": poll.poll_id,
                     "title": poll.title,
                     "mode": poll.mode,
                     "status": poll.status,
                     "options": [{"text": o.text} for o in poll.options],
-                    "votes": {str(k): v for k, v in poll.votes.items()},
+                    "votes": {str(k): v for k, v in list(poll.votes.items())},
                     "message_id": poll.message_id,
                     "created_by": poll.created_by,
                     "allowed_roles": poll.allowed_roles,
@@ -7493,12 +7486,7 @@ EMOJI_ALIASES_FILE = os.path.join(DATA_DIR, "emoji_aliases.json")
 emoji_aliases = {}  # {original_name: {"alias": "人類可讀名", "emoji_id": "...", "animated": false}}
 
 def save_emoji_aliases():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    try:
-        with open(EMOJI_ALIASES_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(emoji_aliases, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"⚠️ Emoji aliases save failed: {e}")
+    _save_json_file(EMOJI_ALIASES_FILE, emoji_aliases)
 
 def load_emoji_aliases():
     global emoji_aliases
@@ -7531,11 +7519,9 @@ def save_quiz_data():
     global _quiz_last_question_time
     os.makedirs(DATA_DIR, exist_ok=True)
     try:
-        with open(QUIZ_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(quiz_settings, f, ensure_ascii=False, indent=2)
+        _save_json_file(QUIZ_SETTINGS_FILE, quiz_settings)
         _save_json_file(QUIZ_SCORES_FILE, quiz_scores)
-        with open(QUIZ_CHAMPIONS_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(quiz_champions, f, ensure_ascii=False, indent=2)
+        _save_json_file(QUIZ_CHAMPIONS_FILE, quiz_champions)
         quiz_state = {
             "active_questions": quiz_active_questions,
             "last_question_time": _quiz_last_question_time,
@@ -9929,8 +9915,7 @@ _member_nations = {"entries": []}
 
 def save_member_nations():
     os.makedirs(os.path.dirname(MEMBER_NATIONS_FILE), exist_ok=True)
-    with open(MEMBER_NATIONS_FILE, "w", encoding="utf-8") as f:
-        json_module.dump(_member_nations, f, ensure_ascii=False, indent=2)
+    _save_json_file(MEMBER_NATIONS_FILE, _member_nations)
 
 
 def load_member_nations():
@@ -10311,8 +10296,7 @@ def save_knowledge_base():
     """Save the knowledge base to local file (auto-synced to Drive)."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(KNOWLEDGE_BASE_FILE, "w", encoding="utf-8") as f:
-            f.write(json_module.dumps(_knowledge_base, ensure_ascii=False, indent=2))
+        _save_json_file(KNOWLEDGE_BASE_FILE, _knowledge_base)
     except Exception as e:
         print(f"⚠️ 知識庫儲存失敗：{e}")
 
@@ -10334,8 +10318,7 @@ def save_corrections():
     """Save corrections to local file (auto-synced to Drive)."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(CORRECTIONS_FILE, "w", encoding="utf-8") as f:
-            f.write(json_module.dumps(_corrections, ensure_ascii=False, indent=2))
+        _save_json_file(CORRECTIONS_FILE, _corrections)
     except Exception as e:
         print(f"⚠️ 修正資料儲存失敗：{e}")
 
@@ -10357,8 +10340,7 @@ def save_feedback():
     """Save like/dislike feedback to local file (auto-synced to Drive)."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(FEEDBACK_FILE, "w", encoding="utf-8") as f:
-            f.write(json_module.dumps(_feedback, ensure_ascii=False, indent=2))
+        _save_json_file(FEEDBACK_FILE, _feedback)
     except Exception as e:
         print(f"⚠️ 評價資料儲存失敗：{e}")
 
@@ -10377,12 +10359,7 @@ def load_proposal_settings():
 
 
 def save_proposal_settings():
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(PROPOSAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            f.write(json_module.dumps(proposal_settings, ensure_ascii=False, indent=2))
-    except Exception as e:
-        print(f"⚠️ 提案系統設定儲存失敗：{e}")
+    _save_json_file(PROPOSAL_SETTINGS_FILE, proposal_settings)
 
 
 def load_proposals():
@@ -10400,8 +10377,7 @@ def load_proposals():
 def save_proposals():
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(PROPOSALS_FILE, "w", encoding="utf-8") as f:
-            f.write(json_module.dumps(_proposals, ensure_ascii=False, indent=2))
+        _save_json_file(PROPOSALS_FILE, _proposals)
     except Exception as e:
         print(f"⚠️ 提案記錄儲存失敗：{e}")
 
@@ -10423,8 +10399,7 @@ def save_blacklist():
     """Save blacklist to local file (auto-synced to Drive)."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
-            f.write(json_module.dumps(_blacklist, ensure_ascii=False, indent=2))
+        _save_json_file(BLACKLIST_FILE, _blacklist)
     except Exception as e:
         print(f"⚠️ 黑名單儲存失敗：{e}")
 
