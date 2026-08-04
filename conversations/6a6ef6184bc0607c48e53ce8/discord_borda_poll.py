@@ -896,6 +896,7 @@ chat_ai_settings = {
     "micropedia_enabled": True,  # auto-lookup micropedia.site for micronation questions
     "micropedia_max_results": 5,  # max articles to fetch per query
     "min_response_interval": 0,  # 全域最短回應間隔（秒），0=不限。防止機器人被防炸系統踢
+    "vision_model": "",  # 視覺模型名稱（用於識圖，留空=停用識圖功能。使用同一個 API URL/Key，只是模型名不同）
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -2865,6 +2866,82 @@ def _strip_raw_tool_dump(text: str) -> str:
     return cleaned
 
 
+async def _describe_image(image_url: str, settings: dict) -> str:
+    """Call a vision-capable model to describe an image. Uses the same API
+    URL/Key as the chat AI, but with a different model name (settings["vision_model"]).
+    Returns a text description of the image, or empty string on failure."""
+    vision_model = settings.get("vision_model", "")
+    if not vision_model:
+        return ""
+
+    api_url = settings.get("api_url", "").rstrip("/")
+    if not api_url.endswith("/chat/completions"):
+        if api_url.endswith("/v1") or api_url.endswith("/v2"):
+            api_url += "/chat/completions"
+        else:
+            api_url += "/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {settings['api_key']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": vision_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "請詳細描述這張圖片的內容。包括：\n"
+                            "- 圖片的主題和場景\n"
+                            "- 可見的文字（完整轉錄）\n"
+                            "- 人物、物體、顏色、動作等細節\n"
+                            "- 如果是截圖，說明是什麼應用/網頁的截圖\n"
+                            "- 如果是迷因或梗圖，解釋其含義\n"
+                            "用繁體中文回答，簡潔但完整。"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 500,
+        "temperature": 0.3,
+    }
+
+    try:
+        t0 = _time.time()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                api_url, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25),
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    print(f"⚠️ 視覺模型 API 返回 {resp.status}: {error_text[:200]}")
+                    return ""
+                data = json_module.loads(await resp.text())
+                choices = data.get("choices", [])
+                if choices:
+                    desc = choices[0].get("message", {}).get("content", "")
+                    if desc:
+                        print(f"📷 視覺模型識圖完成（{_time.time()-t0:.1f}s, {len(desc)} chars）")
+                        return desc.strip()
+        print(f"⚠️ 視覺模型回應為空")
+        return ""
+    except asyncio.TimeoutError:
+        print(f"⚠️ 視覺模型識圖逾時（>30s）")
+        return ""
+    except Exception as e:
+        print(f"⚠️ 視覺模型識圖失敗：{e}")
+        return ""
+
+
 async def generate_chat_reply(message, settings: dict) -> tuple:
     """Generate a reply for a chat message with brief context, server awareness, and per-user memory.
     Returns (reply_text, new_facts_or_None, mod_action_or_None)."""
@@ -2928,6 +3005,28 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # own message is sent now. Also reduces prompt size (helps latency).
     bot_id = bot.user.id
     clean_content = message.content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
+
+    # ── 圖片識別（子流程）──
+    # 如果訊息有圖片附件，且設定了 vision_model，就先用視覺模型描述圖片，
+    # 再把描述注入 system prompt，讓主 AI 可以「看到」圖片內容來回答。
+    image_context = ""
+    vision_model = settings.get("vision_model", "")
+    if vision_model and message.attachments:
+        for att in message.attachments[:2]:  # 最多處理 2 張圖
+            if att.content_type and att.content_type.startswith("image/"):
+                try:
+                    print(f"📷 偵測到圖片附件，呼叫視覺模型 {vision_model} 識圖中...")
+                    desc = await asyncio.wait_for(
+                        _describe_image(att.url, settings), timeout=35
+                    )
+                    if desc:
+                        image_context += f"\n[圖片描述]：{desc}\n"
+                except asyncio.TimeoutError:
+                    print("⚠️ 視覺模型識圖逾時（>35s），跳過")
+                except Exception as e:
+                    print(f"⚠️ 識圖子流程錯誤：{e}")
+        if image_context:
+            print(f"📷 識圖完成，注入 {len(image_context)} chars 到上下文")
 
     # ── Discord 連結解析 ──
     # If the user's message contains Discord jump URLs, fetch the actual
@@ -3132,6 +3231,14 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                 print(f"👍 評價回饋：已注入 {len(likes)} 讚 + {len(dislikes)} 倒讚到 AI 上下文")
     except Exception as e:
         print(f"⚠️ 評價回饋注入失敗：{e}")
+
+    # ── 注入圖片描述到 system prompt ──
+    if image_context:
+        system_prompt += (
+            f"\n\n─── 使用者傳送的圖片（由視覺模型描述）───\n"
+            f"使用者傳送了圖片，以下是視覺模型對圖片內容的描述。"
+            f"請參考這些描述來回覆使用者的問題或回應圖片內容：\n{image_context}"
+        )
 
     # Build tool list FIRST so we know whether search_discord is available
     # before constructing the system prompt (avoids adding ~500 chars of
@@ -6097,6 +6204,24 @@ class ChatGroup(app_commands.Group):
         save_chat_ai_settings()
         await interaction.response.send_message(f"✅ AI 聊天模型已設為 `{model}`", ephemeral=True)
 
+    @app_commands.command(name="vision_model", description="設定/關閉視覺模型（用於識圖，留空=停用）（機器人擁有者限定）")
+    @app_commands.describe(model="視覺模型名稱（例如：gpt-4o, gemini-1.5-flash），留空=停用識圖功能")
+    async def chat_vision_model(self, interaction: discord.Interaction, model: str = ""):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        model = model.strip()
+        chat_ai_settings["vision_model"] = model
+        save_chat_ai_settings()
+        if model:
+            await interaction.response.send_message(
+                f"✅ 視覺模型已設為 `{model}`\n"
+                f"使用者傳送圖片時，AI 會先用此模型識圖再回答。\n"
+                f"使用同一個 API URL/Key，只是模型名不同。", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message("✅ 視覺模型已停用（不會再識圖）。", ephemeral=True)
+
     @app_commands.command(name="prompt", description="設定 AI 聊天人設（機器人擁有者限定）")
     @app_commands.describe(prompt="系統提示詞（人設描述）")
     async def chat_prompt(self, interaction: discord.Interaction, prompt: str):
@@ -6542,7 +6667,9 @@ class ChatGroup(app_commands.Group):
         micro_on = chat_ai_settings.get("micropedia_enabled", True)
         micro_max = chat_ai_settings.get("micropedia_max_results", 5)
         embed.add_field(name="微國家百科", value=f"{'✅' if micro_on else '❌'} (最多{micro_max}篇)", inline=True)
-        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat micropedia | /chat debug")
+        vm = chat_ai_settings.get("vision_model", "")
+        embed.add_field(name="視覺模型（識圖）", value=f"`{vm}`" if vm else "❌ 未設定", inline=True)
+        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat micropedia | /chat vision_model | /chat debug")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="micropedia", description="開關微國家百科查詢功能（機器人擁有者限定）")
