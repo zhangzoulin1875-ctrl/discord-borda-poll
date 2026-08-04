@@ -2879,22 +2879,30 @@ async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> s
         if _shared_session and not _shared_session.closed:
             session = _shared_session
             titles = await _get_micropedia_titles(session)
-            if not titles:
-                return ""
-            matched = _fuzzy_match_titles(message_text, titles, top_n=max_results)
+            matched = _fuzzy_match_titles(message_text, titles, top_n=max_results) if titles else []
+            if not matched:
+                # FORCED real internet search fallback — local bigram
+                # matching against the cached title list is a heuristic and
+                # can miss (or be stale up to 6h). Never silently give up:
+                # force a real web search before concluding there's nothing.
+                keywords = _extract_search_keywords(message_text)
+                search_q = keywords[0] if keywords else message_text[:30]
+                matched = await _micropedia_ddg_site_search(search_q, max_results)
             if not matched:
                 return ""
-            print(f"📚 Micropedia: 自動比對到 {len(matched)} 篇文章: {matched}")
+            print(f"📚 Micropedia: 自動比對/強制聯網到 {len(matched)} 篇文章: {matched}")
             return await _micropedia_fetch_content(session, matched)
         else:
             async with aiohttp.ClientSession() as session:
                 titles = await _get_micropedia_titles(session)
-                if not titles:
-                    return ""
-                matched = _fuzzy_match_titles(message_text, titles, top_n=max_results)
+                matched = _fuzzy_match_titles(message_text, titles, top_n=max_results) if titles else []
+                if not matched:
+                    keywords = _extract_search_keywords(message_text)
+                    search_q = keywords[0] if keywords else message_text[:30]
+                    matched = await _micropedia_ddg_site_search(search_q, max_results)
                 if not matched:
                     return ""
-                print(f"📚 Micropedia: 自動比對到 {len(matched)} 篇文章: {matched}")
+                print(f"📚 Micropedia: 自動比對/強制聯網到 {len(matched)} 篇文章: {matched}")
                 return await _micropedia_fetch_content(session, matched)
     except Exception as e:
         print(f"📚 Micropedia: 自動比對錯誤：{e}")
@@ -2924,6 +2932,63 @@ def _clean_wikitext(text: str) -> str:
     text = _re.sub(r"\n{3,}", "\n\n", text)
     text = text.strip()
     return text
+
+
+async def _micropedia_ddg_site_search(query: str, max_results: int = 5) -> list:
+    """FORCED real-internet fallback for finding micropedia.site article
+    titles. MediaWiki's own search (list=search) does basic MySQL matching
+    with NO Chinese word segmentation — full phrases often return zero hits.
+    Instead of relying on a local cached-title bigram heuristic (imperfect,
+    can match the wrong title), this does a REAL web search restricted to
+    site:micropedia.site via DuckDuckGo, which handles natural-language /
+    CJK queries far better, then extracts the real article titles from the
+    result URLs (/wiki/<title>). This is the mandatory, no-AI-judgment-needed
+    path — it always runs as a fallback whenever the structured search comes
+    up empty, so results are never left to depend on the AI choosing to
+    search or on a stale local title cache."""
+    import urllib.parse as _up
+    titles = []
+    _timeout = aiohttp.ClientTimeout(total=8, connect=4)
+    _headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        search_q = f"{query} site:micropedia.site"
+        url = f"https://html.duckduckgo.com/html/?q={_up.quote(search_q)}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=_headers, timeout=_timeout) as resp:
+                if resp.status != 200:
+                    print(f"📚 Micropedia: 強制聯網搜尋 DDG 回傳 {resp.status}")
+                    return []
+                html = await resp.text()
+        # DDG HTML result links look like:
+        # <a class="result__a" href="https://www.micropedia.site/wiki/XXX">...
+        # (sometimes wrapped in a DDG redirect URL with uddg= param)
+        raw_urls = re.findall(r'href="([^"]*micropedia\.site[^"]*)"', html)
+        for raw_url in raw_urls:
+            u = raw_url
+            # Unwrap DDG redirect wrapper if present
+            if "uddg=" in u:
+                m = re.search(r"uddg=([^&]+)", u)
+                if m:
+                    u = _up.unquote(m.group(1))
+            m2 = re.search(r"micropedia\.site/(?:wiki|index\.php\?title=)/?([^&#?]+)", u)
+            if m2:
+                title = _up.unquote(m2.group(1)).replace("_", " ").strip()
+                if title and not any(title.startswith(p) for p in _MICROPEDIA_SKIP_PREFIXES):
+                    if title not in titles:
+                        titles.append(title)
+            if len(titles) >= max_results:
+                break
+        if titles:
+            print(f"🌐 Micropedia 強制聯網：找到 {len(titles)} 篇文章: {titles}")
+        else:
+            print(f"🌐 Micropedia 強制聯網：沒有找到結果 for '{query}'")
+    except asyncio.TimeoutError:
+        print(f"🌐 Micropedia 強制聯網逾時 for '{query}'")
+    except Exception as e:
+        print(f"🌐 Micropedia 強制聯網例外：{e}")
+    return titles
 
 
 async def _micropedia_search_api(session, query: str, max_results: int) -> list:
@@ -2995,11 +3060,19 @@ async def _micropedia_fetch_content(session, titles: list) -> str:
 
 
 async def _fetch_micropedia_inner_body(session, query, max_results, cache_key):
-    """Inner body of _fetch_micropedia_inner — extracted for session safety."""
+    """Inner body of _fetch_micropedia_inner — extracted for session safety.
+    Search strategy: (1) official MediaWiki search API first (fast,
+    structured), (2) FORCED real internet search (DuckDuckGo, site-scoped)
+    as a mandatory fallback if the structured search finds nothing — this is
+    not optional/AI-judgment-gated, it always runs so CJK phrase-matching
+    failures never silently return empty."""
     print(f"📚 Micropedia: 搜尋 '{query}'")
     titles = await _micropedia_search_api(session, query, max_results)
     if not titles:
-        print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果")
+        print(f"📚 Micropedia: 內部搜尋 '{query}' 沒有結果，強制轉為聯網搜尋...")
+        titles = await _micropedia_ddg_site_search(query, max_results)
+    if not titles:
+        print(f"📚 Micropedia: 搜尋 '{query}' 沒有結果（內部+聯網都沒找到）")
         _micropedia_cache[cache_key] = (_time.time(), "")
         return ""
     print(f"📚 Micropedia: 找到 {len(titles)} 篇相關文章: {titles[:5]}")
@@ -3938,6 +4011,30 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         f"你的訓練資料有截止日期，可能不知道最近發生的事。"
         f"遇到你不確定、或認為「沒發生過」「不存在」的事，"
         f"請使用 web_search 工具上網查證，不要憑訓練資料直接否定。"
+    )
+
+    # ── 資料來源可信度優先順序（最高優先級規則）──
+    # Establishes a clear trust hierarchy so the AI never treats AI-generated
+    # summaries (chronicle/awareness/refined-knowledge) as equally authoritative
+    # as directly-verified sources (forced micropedia web search, raw Discord
+    # history). This is what stops "connect-the-dots" hallucinations like
+    # inferring two different countries are secretly the same entity based on
+    # a vague pattern in the chronicle's social-dynamics summary.
+    system_prompt += (
+        f"\n\n─── 資料來源可信度優先順序（務必遵守）───\n"
+        f"你會收到好幾種不同來源的背景資料，可信度不一樣，優先順序如下：\n"
+        f"① 【最高】強制聯網查證到的微國家百科 (micropedia.site) 原文內容、"
+        f"以及 search_discord / web_search 工具查到的原始資料——這些是直接查證的"
+        f"事實來源，如果跟其他資料衝突，一律以這裡為準。\n"
+        f"② 【次高】「Discord 伺服器歷史資料」自動搜尋結果——真實的伺服器記錄。\n"
+        f"③ 【僅供參考，次要背景】「社群編年史」「社群感知」「微國家精煉知識庫」——"
+        f"這些是 AI 自動分析、歸納出來的背景摘要，本質上是「印象整理」而不是查證事實，"
+        f"可能包含歸納錯誤。只能拿來當作聊天時的語氣/氛圍參考"
+        f"（例如知道最近大家在聊什麼、感覺上誰跟誰比較熟），"
+        f"絕對不能拿來當作斷言具體事實的依據，"
+        f"更不能拿來推論「兩個實體其實是同一個」這種等同關係——"
+        f"如果只有這類次要資料支持某個結論，代表你還沒有真正查證過，"
+        f"應該先用 search_micropedia / web_search 查證，而不是直接採信。"
     )
 
     # Inject server context (channels, roles, emojis, members, current user identity)
@@ -8870,7 +8967,7 @@ def _get_community_chronicle_context() -> str:
     if not ch.get("last_updated"):
         return ""
 
-    lines = ["─── 社群編年史（深度歷史感知）───"]
+    lines = ["─── 社群編年史（僅供參考的次要背景資訊，非查證來源）───"]
 
     # Major alliances
     alliances = ch.get("major_alliances", [])
@@ -13421,7 +13518,7 @@ def _get_community_awareness_context() -> str:
     if not aw.get("last_updated"):
         return ""
 
-    lines = [f"─── 社群感知（更新於 {aw['last_updated']}）───"]
+    lines = [f"─── 社群感知（僅供參考的次要背景資訊，非查證來源，更新於 {aw['last_updated']}）───"]
 
     sd = aw.get("social_dynamics", {})
 
