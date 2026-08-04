@@ -999,6 +999,46 @@ _shared_session: aiohttp.ClientSession = None  # initialised in on_ready
 USER_MEMORIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "user_memories.json")
 user_memories: dict = {}  # {user_id_str: {facts: [...], name: str, interaction_count: int, last_seen: float}}
 
+# ── 短期對話歷史（per-user，僅限本人與 AI 的對話，不含其他人的訊息）──
+# In-memory only (deliberately NOT persisted to disk/Drive) — this is meant
+# as short-lived rolling context for the CURRENT conversation, not permanent
+# memory (that's what user_memories/[MEMORY:] is for). Resetting on restart
+# is fine and even desirable to avoid dragging in stale, long-dead threads.
+# Strictly scoped per user_id — never mixes in what other people said, which
+# was the earlier bug (injecting the whole channel's recent chatter caused
+# the AI to answer whatever topic other people happened to be discussing).
+_user_chat_history: dict = {}  # user_id_str -> [{"role": "user"/"assistant", "content": str}, ...]
+_USER_HISTORY_MAX_TURNS = 4  # keep last 4 user+assistant exchanges (8 messages)
+_USER_HISTORY_MAX_AGE = 1800  # 30 分鐘——太久之前的對話不再視為「近期」
+
+
+def _get_user_history(user_id: str) -> list:
+    """Return this user's recent conversation turns with the bot, dropping
+    any that have aged out. Returns a plain list of {"role","content"} dicts
+    ready to splice into the messages array sent to the AI."""
+    entry = _user_chat_history.get(user_id)
+    if not entry:
+        return []
+    now = _time.time()
+    turns = [t for t in entry.get("turns", []) if now - t.get("_ts", 0) <= _USER_HISTORY_MAX_AGE]
+    entry["turns"] = turns
+    return [{"role": t["role"], "content": t["content"]} for t in turns]
+
+
+def _append_user_history(user_id: str, user_text: str, assistant_text: str):
+    """Record this exchange for the user's short-term history, trimmed to
+    the last _USER_HISTORY_MAX_TURNS pairs."""
+    if not user_text or not assistant_text:
+        return
+    entry = _user_chat_history.setdefault(user_id, {"turns": []})
+    now = _time.time()
+    entry["turns"].append({"role": "user", "content": user_text[:500], "_ts": now})
+    entry["turns"].append({"role": "assistant", "content": assistant_text[:500], "_ts": now})
+    # Keep only the most recent N pairs (2N messages)
+    max_msgs = _USER_HISTORY_MAX_TURNS * 2
+    if len(entry["turns"]) > max_msgs:
+        entry["turns"] = entry["turns"][-max_msgs:]
+
 
 def save_user_memories():
     try:
@@ -3341,8 +3381,18 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"這種自然口語，而不是把整段搜尋結果貼上去。"
         )
 
+    # ── 注入本人近期對話歷史（僅限本人，不含其他人的訊息）──
+    history_turns = _get_user_history(user_id)
+    if history_turns:
+        system_prompt += (
+            f"\n\n─── 與「{user_name}」的近期對話 ───\n"
+            f"下面是你和「{user_name}」剛才的對話紀錄，可能跟這次問題有關（例如接續之前的話題、"
+            f"回答你剛才問的問題等），請參考上下文回覆，不要當作完全獨立的新問題。"
+        )
+
     messages = [
         {"role": "system", "content": system_prompt},
+        *history_turns,
         {"role": "user", "content": full_prompt},
     ]
 
@@ -3465,6 +3515,13 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # Fix any bare :name: emoji shortcodes into real Discord render syntax
     if actual_reply and message.guild:
         actual_reply = _fix_emoji_shortcodes(actual_reply, message.guild)
+
+    # Record this exchange in the user's short-term conversation history —
+    # scoped STRICTLY to this user_id, so it never leaks other people's
+    # messages, but lets follow-up questions ("我是Windows用戶" answering a
+    # question the bot itself just asked) resolve correctly.
+    if actual_reply and clean_content:
+        _append_user_history(user_id, clean_content, actual_reply)
 
     # Final safety: if reply is empty after all parsing, return None so caller can handle
     if not actual_reply:
