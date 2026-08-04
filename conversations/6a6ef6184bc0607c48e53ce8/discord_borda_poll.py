@@ -2919,7 +2919,14 @@ async def _describe_image(image_url: str, settings: dict) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 api_url, json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30, connect=10, sock_read=25),
+                # Vision models are noticeably slower and MUCH more variable than
+                # text models — observed real-world latency ranges from ~4s to
+                # ~49s for the same endpoint/model depending on load. A short
+                # timeout here silently drops legitimate in-flight calls (the
+                # API finishes the call successfully server-side, but we've
+                # already given up waiting, so the image is treated as if it
+                # was never analyzed). Give it a generous budget instead.
+                timeout=aiohttp.ClientTimeout(total=90, connect=10, sock_read=80),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -3011,22 +3018,37 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # 再把描述注入 system prompt，讓主 AI 可以「看到」圖片內容來回答。
     image_context = ""
     vision_model = settings.get("vision_model", "")
-    if vision_model and message.attachments:
-        for att in message.attachments[:2]:  # 最多處理 2 張圖
-            if att.content_type and att.content_type.startswith("image/"):
-                try:
-                    print(f"📷 偵測到圖片附件，呼叫視覺模型 {vision_model} 識圖中...")
-                    desc = await asyncio.wait_for(
-                        _describe_image(att.url, settings), timeout=35
-                    )
-                    if desc:
-                        image_context += f"\n[圖片描述]：{desc}\n"
-                except asyncio.TimeoutError:
-                    print("⚠️ 視覺模型識圖逾時（>35s），跳過")
-                except Exception as e:
-                    print(f"⚠️ 識圖子流程錯誤：{e}")
+    image_atts = [
+        att for att in message.attachments[:2]  # 最多處理 2 張圖
+        if att.content_type and att.content_type.startswith("image/")
+    ]
+    if vision_model and image_atts:
+        print(f"📷 偵測到 {len(image_atts)} 張圖片附件，呼叫視覺模型 {vision_model} 識圖中...")
+
+        async def _describe_with_timeout(att):
+            try:
+                # Matches _describe_image's own 90s internal budget, plus a
+                # small margin — the inner aiohttp timeout should fire first
+                # in normal cases, this is just a hard outer safety net.
+                return await asyncio.wait_for(_describe_image(att.url, settings), timeout=95)
+            except asyncio.TimeoutError:
+                print(f"⚠️ 視覺模型識圖逾時（>95s），此圖片將略過")
+                return ""
+            except Exception as e:
+                print(f"⚠️ 識圖子流程錯誤：{e}")
+                return ""
+
+        # Run all images concurrently instead of one-by-one — with 2 images,
+        # sequential processing would double the worst-case wait; concurrent
+        # calls keep it bounded to a single image's latency.
+        descriptions = await asyncio.gather(*[_describe_with_timeout(att) for att in image_atts])
+        for desc in descriptions:
+            if desc:
+                image_context += f"\n[圖片描述]：{desc}\n"
         if image_context:
             print(f"📷 識圖完成，注入 {len(image_context)} chars 到上下文")
+        else:
+            print(f"⚠️ 識圖流程跑完但沒有拿到任何描述（可能全部逾時或失敗）")
 
     # ── Discord 連結解析 ──
     # If the user's message contains Discord jump URLs, fetch the actual
