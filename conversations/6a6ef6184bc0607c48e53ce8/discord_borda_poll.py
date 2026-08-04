@@ -3429,6 +3429,13 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     awareness_ctx = _get_community_awareness_context()
     if awareness_ctx:
         system_prompt += f"\n\n{awareness_ctx}"
+    # Inject community chronicle — gives the AI deep historical context:
+    # long-standing alliances, conflicts, treaties, key events, and their
+    # evolution over months/years. This is what lets the AI understand
+    # grudges and context that the 20-min awareness scan can't capture.
+    chronicle_ctx = _get_community_chronicle_context()
+    if chronicle_ctx:
+        system_prompt += f"\n\n{chronicle_ctx}"
 
     system_prompt += f"\n\n你現在正在和「{user_name}」對話，請直接針對這句話回答。"
 
@@ -5050,10 +5057,12 @@ async def setup_hook():
     asyncio.ensure_future(quiz_settlement_loop())
     asyncio.ensure_future(ai_refine_loop())
     asyncio.ensure_future(community_awareness_loop())
+    asyncio.ensure_future(community_chronicle_loop())
     asyncio.ensure_future(token_log_loop())
-    # Load community awareness data
+    # Load community awareness + chronicle data
     _load_community_awareness()
     _load_awareness_settings()
+    _load_community_chronicle()
     # Auto-detect guild for awareness if not set
     if not _community_awareness_settings.get("guild_id") and bot.guilds:
         _community_awareness_settings["guild_id"] = str(bot.guilds[0].id)
@@ -7228,6 +7237,507 @@ class SystemGroup(app_commands.Group):
 
 
 
+# ═════════════════════════════════════════════════════════════════
+# Community Chronicle System (社群編年史)
+# 補足即時感知的深度不足——掃描更深的歷史（論壇全文 + 深層頻道訊息），
+# 讓 AI 理解持續數月甚至數年的恩怨、聯盟、條約、事件因果。
+#
+# 雙層感知架構：
+# - 即時脈搏（community_awareness）：20 分鐘週期，看最近動態
+# - 深度編年史（community_chronicle）：每日週期，看長期歷史
+#
+# 編年史包含：
+# 1. 重大聯盟 — 誰跟誰結盟、什麼時候、為什麼、目前狀態
+# 2. 重大衝突 — 誰跟誰有恩怨、起因、演變、目前狀態
+# 3. 關鍵歷史事件 — 重要事件的因果鏈與影響
+# 4. 條約與協議 — 簽了什麼、條件、目前是否有效
+# 5. 權力動態 — 誰有影響力、怎麼形成的、怎麼演變的
+# 6. 文化傳統 — 社群特有的規範與傳統
+# 7. 重要人物 — 關鍵角色的歷史與現狀
+# ═════════════════════════════════════════════════════════════════
+
+COMMUNITY_CHRONICLE_FILE = os.path.join(DATA_DIR, "community_chronicle.json")
+
+_community_chronicle = {
+    "last_updated": "",
+    "last_deep_scan": "",
+    "major_alliances": [],       # [{name, members, formed, context, status}]
+    "major_conflicts": [],       # [{parties, started, cause, status, resolution, current_state}]
+    "key_events": [],            # [{date, event, participants, consequences, significance}]
+    "treaties_agreements": [],   # [{name, parties, date, terms, status}]
+    "power_dynamics": [],        # [{description, context, evolution}]
+    "cultural_traditions": [],   # [{norm, origin, context}]
+    "notable_figures": [],       # [{name, role, history, current_status}]
+}
+
+_chronicle_last_run = 0
+_CHRONICLE_INTERVAL = 86400  # 24 hours in seconds
+
+
+def _save_community_chronicle():
+    _save_json_file(COMMUNITY_CHRONICLE_FILE, _community_chronicle)
+
+
+def _load_community_chronicle():
+    global _community_chronicle
+    try:
+        if os.path.exists(COMMUNITY_CHRONICLE_FILE):
+            with open(COMMUNITY_CHRONICLE_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+                if isinstance(loaded, dict):
+                    _community_chronicle.update(loaded)
+                    print(f"📜 社群編年史：已載入（更新於 {loaded.get('last_updated', '?')}）")
+    except Exception as e:
+        print(f"⚠️ 社群編年史載入失敗：{e}")
+
+
+async def _gather_deep_history(guild, max_channels=10, msgs_per_channel=100) -> str:
+    """Gather deep history from channels — much deeper than the awareness
+    scan. Fetches up to 100 messages per channel from the most active
+    channels, covering weeks to months of history depending on channel
+    activity."""
+    _log_ch_id = chat_ai_settings.get("log_channel_id")
+    _EXCLUDE_MARKERS = ("測試", "test", "log", "紀錄")
+
+    def _is_excluded(ch):
+        if _log_ch_id and ch.id == _log_ch_id:
+            return True
+        name_lower = ch.name.lower()
+        return any(m.lower() in name_lower for m in _EXCLUDE_MARKERS)
+
+    candidates = [
+        ch for ch in guild.text_channels
+        if ch.type in (discord.ChannelType.text, discord.ChannelType.news)
+        and not _is_excluded(ch)
+    ]
+
+    # Sort by recent activity — most active first
+    channel_ts = []
+    for ch in candidates:
+        try:
+            ts = 0
+            async for m in ch.history(limit=1):
+                ts = m.created_at.timestamp()
+            channel_ts.append((ts, ch))
+        except Exception:
+            channel_ts.append((0, ch))
+    channel_ts.sort(key=lambda x: -x[0])
+    selected = [ch for _, ch in channel_ts[:max_channels]]
+
+    snippets = []
+    for ch in selected:
+        try:
+            msgs = []
+            async for msg in ch.history(limit=msgs_per_channel):
+                text_parts = []
+                if msg.content and msg.content.strip():
+                    text_parts.append(msg.content.strip())
+                for emb in msg.embeds:
+                    if emb.title:
+                        text_parts.append(str(emb.title))
+                    if emb.description:
+                        text_parts.append(str(emb.description))
+                    for field in emb.fields:
+                        text_parts.append(f"{field.name}: {field.value}")
+                full = "\n".join(p for p in text_parts if p).strip()
+                if full and len(full) >= 5 and not msg.author.bot:
+                    ts_str = msg.created_at.astimezone(GMT8).strftime("%Y-%m-%d")
+                    msgs.append(f"[{ts_str}] {msg.author.display_name}: {full[:120]}")
+            if msgs:
+                snippets.append(f"── #{ch.name} ──\n" + "\n".join(msgs))
+        except Exception:
+            continue
+    return "\n\n".join(snippets)
+
+
+async def _gather_forum_digest(guild) -> str:
+    """Build a compact digest of ALL forum posts — titles, dates, tags,
+    and key content — as the backbone of the chronicle. Forum posts are
+    where formal events happen (proposals, elections, treaties, applications)."""
+    try:
+        posts = await _get_forum_index(guild)
+    except Exception:
+        posts = _forum_index_cache.get(guild.id, {}).get("posts", [])
+
+    if not posts:
+        return ""
+
+    lines = []
+    for p in posts:
+        title = p.get("title", "?")
+        date = p.get("created_at", "?")
+        tags = p.get("tags", [])
+        author = p.get("author", "?")
+        channel = p.get("channel_name", "?")
+        last_activity = p.get("last_activity", "")
+
+        # Compact: [date] #channel: "title" (tags) by author
+        tag_str = f" [{', '.join(tags)}]" if tags else ""
+        line = f"[{date}] #{channel}: \"{title}\"{tag_str} by {author}"
+        if last_activity and last_activity != date:
+            line += f" (最後活動: {last_activity})"
+
+        # Add first 150 chars of content for context
+        text = p.get("text", "")
+        # Strip the title/tags we already included
+        content_lines = text.split("\n")
+        # Find the actual content (skip title and tags lines)
+        content_start = 0
+        for i, cl in enumerate(content_lines):
+            if cl.strip() and cl.strip() != title and cl.strip() not in (tags or []):
+                content_start = i
+                break
+        content_text = "\n".join(content_lines[content_start:])[:150]
+        if content_text.strip():
+            line += f" — {content_text.strip()}"
+
+        # Add last reply (latest status update)
+        reply_lines = p.get("reply_lines", [])
+        if reply_lines:
+            last_reply = reply_lines[-1][:100]
+            line += f" → 最新進展: {last_reply}"
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+async def _deep_scan_community(guild) -> bool:
+    """Run one deep chronicle scan: gather deep channel history + forum
+    digest, have the AI synthesize/update the community chronicle."""
+    global _community_chronicle
+    if not chat_ai_settings.get("api_key"):
+        return False
+
+    # Gather data
+    print("📜 社群編年史：正在收集論壇摘要...")
+    forum_digest = await _gather_forum_digest(guild)
+
+    print("📜 社群編年史：正在收集深層頻道歷史...")
+    channel_history = await _gather_deep_history(guild, max_channels=10, msgs_per_channel=100)
+
+    if not forum_digest and not channel_history:
+        print("📜 社群編年史：沒有足夠的歷史資料，跳過")
+        return False
+
+    # Build previous chronicle summary for the AI to update
+    prev = _community_chronicle
+    prev_summary = ""
+    if prev.get("last_updated"):
+        prev_lines = []
+        for a in prev.get("major_alliances", [])[:10]:
+            prev_lines.append(f"- 聯盟：{', '.join(a.get('members', []))} — {a.get('context', '')}（{a.get('status', '?')}）")
+        for c in prev.get("major_conflicts", [])[:10]:
+            prev_lines.append(f"- 衝突：{', '.join(c.get('parties', []))} — {c.get('cause', '')}（{c.get('status', '?')}）→ {c.get('current_state', '')}")
+        for e in prev.get("key_events", [])[:10]:
+            prev_lines.append(f"- 事件：[{e.get('date', '?')}] {e.get('event', '')} — {e.get('consequences', '')}")
+        for t in prev.get("treaties_agreements", [])[:8]:
+            prev_lines.append(f"- 條約：{t.get('name', '?')} — {', '.join(t.get('parties', []))}（{t.get('status', '?')}）")
+        for p in prev.get("power_dynamics", [])[:5]:
+            prev_lines.append(f"- 權力：{p.get('description', '')} — {p.get('evolution', '')}")
+        for f in prev.get("notable_figures", [])[:10]:
+            prev_lines.append(f"- 人物：{f.get('name', '?')} — {f.get('role', '?')} — {f.get('current_status', '?')}")
+        for ct in prev.get("cultural_traditions", [])[:5]:
+            prev_lines.append(f"- 傳統：{ct.get('norm', '')} — {ct.get('origin', '')}")
+        prev_summary = "\n".join(prev_lines)
+
+    system_prompt = (
+        "你是一個微國家 Discord 社群的歷史學家，你的任務是從大量的歷史訊息中，"
+        "整理出這個社群的「編年史」——一份長期的、深度的歷史記錄。\n\n"
+        "你會收到：\n"
+        "1. 論壇所有貼文的摘要（標題、日期、標籤、內容片段、最新進展）\n"
+        "2. 多個頻道的深層歷史訊息（最近 100 則，可能跨越數週到數月）\n\n"
+        "請從這些資料中分析出以下七個維度：\n\n"
+        "1. 重大聯盟（major_alliances）：成員國之間的長期結盟關係。\n"
+        "   - name: 聯盟名稱（如果有）\n"
+        "   - members: 成員列表\n"
+        "   - formed: 大約形成時間\n"
+        "   - context: 為什麼結盟（背景原因）\n"
+        "   - status: active（活躍）/ fractured（出現裂痕）/ dissolved（解散）\n\n"
+        "2. 重大衝突（major_conflicts）：成員國之間的長期恩怨或對立。\n"
+        "   - parties: 對立雙方\n"
+        "   - started: 大約開始時間\n"
+        "   - cause: 起因\n"
+        "   - status: ongoing（持續中）/ resolved（已解決）/ escalated（升級）/ cold（冷卻）\n"
+        "   - resolution: 如果已解決，怎麼解決的\n"
+        "   - current_state: 目前狀態的一句話描述\n\n"
+        "3. 關鍵歷史事件（key_events）：影響社群走向的重大事件。\n"
+        "   - date: 日期\n"
+        "   - event: 事件描述\n"
+        "   - participants: 參與者\n"
+        "   - consequences: 後果/影響\n"
+        "   - significance: 為什麼重要（長期影響）\n\n"
+        "4. 條約與協議（treaties_agreements）：正式簽署的條約、協議、公約。\n"
+        "   - name: 條約名稱\n"
+        "   - parties: 簽署方\n"
+        "   - date: 簽署日期\n"
+        "   - terms: 條件摘要\n"
+        "   - status: active（有效）/ suspended（暫停）/ voided（失效）\n\n"
+        "5. 權力動態（power_dynamics）：社群內的影響力結構。\n"
+        "   - description: 誰有影響力、什麼樣的影響力\n"
+        "   - context: 脈絡\n"
+        "   - evolution: 怎麼演變來的\n\n"
+        "6. 文化傳統（cultural_traditions）：社群特有的規範、傳統、潛規則。\n"
+        "   - norm: 傳統/規範描述\n"
+        "   - origin: 起源\n"
+        "   - context: 脈絡\n\n"
+        "7. 重要人物（notable_figures）：對社群有重大影響的關鍵人物。\n"
+        "   - name: 名字\n"
+        "   - role: 角色/身分\n"
+        "   - history: 在社群中的重要事蹟\n"
+        "   - current_status: 目前狀態（活躍/淡出/離開/被禁等）\n\n"
+        "【重要原則】\n"
+        "- 你是在寫歷史，不是在寫現況報告——著重長期的、結構性的東西\n"
+        "- 只記錄從訊息中能觀察到的東西，不要編造或過度推測\n"
+        "- 衝突要寫清楚起因和演變——不要只寫「A跟B有恩怨」\n"
+        "- 事件要寫清楚因果——為什麼發生、導致了什麼\n"
+        "- 人物要寫清楚事蹟——不要只寫「A很重要」\n"
+        "- 寫繁體中文\n"
+        "- 每個欄位的文字不要超過 200 字\n"
+        "- 如果某個維度沒有足夠資料判斷，就回空陣列\n\n"
+    )
+
+    if prev_summary:
+        system_prompt += (
+            f"以下是上一次編年史的內容（作為參考，請在此基礎上更新）：\n"
+            f"{prev_summary}\n\n"
+            "請以最新資料為準更新以上內容。如果某些關係或事件有了新進展，"
+            "更新它們的狀態。如果發現新的歷史脈絡，補充進去。\n\n"
+        )
+
+    system_prompt += (
+        "嚴格回覆以下 JSON 格式（不要加 markdown code block，不要加其他文字）：\n"
+        '{"last_updated": "", "last_deep_scan": "", "major_alliances": [{"name": "", "members": [], "formed": "", "context": "", "status": ""}], "major_conflicts": [{"parties": [], "started": "", "cause": "", "status": "", "resolution": "", "current_state": ""}], "key_events": [{"date": "", "event": "", "participants": [], "consequences": "", "significance": ""}], "treaties_agreements": [{"name": "", "parties": [], "date": "", "terms": "", "status": ""}], "power_dynamics": [{"description": "", "context": "", "evolution": ""}], "cultural_traditions": [{"norm": "", "origin": "", "context": ""}], "notable_figures": [{"name": "", "role": "", "history": "", "current_status": ""}]}'
+    )
+
+    # Combine inputs — truncate to keep within token budget
+    combined_input = ""
+    if forum_digest:
+        combined_input += f"=== 論壇歷史摘要 ===\n{forum_digest[:20000]}\n\n"
+    if channel_history:
+        combined_input += f"=== 頻道深層歷史 ===\n{channel_history[:30000]}"
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": combined_input[:55000]},
+    ]
+
+    try:
+        result = await asyncio.wait_for(
+            call_chat_api(messages, chat_ai_settings, max_tokens=4000), timeout=120
+        )
+    except Exception as e:
+        print(f"📜 社群編年史：AI 分析失敗：{e}")
+        return False
+
+    raw = result.get("content", "")
+    if not raw:
+        tool_calls = result.get("tool_calls", [])
+        if tool_calls:
+            raw = tool_calls[0].get("function", {}).get("arguments", "")
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1] if "\n" in raw else raw[3:]
+    if raw.endswith("```"):
+        raw = raw[:-3]
+    raw = raw.strip()
+
+    try:
+        data = json_module.loads(raw)
+    except Exception:
+        import re
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                data = json_module.loads(match.group())
+            except Exception:
+                print(f"📜 社群編年史：JSON 解析失敗：{raw[:200]}")
+                return False
+        else:
+            print(f"📜 社群編年史：無法解析 AI 回應：{raw[:200]}")
+            return False
+
+    if not isinstance(data, dict):
+        return False
+
+    now_str = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M")
+    data["last_updated"] = now_str
+    data["last_deep_scan"] = now_str
+    _community_chronicle = data
+    _save_community_chronicle()
+
+    n_alliances = len(data.get("major_alliances", []))
+    n_conflicts = len(data.get("major_conflicts", []))
+    n_events = len(data.get("key_events", []))
+    n_treaties = len(data.get("treaties_agreements", []))
+    n_power = len(data.get("power_dynamics", []))
+    n_traditions = len(data.get("cultural_traditions", []))
+    n_figures = len(data.get("notable_figures", []))
+    print(f"📜 社群編年史已更新（{now_str}）：{n_alliances} 聯盟, {n_conflicts} 衝突, {n_events} 事件, {n_treaties} 條約, {n_power} 權力動態, {n_traditions} 傳統, {n_figures} 人物")
+
+    return True
+
+
+async def community_chronicle_loop():
+    """Background task: deep scan community history every 24 hours."""
+    global _chronicle_last_run
+    await asyncio.sleep(300)  # Wait 5 min after startup before first deep scan
+    while True:
+        try:
+            if not _community_awareness_settings.get("enabled"):
+                await asyncio.sleep(60)
+                continue
+
+            if not chat_ai_settings.get("api_key"):
+                await asyncio.sleep(60)
+                continue
+
+            guild_id = _community_awareness_settings.get("guild_id")
+            if not guild_id:
+                if bot.guilds:
+                    _community_awareness_settings["guild_id"] = str(bot.guilds[0].id)
+                    _save_awareness_settings()
+                    guild_id = _community_awareness_settings["guild_id"]
+                else:
+                    await asyncio.sleep(60)
+                    continue
+
+            guild = bot.get_guild(int(guild_id))
+            if not guild:
+                await asyncio.sleep(60)
+                continue
+
+            now = _time.time()
+            if _chronicle_last_run and (now - _chronicle_last_run) < _CHRONICLE_INTERVAL:
+                await asyncio.sleep(60)
+                continue
+
+            _chronicle_last_run = now
+            print(f"📜 社群編年史：開始深度歷史掃描 {guild.name}...")
+            success = await _deep_scan_community(guild)
+            if not success:
+                _chronicle_last_run = now  # Count as attempted
+
+        except Exception as e:
+            print(f"⚠️ 社群編年史迴圈錯誤：{e}")
+
+        await asyncio.sleep(60)
+
+
+def _get_community_chronicle_context() -> str:
+    """Render the community chronicle as a compact text block for
+    injection into the AI system prompt. This gives the AI deep
+    historical context — long-standing relationships, past events,
+    treaties, and their current status."""
+    ch = _community_chronicle
+    if not ch.get("last_updated"):
+        return ""
+
+    lines = ["─── 社群編年史（深度歷史感知）───"]
+
+    # Major alliances
+    alliances = ch.get("major_alliances", [])
+    if alliances:
+        alliance_parts = []
+        for a in alliances[:8]:
+            members = ", ".join(a.get("members", []))
+            name = a.get("name", "")
+            formed = a.get("formed", "")
+            context = a.get("context", "")
+            status = a.get("status", "")
+            name_str = f"「{name}」" if name else ""
+            alliance_parts.append(f"  • {name_str}{members}（{formed}）— {context} [{status}]")
+        lines.append("\n🤝 重大聯盟：\n" + "\n".join(alliance_parts))
+
+    # Major conflicts
+    conflicts = ch.get("major_conflicts", [])
+    if conflicts:
+        conflict_parts = []
+        for c in conflicts[:8]:
+            parties = " vs ".join(c.get("parties", []))
+            started = c.get("started", "")
+            cause = c.get("cause", "")
+            status = c.get("status", "")
+            current = c.get("current_state", "")
+            resolution = c.get("resolution", "")
+            detail = f"起因：{cause}" if cause else ""
+            if resolution:
+                detail += f" → 已解決：{resolution}"
+            elif current:
+                detail += f" → 目前：{current}"
+            conflict_parts.append(f"  • {parties}（{started}）— {detail} [{status}]")
+        lines.append("\n⚔️ 重大衝突：\n" + "\n".join(conflict_parts))
+
+    # Key events
+    events = ch.get("key_events", [])
+    if events:
+        event_parts = []
+        for e in events[:10]:
+            date = e.get("date", "")
+            event = e.get("event", "")
+            consequences = e.get("consequences", "")
+            significance = e.get("significance", "")
+            detail = f" — {consequences}" if consequences else ""
+            if significance:
+                detail += f"（{significance}）"
+            event_parts.append(f"  • [{date}] {event}{detail}")
+        lines.append("\n📜 關鍵歷史事件：\n" + "\n".join(event_parts))
+
+    # Treaties
+    treaties = ch.get("treaties_agreements", [])
+    if treaties:
+        treaty_parts = []
+        for t in treaties[:8]:
+            name = t.get("name", "?")
+            parties = ", ".join(t.get("parties", []))
+            date = t.get("date", "")
+            terms = t.get("terms", "")
+            status = t.get("status", "")
+            treaty_parts.append(f"  • {name}（{parties}，{date}）— {terms} [{status}]")
+        lines.append("\n📑 條約與協議：\n" + "\n".join(treaty_parts))
+
+    # Power dynamics
+    power = ch.get("power_dynamics", [])
+    if power:
+        power_parts = []
+        for p in power[:5]:
+            desc = p.get("description", "")
+            evolution = p.get("evolution", "")
+            power_parts.append(f"  • {desc} — 演變：{evolution}")
+        lines.append("\n👑 權力動態：\n" + "\n".join(power_parts))
+
+    # Cultural traditions
+    traditions = ch.get("cultural_traditions", [])
+    if traditions:
+        trad_parts = []
+        for ct in traditions[:5]:
+            norm = ct.get("norm", "")
+            origin = ct.get("origin", "")
+            trad_parts.append(f"  • {norm} — 起源：{origin}")
+        lines.append("\n🎭 文化傳統：\n" + "\n".join(trad_parts))
+
+    # Notable figures
+    figures = ch.get("notable_figures", [])
+    if figures:
+        figure_parts = []
+        for f in figures[:10]:
+            name = f.get("name", "?")
+            role = f.get("role", "")
+            history = f.get("history", "")
+            current = f.get("current_status", "")
+            figure_parts.append(f"  • {name}（{role}）— {history} [{current}]")
+        lines.append("\n👤 重要人物：\n" + "\n".join(figure_parts))
+
+    lines.append(
+        "\n⚠️ 以上是 AI 分析社群歷史得到的編年史，涵蓋長期的聯盟、衝突、"
+        "事件因果和人物動態。請自然運用這些歷史理解來回應使用者，"
+        "表現得像一個了解社群過去的人。不要主動提及「編年史」這個詞。"
+    )
+
+    return "\n".join(lines)
+
+
 # ──────────────────────────────────────────────
 # 社群感知指令
 # ──────────────────────────────────────────────
@@ -7331,6 +7841,95 @@ class AwarenessGroup(app_commands.Group):
             await interaction.followup.send("✅ 社群感知已更新！用 /awareness status 查看", ephemeral=True)
         else:
             await interaction.followup.send("❌ 分析失敗，請檢查日誌", ephemeral=True)
+
+    @app_commands.command(name="chronicle", description="查看社群編年史（深度歷史感知）")
+    async def awareness_chronicle(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        ch = _community_chronicle
+        last_updated = ch.get("last_updated", "尚未建立")
+
+        lines = ["📜 **社群編年史**", ""]
+        lines.append(f"最後更新：{last_updated}")
+        lines.append(f"深度掃描：每 24 小時自動執行一次")
+        lines.append("")
+
+        n_alliances = len(ch.get("major_alliances", []))
+        n_conflicts = len(ch.get("major_conflicts", []))
+        n_events = len(ch.get("key_events", []))
+        n_treaties = len(ch.get("treaties_agreements", []))
+        n_power = len(ch.get("power_dynamics", []))
+        n_traditions = len(ch.get("cultural_traditions", []))
+        n_figures = len(ch.get("notable_figures", []))
+
+        lines.append("**編年史概況：**")
+        lines.append(f"  🤝 重大聯盟：{n_alliances}")
+        lines.append(f"  ⚔️ 重大衝突：{n_conflicts}")
+        lines.append(f"  📜 關鍵事件：{n_events}")
+        lines.append(f"  📑 條約協議：{n_treaties}")
+        lines.append(f"  👑 權力動態：{n_power}")
+        lines.append(f"  🎭 文化傳統：{n_traditions}")
+        lines.append(f"  👤 重要人物：{n_figures}")
+
+        if n_alliances > 0:
+            lines.append("")
+            lines.append("**🤝 重大聯盟：**")
+            for a in ch.get("major_alliances", [])[:8]:
+                members = ", ".join(a.get("members", []))
+                lines.append(f"  • {a.get('name', '')} — {members}（{a.get('formed', '')}）[{a.get('status', '')}]")
+
+        if n_conflicts > 0:
+            lines.append("")
+            lines.append("**⚔️ 重大衝突：**")
+            for c in ch.get("major_conflicts", [])[:8]:
+                parties = " vs ".join(c.get("parties", []))
+                lines.append(f"  • {parties}（{c.get('started', '')}）— {c.get('cause', '')[:60]} [{c.get('status', '')}]")
+
+        if n_events > 0:
+            lines.append("")
+            lines.append("**📜 關鍵事件：**")
+            for e in ch.get("key_events", [])[:10]:
+                lines.append(f"  • [{e.get('date', '')}] {e.get('event', '')[:60]}")
+
+        if n_treaties > 0:
+            lines.append("")
+            lines.append("**📑 條約與協議：**")
+            for t in ch.get("treaties_agreements", [])[:8]:
+                lines.append(f"  • {t.get('name', '?')} — {', '.join(t.get('parties', []))}（{t.get('date', '')}）[{t.get('status', '')}]")
+
+        if n_figures > 0:
+            lines.append("")
+            lines.append("**👤 重要人物：**")
+            for f in ch.get("notable_figures", [])[:10]:
+                lines.append(f"  • {f.get('name', '?')}（{f.get('role', '')}）— {f.get('history', '')[:50]} [{f.get('current_status', '')}]")
+
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="deep_scan", description="立即觸發深度歷史掃描，更新編年史（機器人擁有者限定）")
+    async def awareness_deep_scan(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        guild_id = _community_awareness_settings.get("guild_id")
+        if not guild_id and interaction.guild:
+            guild_id = str(interaction.guild.id)
+            _community_awareness_settings["guild_id"] = guild_id
+            _save_awareness_settings()
+        if not guild_id:
+            await interaction.response.send_message("❌ 找不到伺服器", ephemeral=True)
+            return
+        guild = bot.get_guild(int(guild_id))
+        if not guild:
+            await interaction.response.send_message("❌ 找不到伺服器", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        await interaction.followup.send("📜 正在掃描深層歷史...（論壇全文 + 10 個頻道 × 100 則訊息，可能需要 1-2 分鐘）", ephemeral=True)
+        success = await _deep_scan_community(guild)
+        if success:
+            await interaction.followup.send("✅ 社群編年史已更新！用 /awareness chronicle 查看", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ 掃描失敗，請檢查日誌", ephemeral=True)
 
 
 
