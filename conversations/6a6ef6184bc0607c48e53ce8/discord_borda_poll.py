@@ -4698,6 +4698,17 @@ def _global_interaction_check(interaction: discord.Interaction) -> bool:
 
 
 async def setup_hook():
+    # 🔑 CRITICAL: bind the HTTP port FIRST, before any Drive downloads or
+    # data loading. Render's port-scanner only waits a limited window after
+    # container start to see an open port — if that's delayed by slow Drive
+    # I/O or forum indexing, the scanner times out ("Port scan timeout
+    # reached, no open ports detected") and the deploy gets stuck/marked
+    # unhealthy even though the bot is actually running fine. Opening the
+    # port here, before anything else, means Render sees it within
+    # milliseconds of boot — everything else below still runs exactly the
+    # same, just after the port is already live.
+    await keep_alive_server()
+
     # Register slash command groups (runs once, before bot connects)
     for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup()]:
         try:
@@ -4744,7 +4755,6 @@ async def setup_hook():
     load_emoji_aliases()
     load_tools_unsupported()
     load_tools_supported()
-    await keep_alive_server()
     asyncio.ensure_future(self_ping_loop())
     asyncio.ensure_future(auto_save_loop())
     asyncio.ensure_future(daily_briefing_scheduler())
