@@ -9140,7 +9140,23 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
             _applications["entries"] = _applications["entries"][-500:]
     save_applications()
 
-    # ── Phase 1: Fields missing → orange ⚠️, do NOT notify secretariat ──
+    # ── Determine reviewer label up-front (秘書處 vs 理事國) so BOTH the
+    # applicant-facing ack messages and the reviewer notification use the
+    # correct one — this must not be hardcoded to 秘書處 in the council flow.
+    if system_type == "council":
+        notify_ch_id = application_settings.get("council_channel")
+        notify_title = "📝 新入盟申請（理事國審核）"
+        notify_footer = "請理事國點擊下方按鈕審核通過或退回此申請"
+        notify_color = discord.Color.dark_gold()
+        reviewer_label = "理事國"
+    else:
+        notify_ch_id = application_settings.get("secretariat_channel")
+        notify_title = "📝 新入盟申請"
+        notify_footer = "請管理員點擊下方按鈕審核通過或退回此申請"
+        notify_color = discord.Color.gold()
+        reviewer_label = "秘書處"
+
+    # ── Phase 1: Fields missing → orange ⚠️, do NOT notify reviewer yet ──
     if not all_pass:
         fields_text = "\n".join(f"❌ {f}" for f in missing_fields)
         ack_desc = (
@@ -9148,7 +9164,7 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
             f"{fields_text}\n\n"
             f"**請直接編輯原貼文補齊上述欄位**，系統會自動重新檢查。"
             + ("\n⚠️ 國旗欄位需要附上圖片附件。" if "國旗" in str(missing_fields) else "")
-            + "\n補齊後才會送交秘書處審核。"
+            + f"\n補齊後才會送交{reviewer_label}審核。"
         )
         ack_color = discord.Color.orange()
         ack_title = "⚠️ 入盟申請尚不完整"
@@ -9166,7 +9182,7 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
             if applicant_name:
                 ack_embed.add_field(name="申請國家", value=applicant_name, inline=True)
             ack_embed.add_field(name="申請人", value=message.author.display_name, inline=True)
-            ack_embed.set_footer(text="ICEA 國際總會 · 入盟申請審核系統 · 請編輯原貼文補齊")
+            ack_embed.set_footer(text=f"ICEA 國際總會 · 入盟申請審核系統 · 請編輯原貼文補齊")
             if is_edit and existing_entry:
                 await message.reply(embed=ack_embed, view=ack_view, mention_author=False)
             else:
@@ -9174,12 +9190,12 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
         except Exception as e:
             print(f"⚠️ 入盟申請確認訊息發送失敗：{e}")
 
-        print(f"📝 入盟申請 {msg_id}：{len(missing_fields)} 個欄位待補齊，未通知秘書處")
+        print(f"📝 入盟申請 {msg_id}：{len(missing_fields)} 個欄位待補齊，未通知{reviewer_label}")
         return
 
-    # ── Phase 2: All fields pass → blue ✅, notify secretariat ──
+    # ── Phase 2: All fields pass → blue ✅, notify reviewer ──
     ack_desc = (
-        f"✅ 入盟申請所有欄位齊全，已送交秘書處審核。\n\n"
+        f"✅ 入盟申請所有欄位齊全，已送交{reviewer_label}審核。\n\n"
         f"請耐心等候審核結果。"
     )
 
@@ -9200,20 +9216,6 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
     # Mark as notified so we don't double-send
     entry["secretariat_notified"] = True
     save_applications()
-
-    # ── Send notification to the correct reviewer (秘書處 or 理事國) ──
-    if system_type == "council":
-        notify_ch_id = application_settings.get("council_channel")
-        notify_title = "📝 新入盟申請（理事國審核）"
-        notify_footer = "請理事國點擊下方按鈕審核通過或退回此申請"
-        notify_color = discord.Color.dark_gold()
-        reviewer_label = "理事國"
-    else:
-        notify_ch_id = application_settings.get("secretariat_channel")
-        notify_title = "📝 新入盟申請"
-        notify_footer = "請管理員點擊下方按鈕審核通過或退回此申請"
-        notify_color = discord.Color.gold()
-        reviewer_label = "秘書處"
 
     if not notify_ch_id:
         print(f"⚠️ 入盟申請系統：未設定{reviewer_label}通知頻道，無法發送通知")
@@ -9296,9 +9298,10 @@ class ApplicationFlagUploadView(discord.ui.View):
             "channel_id": entry.get("channel_id"),
             "thread_id": entry.get("thread_id"),
         }
+        reviewer_label = "理事國" if entry.get("system_type") == "council" else "秘書處"
         await interaction.response.send_message(
             "🚩 請在這個頻道/貼文中**傳送一張國旗圖片**（直接附加圖片發送即可）。\n"
-            "系統會自動接收並用視覺 AI 驗證，通過後自動送交秘書處審核。\n"
+            f"系統會自動接收並用視覺 AI 驗證，通過後自動送交{reviewer_label}審核。\n"
             "（5 分鐘內有效）",
             ephemeral=True,
         )
