@@ -599,6 +599,7 @@ async function showNationsPanel() {
 }
 
 async function loadNations() {
+  if (!currentGuild) { navigate('guilds'); return; }
   const list = await api(`/api/guilds/${currentGuild}/nations`);
   if (list.error) { if (list.status === 401) { showOnly('login-view'); return; } alert('載入失敗：' + list.error); return; }
   const container = document.getElementById('nation-list');
@@ -655,6 +656,7 @@ function closeNationModal() {
 }
 
 async function saveNation() {
+  if (!currentGuild) { alert('請先在左側選擇一個伺服器'); navigate('guilds'); return; }
   const nameZh = document.getElementById('nation-name-zh').value.trim();
   const nameEn = document.getElementById('nation-name-en').value.trim();
   const iso = document.getElementById('nation-iso').value.trim().toUpperCase();

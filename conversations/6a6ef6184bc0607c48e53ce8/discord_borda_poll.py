@@ -233,7 +233,10 @@ async def api_list_nations(request):
         user = await _get_session_user(request)
         if not user:
             return web.json_response({"error": "unauthorized"}, status=401)
-        gid = int(request.match_info["gid"])
+        gid_raw = request.match_info["gid"]
+        if not gid_raw.isdigit():
+            return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+        gid = int(gid_raw)
         guilds = await _fetch_guilds(user["access_token"])
         ge = next((g for g in guilds if int(g["id"]) == gid), None)
         if not ge or not _is_guild_admin(ge):
@@ -270,7 +273,10 @@ async def api_create_nation(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -332,7 +338,10 @@ async def api_update_nation(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -377,7 +386,10 @@ async def api_delete_nation(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -672,7 +684,10 @@ async def api_polls(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -685,7 +700,10 @@ async def api_poll_detail(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -700,7 +718,10 @@ async def api_create_poll(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -721,7 +742,10 @@ async def api_start_poll(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -742,7 +766,10 @@ async def api_end_poll(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -761,7 +788,10 @@ async def api_delete_poll(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -778,7 +808,10 @@ async def api_add_option(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
@@ -803,7 +836,10 @@ async def api_set_roles(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
+    gid_raw = request.match_info["gid"]
+    if not gid_raw.isdigit():
+        return web.json_response({"error": "無效的伺服器 ID（請重新整理頁面並重新選擇伺服器）"}, status=400)
+    gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
     if not ge or not _is_guild_admin(ge):
