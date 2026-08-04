@@ -1507,6 +1507,7 @@ chat_ai_settings = {
     "fallback_api_url": "",         # 備援 API 端點 URL
     "fallback_api_key": "",         # 備援 API Key
     "fallback_model": "",          # 備援模型名稱
+    "fallback_daily_limit": 10,    # 備援模式下每位用戶每日對話上限
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -1924,6 +1925,38 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
 _fallback_chat_timestamps: list = []
 _FALLBACK_CHAT_RATE_PER_MIN = 6
 
+# ── Fallback API per-user daily quota ──
+# {user_id: {"date": "YYYY-MM-DD", "count": N}}
+_fallback_daily_usage: dict = {}
+
+def _check_fallback_daily_limit(user_id: str, limit: int) -> bool:
+    """Check and increment per-user daily fallback API usage.
+    Returns True if allowed, False if daily limit exceeded."""
+    if not user_id or limit <= 0:
+        return True  # no limit if no user or limit is 0
+    today = datetime.now(GMT8).strftime("%Y-%m-%d")
+    entry = _fallback_daily_usage.get(user_id)
+    if not entry or entry.get("date") != today:
+        # New day or first use — reset
+        _fallback_daily_usage[user_id] = {"date": today, "count": 0}
+        entry = _fallback_daily_usage[user_id]
+    if entry["count"] >= limit:
+        return False
+    entry["count"] += 1
+    return True
+
+def _get_fallback_daily_remaining(user_id: str, limit: int) -> int:
+    """Return remaining daily fallback quota for a user."""
+    if not user_id or limit <= 0:
+        return -1  # unlimited
+    today = datetime.now(GMT8).strftime("%Y-%m-%d")
+    entry = _fallback_daily_usage.get(user_id)
+    if not entry or entry.get("date") != today:
+        return limit
+    return max(0, limit - entry["count"])
+
+FALLBACK_DAILY_LIMIT_MSG = "⚠️ 你的今日備援 API 用量已達上限，為了節省備援資源給重要的行政功能，聊天備援暫時關閉。主要 API 恢復後即可正常使用～"
+
 def _is_api_unavailable(error_str: str) -> bool:
     """Check if the error indicates the primary API is down (503/502/500 etc)."""
     if not error_str:
@@ -1943,7 +1976,7 @@ def _check_fallback_chat_rate():
     return True
 
 
-async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120, is_background: bool = True, fallback_mode: str = "full") -> dict:
+async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120, is_background: bool = True, fallback_mode: str = "full", fallback_user_id: str = "") -> dict:
     """fallback_mode:
     - "full":          Always use fallback on provider errors (administrative)
     - "rate_limited":  Use fallback but limited to 6 req/min (chat)
@@ -2342,6 +2375,15 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             # Rate limiter for chat fallback
             if fallback_mode == "rate_limited" and not _check_fallback_chat_rate():
                 print(f"⚠️ 備援 API 速率限制（{_FALLBACK_CHAT_RATE_PER_MIN}/min），聊天備援請求被拒絕")
+            elif fallback_mode == "rate_limited" and fallback_user_id:
+                _daily_limit = settings.get("fallback_daily_limit", 10)
+                if not _check_fallback_daily_limit(fallback_user_id, _daily_limit):
+                    _remaining = _get_fallback_daily_remaining(fallback_user_id, _daily_limit)
+                    print(f"⚠️ 備援 API 每日上限已達（用戶 {fallback_user_id}，上限 {_daily_limit}/天）")
+                    return {"content": FALLBACK_DAILY_LIMIT_MSG, "error": "daily_limit_exceeded"}
+                else:
+                    _remaining = _get_fallback_daily_remaining(fallback_user_id, _daily_limit)
+                    print(f"✅ 備援 API 每日配額通過（用戶 {fallback_user_id}，今日剩餘 {_remaining}/{_daily_limit}）")
             else:
                 _fb_url = settings.get("fallback_api_url", "").strip()
                 _fb_key = settings.get("fallback_api_key", "").strip()
@@ -4838,7 +4880,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             # Single-round quick path: give it nearly the ENTIRE remaining budget.
             _call_tt = max(6, _ai_budget - 1.5)
         _call_tr = max(4, _call_tt - 2)
-        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False, fallback_mode="rate_limited")
+        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
         print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
@@ -4895,7 +4937,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # minus a small safety margin — not a hardcoded 8s.
         t2 = _time.time()
         _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
-        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False, fallback_mode="rate_limited")
+        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
@@ -4930,7 +4972,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # the whole chat feature down. Fall back to one plain, tool-free call.
         print(f"⚠️ 工具呼叫流程失敗，改用純文字模式重試：{e}")
         fallback_msg = await asyncio.wait_for(
-            call_chat_api(messages, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=10, timeout_read=8, is_background=False, fallback_mode="rate_limited"), timeout=12
+            call_chat_api(messages, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=10, timeout_read=8, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id), timeout=12
         )
         raw_reply = fallback_msg.get("content") or ""
 
@@ -5405,6 +5447,7 @@ async def api_get_chat_ai_settings(request):
         "fallback_api_url": chat_ai_settings.get("fallback_api_url", ""),
         "fallback_api_key_masked": (lambda k: k[:6]+"..."+k[-4:] if len(k)>10 else ("***" if k else ""))(chat_ai_settings.get("fallback_api_key", "")),
         "fallback_model": chat_ai_settings.get("fallback_model", ""),
+        "fallback_daily_limit": chat_ai_settings.get("fallback_daily_limit", 10),
     })
 
 
@@ -5467,6 +5510,8 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["fallback_api_key"] = body["fallback_api_key"]
     if "fallback_model" in body:
         chat_ai_settings["fallback_model"] = body["fallback_model"]
+    if "fallback_daily_limit" in body:
+        chat_ai_settings["fallback_daily_limit"] = int(body["fallback_daily_limit"])
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 

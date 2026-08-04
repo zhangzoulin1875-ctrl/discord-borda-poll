@@ -280,7 +280,10 @@
             <label class="block text-sm text-gray-400 mb-1">備援 API Key</label>
             <input id="ai-fallback-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入備援 API Key">
             <label class="block text-sm text-gray-400 mb-1">備援模型名稱</label>
-            <input id="ai-fallback-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+            <input id="ai-fallback-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+            <label class="block text-sm text-gray-400 mb-1">每位用戶每日備援對話上限</label>
+            <input id="ai-fallback-daily-limit" type="number" min="1" max="999" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="10">
+            <p class="text-xs text-gray-400 mt-1">超過此數字的用戶將收到「用量已達上限」訊息，不再消耗備援 API 額度</p>
           </div>
         </div>
       </div>
@@ -688,6 +691,7 @@ async function showChatAIPanel() {
   document.getElementById('ai-fallback-url').value = s.fallback_api_url || '';
   document.getElementById('ai-fallback-key').placeholder = s.fallback_api_key_masked ? `已設定（${s.fallback_api_key_masked}）輸入新值可覆蓋` : '輸入備援 API Key';
   document.getElementById('ai-fallback-model').value = s.fallback_model || '';
+  document.getElementById('ai-fallback-daily-limit').value = s.fallback_daily_limit || 10;
 }
 
 async function saveChatAISettings() {
@@ -718,6 +722,7 @@ async function saveChatAISettings() {
     fallback_enabled: document.getElementById('ai-fallback-enabled').checked,
     fallback_api_url: document.getElementById('ai-fallback-url').value.trim(),
     fallback_model: document.getElementById('ai-fallback-model').value.trim(),
+    fallback_daily_limit: parseInt(document.getElementById('ai-fallback-daily-limit').value) || 10,
   };
   const fallbackKey = document.getElementById('ai-fallback-key').value.trim();
   if (fallbackKey) data.fallback_api_key = fallbackKey;
