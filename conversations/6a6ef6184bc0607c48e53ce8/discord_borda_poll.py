@@ -3525,6 +3525,25 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             )
             print(f"📚 Micropedia: 已自動注入 {len(auto_context)} chars 到 AI 上下文")
 
+        # Inject AI refined knowledge (cross-referenced insights from channel
+        # messages + micropedia articles, accumulated over time by the
+        # ai_refine_loop background task). This gives the AI deeper, more
+        # nuanced background knowledge about micronations beyond what a
+        # single micropedia lookup can provide.
+        if ai_refined_knowledge:
+            # Only inject the most recent 20 entries to keep prompt size sane
+            recent_knowledge = ai_refined_knowledge[-20:]
+            knowledge_lines = []
+            for k in recent_knowledge:
+                knowledge_lines.append(f"- [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
+            system_prompt += (
+                f"\n\n─── AI 精煉知識庫（交叉比對頻道與百科所得）───\n"
+                f"以下是系統長期累積的微國家知識，涵蓋成員國動態、冷門歷史、制度設計等。"
+                f"你可以利用這些背景知識來豐富你的回答，但仍以百科查詢結果為準。\n"
+                + "\n".join(knowledge_lines)
+            )
+            print(f"🔍 AI精煉: 已注入 {len(recent_knowledge)} 條知識到 AI 上下文")
+
         system_prompt += (
             f"\n\n─── search_micropedia 工具 ───\n"
             f"你還有一個 search_micropedia 工具，可以再查詢微國家百科的其他資料"
@@ -4924,6 +4943,8 @@ async def setup_hook():
     load_chat_ai_settings()
     save_chat_ai_settings()  # Create file if not exists
     load_quiz_data()
+    load_refine_settings()
+    load_refine_knowledge()
     save_quiz_data()  # Create files if not exists
     load_token_usage()
     save_token_usage()  # Create file if not exists
@@ -4942,6 +4963,7 @@ async def setup_hook():
     asyncio.ensure_future(daily_summary_loop())
     asyncio.ensure_future(quiz_question_loop())
     asyncio.ensure_future(quiz_settlement_loop())
+    asyncio.ensure_future(ai_refine_loop())
     asyncio.ensure_future(token_log_loop())
 
 
@@ -7008,6 +7030,73 @@ class SystemGroup(app_commands.Group):
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
+    # ── AI 精煉系統指令 ──
+
+    @app_commands.command(name="refine_toggle", description="開啟/關閉 AI 精煉系統（機器人擁有者限定）")
+    async def refine_toggle(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        ai_refine_settings["enabled"] = not ai_refine_settings.get("enabled", False)
+        ai_refine_settings["guild_id"] = str(interaction.guild.id) if interaction.guild else ai_refine_settings.get("guild_id")
+        save_refine_settings()
+        status = "啟用" if ai_refine_settings["enabled"] else "停用"
+        await interaction.response.send_message(f"🔬 AI 精煉系統已{status}。", ephemeral=True)
+
+    @app_commands.command(name="refine_channel", description="設定 AI 精煉自言自語頻道（機器人擁有者限定）")
+    @app_commands.describe(channel="機器人發布精煉知識的頻道")
+    async def refine_channel(self, interaction: discord.Interaction,
+                             channel: discord.TextChannel):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        ai_refine_settings["channel_id"] = str(channel.id)
+        ai_refine_settings["guild_id"] = str(interaction.guild.id) if interaction.guild else ai_refine_settings.get("guild_id")
+        save_refine_settings()
+        await interaction.response.send_message(f"✅ AI 精煉頻道已設為 #{channel.name}。", ephemeral=True)
+
+    @app_commands.command(name="refine_interval", description="設定 AI 精煉間隔分鐘數（機器人擁有者限定）")
+    @app_commands.describe(minutes="間隔分鐘數（建議 3-30）")
+    async def refine_interval(self, interaction: discord.Interaction, minutes: int):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        if minutes < 1:
+            await interaction.response.send_message("❌ 間隔至少 1 分鐘。", ephemeral=True)
+            return
+        if minutes > 120:
+            await interaction.response.send_message("❌ 間隔最多 120 分鐘。", ephemeral=True)
+            return
+        ai_refine_settings["interval_minutes"] = minutes
+        save_refine_settings()
+        await interaction.response.send_message(f"✅ AI 精煉間隔已設為 {minutes} 分鐘。", ephemeral=True)
+
+    @app_commands.command(name="refine_status", description="查看 AI 精煉系統狀態（機器人擁有者限定）")
+    async def refine_status(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        enabled = ai_refine_settings.get("enabled", False)
+        ch_id = ai_refine_settings.get("channel_id")
+        interval = ai_refine_settings.get("interval_minutes", 5)
+        knowledge_count = len(ai_refined_knowledge)
+
+        lines = ["🔬 **AI 精煉系統狀態**", ""]
+        lines.append(f"啟用狀態：{'✅ 已啟用' if enabled else '❌ 已停用'}")
+        lines.append(f"精煉間隔：{interval} 分鐘")
+        if ch_id:
+            lines.append(f"發布頻道：<#{ch_id}> (`{ch_id}`)")
+        else:
+            lines.append("發布頻道：❌ 尚未設定（用 /system refine_channel 設定）")
+        lines.append(f"知識庫累計：{knowledge_count} 條")
+        if knowledge_count > 0:
+            lines.append("")
+            lines.append("**近期精煉知識（最後 5 條）：**")
+            for k in ai_refined_knowledge[-5:]:
+                lines.append(f"• [{k.get('date', '?')}] **{k.get('topic', '?')}** — {k.get('summary', '')[:60]}")
+
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
 
 # ──────────────────────────────────────────────
 # AI 聊天指令
@@ -7870,6 +7959,48 @@ QUIZ_CHAMPIONS_FILE = os.path.join(DATA_DIR, "quiz_champions.json")
 QUIZ_STATE_FILE = os.path.join(DATA_DIR, "quiz_state.json")
 QUIZ_ASKED_FILE = os.path.join(DATA_DIR, "quiz_asked_questions.json")
 QUIZ_RECENT_TITLES_FILE = os.path.join(DATA_DIR, "quiz_recent_titles.json")
+
+# ── AI 精煉系統（自動交叉比對頻道訊息與百科資料，萃取冷門知識存入資料庫）──
+REFINE_SETTINGS_FILE = os.path.join(DATA_DIR, "ai_refine_settings.json")
+REFINE_KNOWLEDGE_FILE = os.path.join(DATA_DIR, "ai_refined_knowledge.json")
+ai_refine_settings = {
+    "enabled": False,
+    "channel_id": None,       # 機器人自言自語的頻道
+    "guild_id": None,
+    "interval_minutes": 5,     # 預設每 5 分鐘精煉一次
+    "max_knowledge_entries": 500,  # 最多保留幾條精煉知識（防止無限增長）
+}
+ai_refined_knowledge = []  # [{date, source, topic, summary, details}]
+_refine_last_run = 0  # 上次精煉的時間戳
+
+def save_refine_settings():
+    _save_json_file(REFINE_SETTINGS_FILE, ai_refine_settings, indent=None)
+
+def save_refine_knowledge():
+    _save_json_file(REFINE_KNOWLEDGE_FILE, ai_refined_knowledge)
+
+def load_refine_settings():
+    global ai_refine_settings
+    try:
+        if os.path.exists(REFINE_SETTINGS_FILE):
+            with open(REFINE_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+                if isinstance(loaded, dict):
+                    ai_refine_settings.update(loaded)
+    except Exception as e:
+        print(f"⚠️ AI精煉設定載入失敗: {e}")
+
+def load_refine_knowledge():
+    global ai_refined_knowledge
+    try:
+        if os.path.exists(REFINE_KNOWLEDGE_FILE):
+            with open(REFINE_KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+                if isinstance(loaded, list):
+                    ai_refined_knowledge = loaded
+                    print(f"✅ AI精煉知識庫載入：{len(ai_refined_knowledge)} 條知識")
+    except Exception as e:
+        print(f"⚠️ AI精煉知識庫載入失敗: {e}")
 
 # ── Emoji aliases: map cryptic emoji names to human-readable descriptions ──
 EMOJI_ALIASES_FILE = os.path.join(DATA_DIR, "emoji_aliases.json")
@@ -10306,6 +10437,276 @@ async def quiz_settlement_loop():
             print(f"⚠️ Quiz settlement error: {e}")
 
         await asyncio.sleep(30)
+
+
+# ──────────────────────────────────────────────
+# AI 精煉系統 — 背景任務
+# ──────────────────────────────────────────────
+
+async def _ai_refine_fetch_channel_snippets(guild, max_channels=15, msgs_per_channel=30):
+    """Fetch recent messages from a sample of non-excluded text channels.
+    Returns a concatenated string of channel snippets for the AI to analyze."""
+    _log_ch_id = chat_ai_settings.get("log_channel_id")
+    _EXCLUDE_MARKERS = ("測試", "test", "log", "紀錄")
+
+    def _is_excluded(ch):
+        if _log_ch_id and ch.id == _log_ch_id:
+            return True
+        name_lower = ch.name.lower()
+        return any(m.lower() in name_lower for m in _EXCLUDE_MARKERS)
+
+    # Also exclude the refine channel itself (would create a feedback loop)
+    refine_ch_id = ai_refine_settings.get("channel_id")
+
+    candidates = [
+        ch for ch in guild.text_channels
+        if ch.type in (discord.ChannelType.text, discord.ChannelType.news)
+        and not _is_excluded(ch)
+        and ch.id != refine_ch_id
+    ]
+    _quiz_random.shuffle(candidates)
+    selected = candidates[:max_channels]
+
+    snippets = []
+    for ch in selected:
+        try:
+            msgs = []
+            async for msg in ch.history(limit=msgs_per_channel):
+                text_parts = []
+                if msg.content and msg.content.strip():
+                    text_parts.append(msg.content.strip())
+                for emb in msg.embeds:
+                    if emb.title:
+                        text_parts.append(str(emb.title))
+                    if emb.description:
+                        text_parts.append(str(emb.description))
+                    for field in emb.fields:
+                        text_parts.append(f"{field.name}: {field.value}")
+                full = "\n".join(p for p in text_parts if p).strip()
+                if full and len(full) >= 5 and not msg.author.bot:
+                    msgs.append(f"[{msg.author.display_name}]: {full[:200]}")
+            if msgs:
+                snippets.append(f"── 頻道 #{ch.name} ──\n" + "\n".join(msgs[:15]))
+        except Exception:
+            continue
+    return "\n\n".join(snippets)
+
+
+async def _ai_refine_fetch_micropedia():
+    """Fetch a random micropedia article for cross-referencing."""
+    search_terms = [
+        "共和國", "聯邦", "王國", "帝國", "公國", "自由邦",
+        "城邦", "聯盟", "組織", "條約", "宣言", "憲法",
+        "政府", "選舉", "文化", "歷史", "外交", "國旗",
+    ]
+    term = _quiz_random.choice(search_terms)
+    try:
+        return await asyncio.wait_for(_fetch_micropedia(term, max_results=2), timeout=8)
+    except Exception as e:
+        print(f"🔍 AI精煉: 百科抓取失敗: {e}")
+        return ""
+
+
+async def _ai_refine_cross_reference(channel_snippets, wiki_text):
+    """Ask AI to cross-reference channel messages with wiki articles and
+    extract useful/obscure knowledge about micronations.
+    Returns a dict {topic, summary, details} or None."""
+    if not chat_ai_settings.get("api_key"):
+        return None
+
+    system_prompt = (
+        "你是一個微國家知識精煉引擎。你會收到兩份資料：\n"
+        "1. Discord 伺服器中多個頻道的近期訊息摘要\n"
+        "2. 微國家百科的一篇百科文章\n\n"
+        "你的任務是交叉比對這兩份資料，找出以下類型的知識：\n"
+        "- 頻道討論中提到但百科未記載的微國家資訊（成員國動態、事件、人物）\n"
+        "- 百科中有但頻道成員可能不知道的冷門知識（歷史細節、制度設計、條約內容）\n"
+        "- 頻道討論與百科資料之間的關聯（例如某人提到的國家在百科中有詳細條目）\n"
+        "- 有趣但容易被忽略的微國家知識\n\n"
+        "每次只萃取一條最有價值的知識（不要貪多），格式如下 JSON：\n"
+        '{"topic": "簡短主題（10字以內）", "summary": "一句話摘要", "details": "詳細說明（50-200字）"}\n'
+        "嚴格回覆 JSON，不要加 markdown code block 或其他文字。\n"
+        "如果資料中沒有值得萃取的知識，回覆 {\"topic\": \"\", \"summary\": \"\", \"details\": \"\"}"
+    )
+
+    user_content = (
+        f"── Discord 頻道訊息摘要 ──\n{channel_snippets[:3000]}\n\n"
+        f"── 微國家百科文章 ──\n{wiki_text[:2000]}"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    try:
+        result = await asyncio.wait_for(call_chat_api(messages, chat_ai_settings), timeout=45)
+    except Exception as e:
+        print(f"🔍 AI精煉: AI 呼叫失敗: {e}")
+        return None
+
+    raw = result.get("content", "")
+    if not raw:
+        tool_calls = result.get("tool_calls", [])
+        if tool_calls:
+            raw = tool_calls[0].get("function", {}).get("arguments", "")
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1] if "\n" in raw else raw[3:]
+    if raw.endswith("```"):
+        raw = raw[:-3]
+    raw = raw.strip()
+
+    try:
+        data = json_module.loads(raw)
+    except Exception:
+        import re
+        match = re.search(r'\{[^{}]*"topic"[^{}]*\}', raw, re.DOTALL)
+        if match:
+            try:
+                data = json_module.loads(match.group())
+            except Exception:
+                print(f"🔍 AI精煉: 無法解析回覆: {raw[:200]}")
+                return None
+        else:
+            print(f"🔍 AI精煉: 無法解析回覆: {raw[:200]}")
+            return None
+
+    if not isinstance(data, dict):
+        return None
+    topic = data.get("topic", "").strip()
+    summary = data.get("summary", "").strip()
+    details = data.get("details", "").strip()
+    if not topic or not summary:
+        return None
+    return {"topic": topic, "summary": summary, "details": details}
+
+
+async def _ai_refine_post_to_channel(channel, knowledge_entry):
+    """Post the refined knowledge as a self-talk message in the designated channel."""
+    embed = discord.Embed(
+        title=f"🔬 AI 精煉 — {knowledge_entry['topic']}",
+        description=knowledge_entry["summary"],
+        color=discord.Color.teal(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(
+        name="📖 詳細說明",
+        value=knowledge_entry["details"][:1024],
+        inline=False,
+    )
+    embed.set_footer(text=f"知識庫累計 {len(ai_refined_knowledge)} 條 | AI 自主學習")
+    try:
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"🔍 AI精煉: 發布到頻道失敗: {e}")
+
+
+async def ai_refine_loop():
+    """Background task: every N minutes, cross-reference channel messages
+    with micropedia articles, extract useful knowledge, save to database,
+    and post a summary in the configured channel."""
+    global _refine_last_run
+    await asyncio.sleep(90)  # Wait for bot to be fully ready
+    while True:
+        try:
+            if not ai_refine_settings.get("enabled"):
+                await asyncio.sleep(20)
+                continue
+
+            interval_secs = ai_refine_settings.get("interval_minutes", 5) * 60
+            now = _time.time()
+            if _refine_last_run and (now - _refine_last_run) < interval_secs:
+                await asyncio.sleep(20)
+                continue
+
+            guild_id = ai_refine_settings.get("guild_id")
+            channel_id = ai_refine_settings.get("channel_id")
+            if not guild_id or not channel_id:
+                await asyncio.sleep(20)
+                continue
+
+            guild = bot.get_guild(int(guild_id))
+            if not guild:
+                await asyncio.sleep(20)
+                continue
+
+            channel = bot.get_channel(int(channel_id))
+            if not channel:
+                print(f"🔍 AI精煉: 找不到頻道 {channel_id}")
+                await asyncio.sleep(20)
+                continue
+
+            if not chat_ai_settings.get("api_key"):
+                print("🔍 AI精煉: 沒有 AI API Key，跳過")
+                _refine_last_run = now
+                await asyncio.sleep(20)
+                continue
+
+            print("🔍 AI精煉: 開始精煉...")
+
+            # Step 1: Fetch channel snippets and micropedia article in parallel
+            channel_task = asyncio.ensure_future(_ai_refine_fetch_channel_snippets(guild))
+            wiki_task = asyncio.ensure_future(_ai_refine_fetch_micropedia())
+            channel_snippets, wiki_text = await asyncio.gather(
+                channel_task, wiki_task, return_exceptions=True
+            )
+
+            if isinstance(channel_snippets, Exception):
+                print(f"🔍 AI精煉: 頻道抓取失敗: {channel_snippets}")
+                channel_snippets = ""
+            if isinstance(wiki_text, Exception):
+                print(f"🔍 AI精煉: 百科抓取失敗: {wiki_text}")
+                wiki_text = ""
+
+            if not channel_snippets and not wiki_text:
+                print("🔍 AI精煉: 沒有可用的資料來源，跳過")
+                _refine_last_run = now
+                await asyncio.sleep(20)
+                continue
+
+            # Step 2: Ask AI to cross-reference and extract knowledge
+            knowledge = await _ai_refine_cross_reference(channel_snippets, wiki_text)
+
+            if not knowledge or not knowledge.get("topic"):
+                print("🔍 AI精煉: 本次未萃取到有價值的知識")
+                _refine_last_run = now
+                await asyncio.sleep(20)
+                continue
+
+            # Step 3: Check for duplicates (don't store the same topic twice)
+            existing_topics = [k.get("topic", "") for k in ai_refined_knowledge]
+            if knowledge["topic"] in existing_topics:
+                print(f"🔍 AI精煉: 主題「{knowledge['topic']}」已存在，跳過")
+                _refine_last_run = now
+                await asyncio.sleep(20)
+                continue
+
+            # Step 4: Save to knowledge database
+            entry = {
+                "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
+                "_ts": now,
+                "topic": knowledge["topic"],
+                "summary": knowledge["summary"],
+                "details": knowledge["details"],
+            }
+            ai_refined_knowledge.append(entry)
+            max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
+            if len(ai_refined_knowledge) > max_entries:
+                ai_refined_knowledge = ai_refined_knowledge[-max_entries:]
+            save_refine_knowledge()
+            print(f"🔍 AI精煉: 已儲存知識「{knowledge['topic']}」 (累計 {len(ai_refined_knowledge)} 條)")
+
+            # Step 5: Post in the designated channel
+            await _ai_refine_post_to_channel(channel, entry)
+
+            _refine_last_run = now
+
+        except Exception as e:
+            print(f"⚠️ AI精煉循環錯誤: {e}")
+
+        await asyncio.sleep(20)
 
 
 # ── Slash Command Group ──
