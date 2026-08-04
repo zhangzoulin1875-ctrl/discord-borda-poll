@@ -2284,11 +2284,15 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                 print(f"⚠️ Chat AI 呼叫失敗（{e}），重試一次（剩餘 {_remaining():.1f}s）...")
                 continue
             print(f"⚠️ Chat AI 呼叫失敗且無剩餘時間重試（{e}）")
-            return {"content": "", "error": f"AI 回應逾時或失敗：{e}"}
+            msg = {"content": "", "error": f"AI 回應逾時或失敗：{e}"}
+            break
         if not msg.get("content") and not msg.get("tool_calls") and _attempt_i == 0 and _remaining() >= 1.5:
             print(f"⚠️ AI 回應為空（finish_reason=stop 但沒有實際內容），重試一次（剩餘 {_remaining():.1f}s）...")
             continue
-        return msg
+        if msg.get("content") or msg.get("tool_calls"):
+            return msg
+        # Empty result without exception — let fallback handle it
+        break
     # ── Fallback API ──
     # If the primary API returned a provider-side error (503, 502, 500,
     # 504, timeout) and a fallback API is configured, retry the entire
@@ -3339,7 +3343,7 @@ async def _refresh_channel_index(guild) -> list:
 
         all_candidate_channels = [
             ch for ch in guild.text_channels
-            if ch.type in (discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.announcement)
+            if ch.type in (discord.ChannelType.text, discord.ChannelType.news)
         ]
         text_channels = []
         for ch in all_candidate_channels:
@@ -12901,7 +12905,7 @@ async def quiz_settlement_loop():
         try:
             # Check if it's 22:00 (check every 30 seconds for precision)
             now = datetime.now(GMT8)
-            if now.tm_hour == 22 and now.tm_min == 0 and now.tm_sec < 30:
+            if now.hour == 22 and now.minute == 0 and now.second < 30:
                 today = datetime.now(GMT8).strftime("%Y-%m-%d")
 
                 # Find today's top scorer(s)
@@ -15518,7 +15522,7 @@ async def _collect_daily_messages(guild, hours=24) -> str:
 
     text_channels = [
         ch for ch in guild.text_channels
-        if ch.type in (discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.announcement)
+        if ch.type in (discord.ChannelType.text, discord.ChannelType.news)
     ]
 
     for ch in text_channels:
