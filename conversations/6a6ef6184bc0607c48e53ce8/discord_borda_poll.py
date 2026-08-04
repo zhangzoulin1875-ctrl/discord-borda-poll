@@ -7869,6 +7869,7 @@ QUIZ_SCORES_FILE = os.path.join(DATA_DIR, "quiz_scores.json")
 QUIZ_CHAMPIONS_FILE = os.path.join(DATA_DIR, "quiz_champions.json")
 QUIZ_STATE_FILE = os.path.join(DATA_DIR, "quiz_state.json")
 QUIZ_ASKED_FILE = os.path.join(DATA_DIR, "quiz_asked_questions.json")
+QUIZ_RECENT_TITLES_FILE = os.path.join(DATA_DIR, "quiz_recent_titles.json")
 
 # ── Emoji aliases: map cryptic emoji names to human-readable descriptions ──
 EMOJI_ALIASES_FILE = os.path.join(DATA_DIR, "emoji_aliases.json")
@@ -7902,6 +7903,12 @@ quiz_active_questions = {}
 quiz_asked_questions = []
 _QUIZ_MAX_HISTORY = 200  # keep last N questions to avoid unbounded growth
 
+# Recently used micropedia article titles — even when the AI rewords the
+# question, reusing the same source article back-to-back feels like "the
+# same quiz repeating". We actively steer away from these for a while.
+quiz_recent_titles = []
+_QUIZ_RECENT_TITLES_MAX = 10  # avoid re-picking any of the last 10 articles
+
 
 def save_quiz_data():
     """Save quiz settings, scores, champions, and active state to disk."""
@@ -7917,6 +7924,7 @@ def save_quiz_data():
         }
         _save_json_file(QUIZ_STATE_FILE, quiz_state)
         _save_json_file(QUIZ_ASKED_FILE, quiz_asked_questions)
+        _save_json_file(QUIZ_RECENT_TITLES_FILE, quiz_recent_titles)
     except Exception as e:
         print(f"⚠️ Quiz data save failed: {e}")
 
@@ -7939,11 +7947,15 @@ def load_quiz_data():
                 state = json_module.load(f)
                 quiz_active_questions = state.get("active_questions", {})
                 _quiz_last_question_time = state.get("last_question_time", 0)
-        global quiz_asked_questions
+        global quiz_asked_questions, quiz_recent_titles
         if os.path.exists(QUIZ_ASKED_FILE):
             with open(QUIZ_ASKED_FILE, "r", encoding="utf-8") as f:
                 quiz_asked_questions = json_module.load(f)
             print(f"✅ 問答歷史載入：{len(quiz_asked_questions)} 題已出過")
+        if os.path.exists(QUIZ_RECENT_TITLES_FILE):
+            with open(QUIZ_RECENT_TITLES_FILE, "r", encoding="utf-8") as f:
+                quiz_recent_titles = json_module.load(f)
+            print(f"✅ 問答近期文章載入：{len(quiz_recent_titles)} 篇避免重複")
         print(f"✅ 問答資料載入：{'啟用' if quiz_settings.get('enabled') else '停用'}, "
               f"{len(quiz_scores)} 位玩家, {len(quiz_champions)} 位冠軍, "
               f"{len(quiz_active_questions)} 個活躍題目")
@@ -7986,55 +7998,75 @@ async def _generate_quiz_question() -> dict | None:
         print("⚠️ Quiz: No AI API key configured")
         return None
 
-    # Pick a random broad search term to get varied articles
+    # Pick a random broad search term to get varied articles. To avoid the
+    # quiz repeatedly landing on the same dominant article (e.g. a big,
+    # comprehensive nation article that happens to rank well for many broad
+    # category terms), we search several terms, gather MULTIPLE candidate
+    # titles per term, and explicitly filter out anything asked recently —
+    # only falling back to a repeat if truly nothing fresh is available.
     search_terms = [
         "共和國", "聯邦", "王國", "帝國", "公國", "共和",
         "自由邦", "城邦", "聯盟", "組織", "條約", "宣言",
         "憲法", "政府", "選舉", "文化", "歷史", "經濟",
         "外交", "國旗", "國歌", "節日", "軍事", "教育",
     ]
-    term = _quiz_random.choice(search_terms)
-    try:
-        article_text = await asyncio.wait_for(
-            _fetch_micropedia(term, max_results=3),
-            timeout=10
-        )
-    except asyncio.TimeoutError:
-        print("⚠️ Quiz: Micropedia fetch timed out")
-        return None
-    except Exception as e:
-        print(f"⚠️ Quiz: Micropedia fetch error: {e}")
-        return None
+    shuffled_terms = list(search_terms)
+    _quiz_random.shuffle(shuffled_terms)
 
-    if not article_text or len(article_text.strip()) < 50:
-        # Retry with a different term
-        term2 = _quiz_random.choice(search_terms)
-        try:
-            article_text = await asyncio.wait_for(
-                _fetch_micropedia(term2, max_results=3),
-                timeout=10
-            )
-        except Exception:
-            print("⚠️ Quiz: Micropedia retry also failed")
-            return None
-        if not article_text or len(article_text.strip()) < 50:
-            print("⚠️ Quiz: Not enough content from micropedia")
-            return None
-
-    # Truncate to keep token usage reasonable
-    article_text = article_text[:3000]
-
-    # Extract source title/URL from the article text if present
+    article_text = ""
     source_title = ""
     source_url = ""
-    for line in article_text.split("\n"):
-        if line.startswith("📖 ") or line.startswith("標題:") or line.startswith("【"):
-            source_title = line.strip("📖標題：【】 ")
-            break
-    for line in article_text.split("\n"):
-        if "micropedia.site" in line:
-            source_url = line.strip()
-            break
+    try:
+        if _shared_session and not _shared_session.closed:
+            _session_cm = None
+            session = _shared_session
+        else:
+            _session_cm = aiohttp.ClientSession()
+            session = await _session_cm.__aenter__()
+        try:
+            for term in shuffled_terms[:5]:
+                try:
+                    titles = await asyncio.wait_for(
+                        _micropedia_search_api(session, term, 8),
+                        timeout=6
+                    )
+                except Exception:
+                    continue
+                if not titles:
+                    continue
+                fresh_titles = [t for t in titles if t not in quiz_recent_titles]
+                candidates = fresh_titles if fresh_titles else titles  # fall back to a repeat only if nothing fresh anywhere
+                chosen_title = _quiz_random.choice(candidates)
+                try:
+                    content_text = await asyncio.wait_for(
+                        _micropedia_fetch_content(session, [chosen_title]),
+                        timeout=6
+                    )
+                except Exception:
+                    continue
+                if content_text and len(content_text.strip()) >= 50:
+                    article_text = content_text[:3000]
+                    source_title = chosen_title
+                    if fresh_titles:
+                        break  # got a genuinely fresh article, stop searching
+                    # else: keep this as a fallback but keep trying other terms for a fresh one
+        finally:
+            if _session_cm is not None:
+                await _session_cm.__aexit__(None, None, None)
+    except asyncio.TimeoutError:
+        print("⚠️ Quiz: Micropedia fetch timed out")
+    except Exception as e:
+        print(f"⚠️ Quiz: Micropedia fetch error: {e}")
+
+    if not article_text or len(article_text.strip()) < 50:
+        print("⚠️ Quiz: Not enough content from micropedia")
+        return None
+
+    if source_title:
+        import urllib.parse as _up_quiz
+        source_url = f"https://www.micropedia.site/wiki/{_up_quiz.quote(source_title)}"
+    else:
+        source_url = ""
 
     # Generate question via AI
     system_prompt = (
@@ -8130,7 +8162,7 @@ async def _generate_quiz_question() -> dict | None:
 async def _generate_quiz_question_with_dedup() -> dict | None:
     """Wrap _generate_quiz_question with duplicate detection: retry up to 3
     times if the generated question matches one previously asked."""
-    global quiz_asked_questions
+    global quiz_asked_questions, quiz_recent_titles
     quiz_data = None
     for attempt in range(3):
         quiz_data = await _generate_quiz_question()
@@ -8144,6 +8176,16 @@ async def _generate_quiz_question_with_dedup() -> dict | None:
         # Trim history to prevent unbounded growth
         if len(quiz_asked_questions) > _QUIZ_MAX_HISTORY:
             quiz_asked_questions = quiz_asked_questions[-_QUIZ_MAX_HISTORY:]
+        # Remember the source article too, so future rounds actively steer
+        # away from it for a while — even a reworded question about the same
+        # article feels repetitive to players.
+        source_title = quiz_data.get("source_title")
+        if source_title:
+            if source_title in quiz_recent_titles:
+                quiz_recent_titles.remove(source_title)
+            quiz_recent_titles.append(source_title)
+            if len(quiz_recent_titles) > _QUIZ_RECENT_TITLES_MAX:
+                quiz_recent_titles = quiz_recent_titles[-_QUIZ_RECENT_TITLES_MAX:]
         return quiz_data
     # All 3 attempts were duplicates or failed
     print("⚠️ Quiz: Could not generate a non-duplicate question after 3 attempts")
@@ -10390,7 +10432,7 @@ class QuizGroup(app_commands.Group):
             await interaction.response.send_message("❌ 尚未設定問答頻道。請先用 `/quiz channel` 設定。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        quiz_data = await _generate_quiz_question()
+        quiz_data = await _generate_quiz_question_with_dedup()
         if not quiz_data:
             await interaction.followup.send("❌ 出題失敗，請稍後再試。", ephemeral=True)
             return
