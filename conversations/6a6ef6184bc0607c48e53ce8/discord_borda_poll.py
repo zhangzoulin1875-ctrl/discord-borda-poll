@@ -3422,6 +3422,14 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         except Exception as e:
             print(f"⚠️ 伺服器結構取得失敗：{e}")
 
+    # Inject community awareness — gives the AI a "real member's
+    # understanding" of social dynamics, recent events, current topics,
+    # and channel culture. This is what makes it feel like the AI
+    # actually lives in the community.
+    awareness_ctx = _get_community_awareness_context()
+    if awareness_ctx:
+        system_prompt += f"\n\n{awareness_ctx}"
+
     system_prompt += f"\n\n你現在正在和「{user_name}」對話，請直接針對這句話回答。"
 
     if facts:
@@ -5041,7 +5049,15 @@ async def setup_hook():
     asyncio.ensure_future(quiz_question_loop())
     asyncio.ensure_future(quiz_settlement_loop())
     asyncio.ensure_future(ai_refine_loop())
+    asyncio.ensure_future(community_awareness_loop())
     asyncio.ensure_future(token_log_loop())
+    # Load community awareness data
+    _load_community_awareness()
+    _load_awareness_settings()
+    # Auto-detect guild for awareness if not set
+    if not _community_awareness_settings.get("guild_id") and bot.guilds:
+        _community_awareness_settings["guild_id"] = str(bot.guilds[0].id)
+        _save_awareness_settings()
 
 
 @bot.event
@@ -11131,6 +11147,399 @@ async def ai_refine_loop():
             print(f"⚠️ AI精煉派工錯誤: {e}")
 
         await asyncio.sleep(5)
+
+
+
+# ═════════════════════════════════════════════════════════════════
+# Community Awareness System
+# 讓 AI 像真實社群成員一樣理解微國家社群的人事物——
+# 不是離散的知識條目，而是對社群動態的整體感知。
+#
+# 四個維度：
+# 1. 社交關係感知 — 誰活躍、誰安靜、誰跟誰有什麼關係
+# 2. 事件脈絡記憶 — 近期發生了什麼事，因果鏈
+# 3. 即時話題意識 — 現在在討論什麼
+# 4. 頻道文化理解 — 每個頻道的氛圍和生態
+#
+# 每 20 分鐘掃描一次近期訊息，由 AI 綜合分析後存檔。
+# 聊天回覆時自動注入到 system prompt，讓 AI「知道現在社群的狀態」。
+# ═════════════════════════════════════════════════════════════════
+
+COMMUNITY_AWARENESS_FILE = os.path.join(DATA_DIR, "community_awareness.json")
+COMMUNITY_AWARENESS_SETTINGS_FILE = os.path.join(DATA_DIR, "community_awareness_settings.json")
+
+_community_awareness = {
+    "last_updated": "",
+    "social_dynamics": {
+        "active_members": [],   # [{name, activity, topics}]
+        "relationships": [],     # [{a, b, type, context}]
+    },
+    "recent_events": [],         # [{summary, participants, context}]
+    "current_topics": [],       # [{topic, channels, summary}]
+    "channel_cultures": {},     # {"#channel": {vibe, typical_content, key_people}}
+}
+
+_community_awareness_settings = {
+    "enabled": True,
+    "interval_minutes": 20,
+    "guild_id": None,
+}
+
+_awareness_last_run = 0
+
+
+def _save_community_awareness():
+    _save_json_file(COMMUNITY_AWARENESS_FILE, _community_awareness)
+
+
+def _save_awareness_settings():
+    _save_json_file(COMMUNITY_AWARENESS_SETTINGS_FILE, _community_awareness_settings, indent=None)
+
+
+def _load_community_awareness():
+    global _community_awareness
+    try:
+        if os.path.exists(COMMUNITY_AWARENESS_FILE):
+            with open(COMMUNITY_AWARENESS_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+                if isinstance(loaded, dict):
+                    _community_awareness.update(loaded)
+                    print(f"🧠 社群感知：已載入（更新於 {loaded.get('last_updated', '?')}）")
+    except Exception as e:
+        print(f"⚠️ 社群感知載入失敗：{e}")
+
+
+def _load_awareness_settings():
+    global _community_awareness_settings
+    try:
+        if os.path.exists(COMMUNITY_AWARENESS_SETTINGS_FILE):
+            with open(COMMUNITY_AWARENESS_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+                if isinstance(loaded, dict):
+                    _community_awareness_settings.update(loaded)
+    except Exception as e:
+        print(f"⚠️ 社群感知設定載入失敗：{e}")
+
+
+async def _gather_community_messages(guild, max_channels=20, msgs_per_channel=20) -> str:
+    """Gather recent messages across the server's channels for community
+    analysis. Broader sampling than the refine snippet gatherer — covers
+    more channels with fewer messages each, prioritizing recent activity."""
+    _log_ch_id = chat_ai_settings.get("log_channel_id")
+    _EXCLUDE_MARKERS = ("測試", "test", "log", "紀錄")
+
+    def _is_excluded(ch):
+        if _log_ch_id and ch.id == _log_ch_id:
+            return True
+        name_lower = ch.name.lower()
+        return any(m.lower() in name_lower for m in _EXCLUDE_MARKERS)
+
+    candidates = [
+        ch for ch in guild.text_channels
+        if ch.type in (discord.ChannelType.text, discord.ChannelType.news)
+        and not _is_excluded(ch)
+    ]
+
+    # Sort by recent activity (last message timestamp) — most active first
+    async def _last_msg_ts(ch):
+        try:
+            async for m in ch.history(limit=1):
+                return m.created_at.timestamp()
+        except Exception:
+            return 0
+    # Quick check — just grab last message timestamp for sorting
+    channel_ts = []
+    for ch in candidates:
+        ts = await _last_msg_ts(ch)
+        channel_ts.append((ts, ch))
+    channel_ts.sort(key=lambda x: -x[0])
+    selected = [ch for _, ch in channel_ts[:max_channels]]
+
+    snippets = []
+    for ch in selected:
+        try:
+            msgs = []
+            async for msg in ch.history(limit=msgs_per_channel):
+                text_parts = []
+                if msg.content and msg.content.strip():
+                    text_parts.append(msg.content.strip())
+                for emb in msg.embeds:
+                    if emb.title:
+                        text_parts.append(str(emb.title))
+                    if emb.description:
+                        text_parts.append(str(emb.description))
+                    for field in emb.fields:
+                        text_parts.append(f"{field.name}: {field.value}")
+                full = "\n".join(p for p in text_parts if p).strip()
+                if full and len(full) >= 5 and not msg.author.bot:
+                    ts_str = msg.created_at.astimezone(GMT8).strftime("%m/%d %H:%M")
+                    msgs.append(f"[{ts_str}] {msg.author.display_name}: {full[:150]}")
+            if msgs:
+                snippets.append(f"── #{ch.name} ──\n" + "\n".join(msgs))
+        except Exception:
+            continue
+    return "\n\n".join(snippets)
+
+
+async def _analyze_community(guild) -> bool:
+    """Run one community awareness analysis cycle: gather recent messages,
+    have the AI synthesize a community awareness profile, and save it."""
+    global _community_awareness
+    if not chat_ai_settings.get("api_key"):
+        return False
+
+    messages_text = await _gather_community_messages(guild)
+    if not messages_text or len(messages_text.strip()) < 100:
+        print("🧠 社群感知：訊息太少，跳過本次分析")
+        return False
+
+    # Build the previous awareness as context so the AI can build on it
+    prev = _community_awareness
+    prev_summary = ""
+    if prev.get("last_updated"):
+        prev_lines = []
+        for m in prev.get("social_dynamics", {}).get("active_members", [])[:10]:
+            prev_lines.append(f"- {m.get('name', '?')}: {m.get('activity', '')}")
+        for r in prev.get("social_dynamics", {}).get("relationships", [])[:5]:
+            prev_lines.append(f"- {r.get('a', '?')}↔{r.get('b', '?')} ({r.get('type', '?')}): {r.get('context', '')}")
+        for e in prev.get("recent_events", [])[:5]:
+            prev_lines.append(f"- [{e.get('date', '?')}] {e.get('summary', '')}")
+        for t in prev.get("current_topics", [])[:5]:
+            prev_lines.append(f"- 話題：{t.get('topic', '?')} — {t.get('summary', '')}")
+        prev_summary = "\n".join(prev_lines)
+
+    system_prompt = (
+        "你是一個微國家 Discord 社群的觀察員，你的任務是分析近期訊息，"
+        "建立一份「社群感知報告」——就像一個長期泡在社群裡的老成員"
+        "對社群狀態的理解一樣。\n\n"
+        "你會收到多個頻道的近期訊息。請從中分析出以下四個維度：\n\n"
+        "1. 社交動態（social_dynamics）：\n"
+        "   - active_members: 最近活躍的成員（最多 15 人），每人附上他們"
+        "近期在做什麼、聊什麼話題\n"
+        "   - relationships: 成員之間值得注意的關係動態（最多 10 條）——"
+        "誰跟誰在合作、誰跟誰有分歧、誰跟誰有特殊互動。type 用以下值："
+        "ally（盟友/友好）、rival（對立/分歧）、collaborator（合作）、"
+        "mentor（指導）、tension（緊張）。只有真的觀察到明確互動的才寫，"
+        "不要憑空推測。\n\n"
+        "2. 近期事件（recent_events）：最近發生的重要事件（最多 8 條），"
+        "每條包含：summary（一句話描述）、participants（參與者）、"
+        "context（為什麼發生、導致了什麼——因果脈絡）。\n"
+        "   - 事件要有實質意義（決策、衝突、合作、公告、投票、人事變動等），"
+        "不是閒聊\n"
+        "   - 盡量捕捉因果鏈：因為 A，所以 B\n\n"
+        "3. 當前話題（current_topics）：現在正在討論的熱門話題（最多 8 條），"
+        "每條包含：topic（話題名）、channels（在哪些頻道討論）、"
+        "summary（一句話概要）。\n\n"
+        "4. 頻道文化（channel_cultures）：每個頻道的氛圍和特色，"
+        "每個頻道包含：vibe（一句話描述氛圍）、typical_content（通常聊什麼）、"
+        "key_people（常在這裡發言的人）。只寫有足夠訊息判斷的頻道。\n\n"
+        "【重要原則】\n"
+        "- 你是在觀察和理解社群動態，不是在寫百科全書\n"
+        "- 只寫從訊息中能觀察到的東西，不要編造或過度推測\n"
+        "- 關係動態要基於實際互動（回覆、提及、對話），不是猜測\n"
+        "- 寫繁體中文\n"
+        "- 盡量精簡，每個欄位的文字不要超過 100 字\n\n"
+    )
+
+    if prev_summary:
+        system_prompt += (
+            f"以下是上一次分析的結果（作為參考，請在此基礎上更新）：\n"
+            f"{prev_summary}\n\n"
+            "請以最新訊息為準更新以上內容。如果某些關係或事件已經過時，"
+            "就移除它們。新的觀察要取代舊的。\n\n"
+        )
+
+    system_prompt += (
+        "嚴格回覆以下 JSON 格式（不要加 markdown code block，不要加其他文字）：\n"
+        '{"last_updated": "", "social_dynamics": {"active_members": [{"name": "", "activity": "", "topics": []}], "relationships": [{"a": "", "b": "", "type": "", "context": ""}]}, "recent_events": [{"date": "", "summary": "", "participants": [], "context": ""}], "current_topics": [{"topic": "", "channels": [], "summary": ""}], "channel_cultures": {"#頻道名": {"vibe": "", "typical_content": "", "key_people": []}}}'
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"以下是近期 Discord 社群訊息：\n\n{messages_text[:6000]}"},
+    ]
+
+    try:
+        result = await asyncio.wait_for(
+            call_chat_api(messages, chat_ai_settings, max_tokens=2500), timeout=60
+        )
+    except Exception as e:
+        print(f"🧠 社群感知：AI 分析失敗：{e}")
+        return False
+
+    raw = result.get("content", "")
+    if not raw:
+        tool_calls = result.get("tool_calls", [])
+        if tool_calls:
+            raw = tool_calls[0].get("function", {}).get("arguments", "")
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1] if "\n" in raw else raw[3:]
+    if raw.endswith("```"):
+        raw = raw[:-3]
+    raw = raw.strip()
+
+    try:
+        data = json_module.loads(raw)
+    except Exception:
+        import re
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                data = json_module.loads(match.group())
+            except Exception:
+                print(f"🧠 社群感知：JSON 解析失敗：{raw[:200]}")
+                return False
+        else:
+            print(f"🧠 社群感知：無法解析 AI 回應：{raw[:200]}")
+            return False
+
+    if not isinstance(data, dict):
+        print(f"🧠 社群感知：回應非 dict")
+        return False
+
+    # Update the awareness data
+    now_str = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M")
+    data["last_updated"] = now_str
+    _community_awareness = data
+    _save_community_awareness()
+
+    # Stats for log
+    n_members = len(data.get("social_dynamics", {}).get("active_members", []))
+    n_rels = len(data.get("social_dynamics", {}).get("relationships", []))
+    n_events = len(data.get("recent_events", []))
+    n_topics = len(data.get("current_topics", []))
+    n_channels = len(data.get("channel_cultures", {}))
+    print(f"🧠 社群感知已更新（{now_str}）：{n_members} 成員, {n_rels} 關係, {n_events} 事件, {n_topics} 話題, {n_channels} 頻道文化")
+
+    return True
+
+
+async def community_awareness_loop():
+    """Background task: analyze community dynamics every ~20 minutes."""
+    global _awareness_last_run
+    await asyncio.sleep(120)  # Wait for bot to be fully ready
+    while True:
+        try:
+            if not _community_awareness_settings.get("enabled"):
+                await asyncio.sleep(30)
+                continue
+
+            if not chat_ai_settings.get("api_key"):
+                await asyncio.sleep(30)
+                continue
+
+            guild_id = _community_awareness_settings.get("guild_id")
+            if not guild_id:
+                # Auto-detect: use the first available guild
+                if bot.guilds:
+                    _community_awareness_settings["guild_id"] = str(bot.guilds[0].id)
+                    _save_awareness_settings()
+                    guild_id = _community_awareness_settings["guild_id"]
+                else:
+                    await asyncio.sleep(30)
+                    continue
+
+            guild = bot.get_guild(int(guild_id))
+            if not guild:
+                await asyncio.sleep(30)
+                continue
+
+            interval = _community_awareness_settings.get("interval_minutes", 20) * 60
+            now = _time.time()
+            if _awareness_last_run and (now - _awareness_last_run) < interval:
+                await asyncio.sleep(15)
+                continue
+
+            _awareness_last_run = now
+            print(f"🧠 社群感知：開始分析 {guild.name} 的社群動態...")
+            success = await _analyze_community(guild)
+            if not success:
+                _awareness_last_run = now  # Still count as attempted to avoid rapid retry
+
+        except Exception as e:
+            print(f"⚠️ 社群感知迴圈錯誤：{e}")
+
+        await asyncio.sleep(15)
+
+
+def _get_community_awareness_context() -> str:
+    """Render the current community awareness as a compact text block
+    for injection into the AI's system prompt. This is what gives the AI
+    a 'real member's understanding' of the community."""
+    aw = _community_awareness
+    if not aw.get("last_updated"):
+        return ""
+
+    lines = [f"─── 社群感知（更新於 {aw['last_updated']}）───"]
+
+    sd = aw.get("social_dynamics", {})
+
+    # Active members
+    active = sd.get("active_members", [])
+    if active:
+        member_parts = []
+        for m in active[:12]:
+            name = m.get("name", "?")
+            activity = m.get("activity", "")
+            topics = m.get("topics", [])
+            topic_str = f"（聊：{', '.join(topics[:3])}）" if topics else ""
+            member_parts.append(f"{name}：{activity}{topic_str}")
+        lines.append(f"\n👥 活躍成員：\n" + "\n".join(f"  • {p}" for p in member_parts))
+
+    # Relationships
+    rels = sd.get("relationships", [])
+    if rels:
+        rel_parts = []
+        type_emoji = {"ally": "🤝", "rival": "⚔️", "collaborator": "🔧", "mentor": "🎓", "tension": "⚡"}
+        for r in rels[:8]:
+            emoji = type_emoji.get(r.get("type", ""), "→")
+            rel_parts.append(f"  {emoji} {r.get('a', '?')} ↔ {r.get('b', '?')}：{r.get('context', '')}")
+        lines.append(f"\n🔗 關係動態：\n" + "\n".join(rel_parts))
+
+    # Recent events
+    events = aw.get("recent_events", [])
+    if events:
+        event_parts = []
+        for e in events[:6]:
+            date = e.get("date", "")
+            summary = e.get("summary", "")
+            context = e.get("context", "")
+            participants = e.get("participants", [])
+            p_str = f"（參與：{', '.join(participants[:4])}）" if participants else ""
+            ctx_str = f" → {context}" if context else ""
+            event_parts.append(f"  • [{date}] {summary}{p_str}{ctx_str}")
+        lines.append(f"\n📅 近期事件：\n" + "\n".join(event_parts))
+
+    # Current topics
+    topics = aw.get("current_topics", [])
+    if topics:
+        topic_parts = []
+        for t in topics[:6]:
+            ch_str = ", ".join(t.get("channels", [])[:3])
+            topic_parts.append(f"  • {t.get('topic', '?')}（{ch_str}）：{t.get('summary', '')}")
+        lines.append(f"\n🔥 當前話題：\n" + "\n".join(topic_parts))
+
+    # Channel cultures
+    cultures = aw.get("channel_cultures", {})
+    if cultures:
+        culture_parts = []
+        for ch_name, info in list(cultures.items())[:10]:
+            vibe = info.get("vibe", "")
+            key = info.get("key_people", [])
+            key_str = f"（常客：{', '.join(key[:4])}）" if key else ""
+            culture_parts.append(f"  • {ch_name}：{vibe}{key_str}")
+        lines.append(f"\n🎭 頻道氛圍：\n" + "\n".join(culture_parts))
+
+    lines.append(
+        "\n⚠️ 以上是 AI 自動分析近期訊息的結果，代表社群的近期動態。"
+        "請自然地運用這些理解來回應使用者，就像你一直都在社群裡一樣。"
+        "但不要主動提起「社群感知報告」這個詞——表現得像一個自然而然了解社群的人。"
+    )
+
+    return "\n".join(lines)
+
 
 
 # ── Slash Command Group ──
