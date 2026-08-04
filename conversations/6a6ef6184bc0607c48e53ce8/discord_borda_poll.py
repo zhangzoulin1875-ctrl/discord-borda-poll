@@ -934,6 +934,32 @@ briefing_settings = {
 }
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+
+def _load_json_file(filepath: str, default=None):
+    """Generic JSON file loader with UTF-8 encoding and error fallback."""
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json_module.load(f)
+    except (json_module.JSONDecodeError, Exception) as e:
+        print(f"⚠️ 載入 {os.path.basename(filepath)} 失敗（使用預設值）: {e}")
+    return default if default is not None else {}
+
+
+def _save_json_file(filepath: str, data, indent=2) -> bool:
+    """Generic atomic JSON file saver — writes to .tmp then os.replace.
+    Prevents corruption if the process crashes mid-write."""
+    try:
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        tmp_path = filepath + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json_module.dump(data, f, ensure_ascii=False, indent=indent)
+        os.replace(tmp_path, filepath)  # atomic on POSIX
+        return True
+    except Exception as e:
+        print(f"⚠️ 儲存 {os.path.basename(filepath)} 失敗: {e}")
+        return False
 BRIEFING_DATA_FILE = os.path.join(DATA_DIR, "briefing_settings.json")
 
 
@@ -4564,8 +4590,7 @@ def save_polls_to_disk():
                     "allowed_roles": poll.allowed_roles,
                     "description": getattr(poll, "description", ""),
                 }
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(serializable, f, ensure_ascii=False)
+        _save_json_file(DATA_FILE, serializable, indent=None)
     except Exception as e:
         print(f"⚠️ Failed to save polls: {e}")
 
@@ -7508,18 +7533,15 @@ def save_quiz_data():
     try:
         with open(QUIZ_SETTINGS_FILE, "w", encoding="utf-8") as f:
             json_module.dump(quiz_settings, f, ensure_ascii=False, indent=2)
-        with open(QUIZ_SCORES_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(quiz_scores, f, ensure_ascii=False, indent=2)
+        _save_json_file(QUIZ_SCORES_FILE, quiz_scores)
         with open(QUIZ_CHAMPIONS_FILE, "w", encoding="utf-8") as f:
             json_module.dump(quiz_champions, f, ensure_ascii=False, indent=2)
         quiz_state = {
             "active_questions": quiz_active_questions,
             "last_question_time": _quiz_last_question_time,
         }
-        with open(QUIZ_STATE_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(quiz_state, f, ensure_ascii=False, indent=2)
-        with open(QUIZ_ASKED_FILE, "w", encoding="utf-8") as f:
-            json_module.dump(quiz_asked_questions, f, ensure_ascii=False, indent=2)
+        _save_json_file(QUIZ_STATE_FILE, quiz_state)
+        _save_json_file(QUIZ_ASKED_FILE, quiz_asked_questions)
     except Exception as e:
         print(f"⚠️ Quiz data save failed: {e}")
 
