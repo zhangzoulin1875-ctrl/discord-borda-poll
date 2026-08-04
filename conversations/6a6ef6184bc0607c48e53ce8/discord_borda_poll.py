@@ -4803,6 +4803,13 @@ async def setup_hook():
         except Exception:
             pass
 
+    # Register message context-menu commands (right-click a message → Apps)
+    for ctx_cmd in [ai_organize_agenda]:
+        try:
+            bot.tree.add_command(ctx_cmd)
+        except Exception:
+            pass
+
     # Global interaction check: block blacklisted users from ALL commands
     async def _tree_interaction_check(interaction: discord.Interaction) -> bool:
         if interaction.user and is_blacklisted(interaction.user.id):
@@ -9407,6 +9414,117 @@ class NationGroup(app_commands.Group):
         embed.timestamp = interaction.created_at
 
         await interaction.followup.send(embed=embed)
+
+
+# ──────────────────────────────────────────────
+# AI 整理事項（訊息右鍵選單 App）
+# ──────────────────────────────────────────────
+
+async def _organize_agenda_items(raw_text: str, ai_settings: dict) -> dict:
+    """Call the AI to organize/refine a raw list of agenda items (e.g. a
+    secretary-general's 待辦事項 message) into a clean, categorized,
+    actionable checklist. Returns {"organized": str, "error": str?}.
+    Strictly preserves the original items — the AI groups/clarifies wording,
+    it does not invent new tasks."""
+    prompt = (
+        f"以下是微國家組織（ICEA）秘書處的一則待辦/事項訊息原文，請幫忙整理成清楚、"
+        f"可執行的事項清單。\n\n"
+        f"─── 原始訊息 ───\n{raw_text}\n─── 原始訊息結束 ───\n\n"
+        f"請依照以下規則整理：\n"
+        f"1. 找出訊息中每一項獨立的待辦事項，不可遺漏、不可增加原文沒有的新事項。\n"
+        f"2. 依性質將事項分組歸類（例如：組織內部事務、對外協調、制度建設、人事/會籍等），"
+        f"組別名稱請依實際內容自行擬定，不要硬套。\n"
+        f"3. 每項事項用一行簡潔清楚地重新表述（可以讓語意更明確，但不能改變原意），"
+        f"前面加上 `☐ `。\n"
+        f"4. 如果某項事項描述模糊、看不出具體該怎麼做，在該行後面用「（建議：...）」的"
+        f"格式簡短補充一個讓它更可執行的具體化建議。\n"
+        f"5. 最後加一段「💡 整體建議」，簡短點出目前事項清單有沒有優先順序建議、"
+        f"是否有事項看起來互相關聯可以合併處理、或有沒有遺漏常見的秘書處工作面向。\n"
+        f"6. 使用繁體中文，語氣專業、簡潔。使用 Discord Markdown（**粗體**用於分組標題）。\n"
+        f"7. 直接輸出整理後的內容，不要加開場白或「以下是整理結果」這類贅語。"
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是微國家組織（micronation）秘書處的行政幕僚 AI，擅長把零散的待辦事項"
+                "整理成清楚、可執行、有條理的清單。你尊重原文的每一項內容，絕不擅自增減"
+                "事項，只負責讓表達更清楚、分類更合理。用繁體中文回答。"
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        result = await call_chat_api(
+            messages,
+            {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
+            max_tokens=1500,
+        )
+        text = result.get("content", "") if isinstance(result, dict) else ""
+        if not text:
+            return {"error": "AI 回應為空"}
+        return {"organized": text.strip()}
+    except asyncio.TimeoutError:
+        return {"error": "AI 回應逾時，請稍後再試一次"}
+    except Exception as e:
+        print(f"⚠️ AI 整理事項呼叫失敗：{e}")
+        return {"error": "AI 暫時沒有給出有效回覆，可能是模型當下比較忙，稍後再試一次應該就能過"}
+
+
+@app_commands.context_menu(name="AI整理事項")
+async def ai_organize_agenda(interaction: discord.Interaction, message: discord.Message):
+    """右鍵訊息 → 應用程式 → AI整理事項。抓取該訊息的文字內容，交給 AI
+    分析整理成分類清楚、可執行的事項清單，公開回覆在頻道中方便大家對照。"""
+    # 限管理員或機器人擁有者使用（跟其他管理性質指令一致）——避免任何人
+    # 對任意訊息亂點造成 AI 呼叫量暴增。
+    if not is_owner(interaction):
+        if not (interaction.guild and interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ 此功能僅限管理員使用。", ephemeral=True)
+            return
+
+    content = (message.content or "").strip()
+    if not content and message.embeds:
+        parts = []
+        for e in message.embeds:
+            if e.title:
+                parts.append(e.title)
+            if e.description:
+                parts.append(e.description)
+            for f in e.fields:
+                parts.append(f"{f.name}：{f.value}")
+        content = "\n".join(parts).strip()
+
+    if not content:
+        await interaction.response.send_message("❌ 這則訊息沒有可分析的文字內容。", ephemeral=True)
+        return
+
+    content = content[:3000]  # 避免超長訊息把 prompt 撐爆
+
+    await interaction.response.defer()  # 公開回覆，讓其他人也能看到整理結果
+
+    result = await _organize_agenda_items(content, ai_settings)
+    if "error" in result:
+        await interaction.followup.send(f"❌ 整理失敗：{result['error']}", ephemeral=True)
+        return
+
+    organized = result["organized"]
+    embed = discord.Embed(
+        title="📋 AI 整理事項",
+        description=organized[:4096],
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(name="原始訊息", value=f"[點此查看]({message.jump_url}) · 作者：{message.author.display_name}", inline=False)
+    embed.set_footer(text=f"由 {interaction.user.display_name} 發起整理")
+    embed.timestamp = interaction.created_at
+
+    await interaction.followup.send(embed=embed)
+    # 若整理內容過長被截斷，額外用一則訊息補完剩餘部分
+    if len(organized) > 4096:
+        remainder = organized[4096:]
+        for i in range(0, len(remainder), 1900):
+            await interaction.followup.send(remainder[i:i + 1900])
 
 
 # ──────────────────────────────────────────────
