@@ -1938,15 +1938,38 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
 
+    # ── HARD ABSOLUTE DEADLINE ──
+    # `timeout_total` is the caller's TOTAL wall-clock budget for this ENTIRE
+    # call_chat_api invocation — including internal retries and fallback
+    # paths (tools-unsupported retry, non-streaming fallback, empty-content
+    # retry). Previously each of those re-used the FULL timeout_total as its
+    # own fresh per-request timeout, so e.g. a caller passing timeout_total=12
+    # with one internal retry could genuinely take 24s+ before giving up —
+    # blowing straight through the outer asyncio.wait_for() budget the caller
+    # set up, and getting cancelled mid-flight with nothing to show for it.
+    # Fix: track one absolute deadline: every internal network call computes
+    # its OWN per-request timeout from however much time is actually left
+    # until that deadline, so the whole function can never exceed
+    # `timeout_total` seconds wall-clock no matter how many fallback paths fire.
+    _t_start = _time.time()
+    _deadline = _t_start + timeout_total
+
+    def _remaining(floor=0.5):
+        return max(floor, _deadline - _time.time())
+
     async def _post(payload, _tt=None, _tr=None):
         """Streaming-aware POST: always uses stream=True to keep the
         connection alive on slow endpoints. Creates a FRESH session per
         call (like the briefing function does) to avoid any session-level
         timeout interference from _shared_session. The sock_read timeout
         only applies BETWEEN chunks — once the first chunk arrives, the
-        timer resets."""
+        timer resets. Defaults to whatever time is LEFT until the absolute
+        deadline (not a fresh full timeout_total) so retries/fallbacks
+        can't each claim their own full budget."""
         payload = {**payload, "stream": True}
-        t = aiohttp.ClientTimeout(total=_tt or timeout_total, connect=10, sock_read=_tr or timeout_read)
+        _budget = _tt if _tt is not None else _remaining()
+        _read_budget = _tr if _tr is not None else min(timeout_read, _budget)
+        t = aiohttp.ClientTimeout(total=_budget, connect=min(10, _budget), sock_read=_read_budget)
         # Always create a fresh session — no session-level timeout to interfere
         async with aiohttp.ClientSession() as session:
             async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
@@ -2124,27 +2147,31 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                     _content = _msg.get("content", "")
                     _tc = _msg.get("tool_calls")
                     if not _content and not _tc:
-                        print(f"⚠️ 串流回應為空（可能是 API 不支援 streaming，或本次回應本身就是空的），回退為非串流模式重試...")
-                        payload_ns = dict(payload)
-                        payload_ns.pop("stream", None)
-                        t2 = aiohttp.ClientTimeout(total=300, connect=15, sock_read=120)
-                        async with aiohttp.ClientSession() as sess:
-                            async with sess.post(api_url, json=payload_ns, headers=headers, timeout=t2) as resp2:
-                                if resp2.status == 200:
-                                    body_text = await resp2.text()
-                                    data = json_module.loads(body_text)
-                                    if "choices" in data:
-                                        ok = True
-                                        if use_tools:
-                                            _tools_supported_apis.add(api_url)
-                                            save_tools_supported()
-                                        _fb_content = data["choices"][0].get("message", {}).get("content", "")
-                                        if _fb_content:
-                                            print(f"✅ 非串流回退成功，取得 {len(_fb_content)} chars")
-                                        else:
-                                            print(f"⚠️ 非串流回退回應仍是空的（確認是 API/模型本身沒答案，非串流解析問題）")
-                                else:
-                                    print(f"⚠️ 非串流回退也失敗：status={resp2.status}")
+                        _fb_budget = _remaining()
+                        if _fb_budget < 2:
+                            print(f"⚠️ 串流回應為空，但剩餘時間不足（{_fb_budget:.1f}s），放棄非串流回退")
+                        else:
+                            print(f"⚠️ 串流回應為空（可能是 API 不支援 streaming，或本次回應本身就是空的），回退為非串流模式重試（剩餘預算 {_fb_budget:.1f}s）...")
+                            payload_ns = dict(payload)
+                            payload_ns.pop("stream", None)
+                            t2 = aiohttp.ClientTimeout(total=_fb_budget, connect=min(10, _fb_budget), sock_read=_fb_budget)
+                            async with aiohttp.ClientSession() as sess:
+                                async with sess.post(api_url, json=payload_ns, headers=headers, timeout=t2) as resp2:
+                                    if resp2.status == 200:
+                                        body_text = await resp2.text()
+                                        data = json_module.loads(body_text)
+                                        if "choices" in data:
+                                            ok = True
+                                            if use_tools:
+                                                _tools_supported_apis.add(api_url)
+                                                save_tools_supported()
+                                            _fb_content = data["choices"][0].get("message", {}).get("content", "")
+                                            if _fb_content:
+                                                print(f"✅ 非串流回退成功，取得 {len(_fb_content)} chars")
+                                            else:
+                                                print(f"⚠️ 非串流回退回應仍是空的（確認是 API/模型本身沒答案，非串流解析問題）")
+                                    else:
+                                        print(f"⚠️ 非串流回退也失敗：status={resp2.status}")
                     else:
                         ok = True
                         if use_tools:
@@ -2191,6 +2218,14 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # stop retrying — further attempts will just hit the same block.
         if not _ai_circuit_check():
             return {"content": "", "error": AI_CIRCUIT_COOLDOWN_MSG, "circuit_open": True}
+        # ── Deadline guard: don't even START a retry if there isn't
+        # meaningfully enough time left for a network round-trip. This is
+        # what actually caps total wall-clock time at ~timeout_total — without
+        # it, a retry always fired regardless of how much budget the FIRST
+        # attempt already burned, routinely doubling total latency.
+        if _attempt_i > 0 and _remaining() < 1.5:
+            print(f"⏱️ 剩餘時間不足（{_remaining():.1f}s），放棄重試，直接回傳目前結果")
+            break
         try:
             msg = await _attempt()
         except Exception as e:
@@ -2199,19 +2234,22 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             if _ai_circuit_breaker["tripped"]:
                 print(f"🚫 AI 熔斷器因 403 觸發，停止重試")
                 return {"content": "", "error": AI_CIRCUIT_COOLDOWN_MSG, "circuit_open": True}
-            if _attempt_i == 0:
-                print(f"⚠️ Chat AI 呼叫失敗（{e}），重試一次...")
+            if _attempt_i == 0 and _remaining() >= 1.5:
+                print(f"⚠️ Chat AI 呼叫失敗（{e}），重試一次（剩餘 {_remaining():.1f}s）...")
                 continue
-            raise
-        if not msg.get("content") and not msg.get("tool_calls") and _attempt_i == 0:
-            print(f"⚠️ AI 回應為空（finish_reason=stop 但沒有實際內容），重試一次...")
+            print(f"⚠️ Chat AI 呼叫失敗且無剩餘時間重試（{e}）")
+            return {"content": "", "error": f"AI 回應逾時或失敗：{e}"}
+        if not msg.get("content") and not msg.get("tool_calls") and _attempt_i == 0 and _remaining() >= 1.5:
+            print(f"⚠️ AI 回應為空（finish_reason=stop 但沒有實際內容），重試一次（剩餘 {_remaining():.1f}s）...")
             continue
         return msg
-    # Unreachable in practice (the loop above always returns or raises),
-    # but keep a safety net.
+    # Ran out of retry budget without an exception (e.g. broke out of the
+    # loop above) — return whatever we have, or a clean timeout error.
+    if msg is not None:
+        return msg
     if last_exc:
-        raise last_exc
-    return msg
+        return {"content": "", "error": f"AI 回應逾時或失敗：{last_exc}"}
+    return {"content": "", "error": "AI 回應逾時"}
 
 
 # ──────────────────────────────────────────────
@@ -4560,12 +4598,24 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         total latency bounded and predictable."""
         t0 = _time.time()
         msgs = messages
-        # Tight per-call timeout: 8s for tool-enabled round (leaves room for
-        # tools + final round within the 20s budget), 12s for no-tools round
-        _call_tt = 8 if tools else 12
-        _call_tr = 6 if tools else 10
+        # Dynamic per-call timeout based on the ACTUAL remaining budget
+        # (_ai_budget, computed below from the 20s total minus pre-AI time
+        # already spent) — not a hardcoded 8/12s. Hardcoding wasted budget:
+        # if pre-AI context gathering was fast (e.g. 1-2s), the AI call was
+        # still artificially capped at 12s even though 17-18s were actually
+        # available, giving the (often slow/free) API less time than it
+        # could have had to actually finish instead of timing out.
+        # Leave a ~1.5s safety margin for our own post-processing overhead.
+        if tools:
+            # Tool-enabled round: reserve roughly 45% for this round, leaving
+            # the rest for tool execution + the mandatory final round.
+            _call_tt = max(6, _ai_budget * 0.45)
+        else:
+            # Single-round quick path: give it nearly the ENTIRE remaining budget.
+            _call_tt = max(6, _ai_budget - 1.5)
+        _call_tr = max(4, _call_tt - 2)
         assistant_msg = await call_chat_api(msgs, settings, tools=tools, timeout_total=_call_tt, timeout_read=_call_tr)
-        print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}）耗時 {_time.time()-t0:.1f}s")
+        print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
             return assistant_msg.get("content") or ""
@@ -4617,9 +4667,12 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         print(f"⏱️ 工具執行（{len(tool_calls)} 個，平行）耗時 {_time.time()-t1:.1f}s")
 
         # Final round — ALWAYS plain text, no tools. Capped at 2 calls total.
+        # Budget = whatever remains of _ai_budget after Round 1 + tool execution,
+        # minus a small safety margin — not a hardcoded 8s.
         t2 = _time.time()
-        final_msg = await call_chat_api(msgs, settings, tools=None, timeout_total=8, timeout_read=6)
-        print(f"⏱️ Round 2（最終答案，無 tools）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
+        _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
+        final_msg = await call_chat_api(msgs, settings, tools=None, timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2))
+        print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
     # ── 20s TOTAL BUDGET (pre-AI + AI loop combined) ──
