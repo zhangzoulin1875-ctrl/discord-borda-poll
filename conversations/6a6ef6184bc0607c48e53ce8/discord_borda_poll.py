@@ -3794,6 +3794,11 @@ async def _web_search(query: str) -> str:
     _ws_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+    # Wikipedia requires a descriptive User-Agent with contact info,
+    # otherwise they return 403.
+    _wiki_headers = {
+        "User-Agent": "ICEA-Bot/1.0 (https://icea.org; contact@icea.org)"
+    }
 
     async def _wiki_lookup(session, lang):
         try:
@@ -3802,10 +3807,10 @@ async def _web_search(query: str) -> str:
                 f"&list=search&srsearch={urllib.parse.quote(query)}"
                 f"&format=json&utf8=1&srlimit=3"
             )
-            async with session.get(search_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
+            async with session.get(search_url, headers=_wiki_headers, timeout=_ws_timeout) as resp:
                 if resp.status != 200:
                     return None
-                data = await resp.json()
+                data = json_module.loads(await resp.text())
             search_results = data.get("query", {}).get("search", [])
             if not search_results:
                 return None
@@ -3815,10 +3820,10 @@ async def _web_search(query: str) -> str:
                 f"&prop=extracts&exintro=1&explaintext=1&format=json"
                 f"&exchars=800&pageids={page_ids}"
             )
-            async with session.get(extract_url, headers=_ws_headers, timeout=_ws_timeout) as resp2:
+            async with session.get(extract_url, headers=_wiki_headers, timeout=_ws_timeout) as resp2:
                 if resp2.status != 200:
                     return None
-                ext_data = await resp2.json()
+                ext_data = json_module.loads(await resp2.text())
             pages = ext_data.get("query", {}).get("pages", {})
             for pid, page in pages.items():
                 title = page.get("title", "")
@@ -3839,7 +3844,9 @@ async def _web_search(query: str) -> str:
             )
             async with session.get(ddg_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
+                    # DDG returns Content-Type: application/x-javascript,
+                    # which aiohttp's resp.json() rejects — use text() + json.loads()
+                    data = json_module.loads(await resp.text())
                     abstract = data.get("Abstract", "")
                     if abstract:
                         out.append(f"🔍 {abstract[:500]}")
@@ -3856,7 +3863,7 @@ async def _web_search(query: str) -> str:
         try:
             ddg_html_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
             async with session.get(ddg_html_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
-                if resp.status == 200:
+                if resp.status in (200, 202):
                     html = await resp.text()
                     snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
                     titles = re.findall(r'class="result__a"[^>]*>(.*?)</a>', html, re.DOTALL)
