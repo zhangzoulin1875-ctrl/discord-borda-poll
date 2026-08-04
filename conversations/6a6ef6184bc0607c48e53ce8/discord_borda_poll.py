@@ -4959,20 +4959,32 @@ async def on_thread_create(thread):
             except Exception as e:
                 print(f"⚠️ 論壇貼文提案處理失敗：{e}")
 
-    # ── 入盟申請區偵測 ──
+    # ── 入盟申請區偵測（秘書處 + 理事國）──
     if application_settings.get("enabled"):
-        application_channels = application_settings.get("application_channels", [])
-        if parent_id and parent_id in application_channels:
+        sec_channels = application_settings.get("application_channels", [])
+        council_channels = application_settings.get("council_channels", [])
+        if parent_id and parent_id in sec_channels:
             try:
                 await asyncio.sleep(2)
                 starter = await thread.fetch_message(thread.id) if hasattr(thread, 'id') else None
                 if starter:
                     if starter.author.bot:
                         return
-                    await _process_new_application(starter, thread.parent)
-                    print(f"📝 論壇貼文入盟申請已處理：#{thread.name}")
+                    await _process_new_application(starter, thread.parent, system_type="secretariat")
+                    print(f"📝 論壇貼文入盟申請已處理（秘書處）：#{thread.name}")
             except Exception as e:
                 print(f"⚠️ 論壇貼文入盟申請處理失敗：{e}")
+        elif parent_id and parent_id in council_channels:
+            try:
+                await asyncio.sleep(2)
+                starter = await thread.fetch_message(thread.id) if hasattr(thread, 'id') else None
+                if starter:
+                    if starter.author.bot:
+                        return
+                    await _process_new_application(starter, thread.parent, system_type="council")
+                    print(f"📝 論壇貼文入盟申請已處理（理事國）：#{thread.name}")
+            except Exception as e:
+                print(f"⚠️ 論壇貼文入盟申請處理失敗（理事國）：{e}")
 
 
 @bot.event
@@ -4983,10 +4995,17 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         return
     if not application_settings.get("enabled") or not after.guild:
         return
-    application_channels = application_settings.get("application_channels", [])
+    sec_channels = application_settings.get("application_channels", [])
+    council_channels = application_settings.get("council_channels", [])
     ch_id = after.channel.id
     parent_id = getattr(after.channel, 'parent_id', None)
-    if ch_id not in application_channels and (not parent_id or parent_id not in application_channels):
+    # Determine which system
+    system_type = None
+    if ch_id in sec_channels or (parent_id and parent_id in sec_channels):
+        system_type = "secretariat"
+    elif ch_id in council_channels or (parent_id and parent_id in council_channels):
+        system_type = "council"
+    if not system_type:
         return
 
     # Check if we already have an entry for this message
@@ -5007,9 +5026,9 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
     try:
         # Determine the channel object (parent for forum threads)
         ch = after.channel
-        if isinstance(ch, discord.Thread) and parent_id and parent_id in application_channels:
+        if isinstance(ch, discord.Thread) and parent_id and (parent_id in sec_channels or parent_id in council_channels):
             ch = ch.parent
-        await _process_new_application(after, ch, is_edit=True)
+        await _process_new_application(after, ch, is_edit=True, system_type=system_type)
     except Exception as e:
         print(f"⚠️ 入盟申請編輯處理錯誤：{e}")
 
@@ -5034,165 +5053,103 @@ async def on_message(message):
                 except Exception as e:
                     print(f"⚠️ 提案處理錯誤：{e}")
 
-    # ── 入盟申請區偵測 ──
+    # ── 入盟申請區偵測（秘書處 + 理事國 分開）──
     if application_settings.get("enabled") and message.guild:
-        application_channels = application_settings.get("application_channels", [])
+        sec_channels = application_settings.get("application_channels", [])
+        council_channels = application_settings.get("council_channels", [])
         ch_id = message.channel.id
         parent_id = getattr(message.channel, 'parent_id', None)
-        in_app_channel = ch_id in application_channels or (parent_id and parent_id in application_channels)
-        if in_app_channel and not message.author.bot:
+
+        # Determine which system this channel belongs to
+        system_type = None
+        if ch_id in sec_channels or (parent_id and parent_id in sec_channels):
+            system_type = "secretariat"
+        elif ch_id in council_channels or (parent_id and parent_id in council_channels):
+            system_type = "council"
+
+        if system_type and not message.author.bot:
             # Check for pending flag uploads first
             if message.attachments:
                 _now = _time.time()
                 expired_keys = [k for k, v in _pending_flag_uploads.items() if v.get("expires", 0) < _now]
                 for k in expired_keys:
                     _pending_flag_uploads.pop(k, None)
-                # Find a pending upload matching this channel/thread
                 for app_id, info in list(_pending_flag_uploads.items()):
                     if info.get("user_id") != str(message.author.id):
                         continue
-                    # Match by channel or thread
                     entry_ch = info.get("channel_id")
                     entry_thread = info.get("thread_id")
-                    msg_ch_id = str(message.channel.id) if isinstance(message.channel, discord.Thread) else str(ch_id)
                     if str(entry_ch) == str(ch_id) or (entry_thread and str(entry_thread) == str(message.channel.id)):
-                        # Found a pending flag upload for this application
                         image_url = str(message.attachments[0].url)
                         print(f"🚩 收到國旗圖片上傳：app {app_id} by {message.author.display_name}")
                         _pending_flag_uploads.pop(app_id, None)
 
-                        # Find the entry and update it
                         entry = None
                         for a in _applications.get("entries", []):
                             if a.get("id") == app_id:
                                 entry = a
                                 break
                         if entry and entry.get("status") not in ("accepted", "rejected"):
-                            # Verify the flag with vision AI
                             flag_valid = await _verify_flag_image(image_url)
                             if flag_valid:
                                 entry["flag_status"] = "ok"
                                 entry["flag_valid"] = True
                                 entry["flag_image_url"] = image_url
-                                # Remove flag-related items from missing_fields
                                 entry["missing_fields"] = [f for f in entry.get("missing_fields", []) if "國旗" not in f]
                                 save_applications()
 
-                                # Re-check: are all fields now passing?
                                 remaining_missing = entry.get("missing_fields", [])
                                 if not remaining_missing:
-                                    # All pass! Notify secretariat + council
                                     try:
+                                        reviewer_name = "理事國" if entry.get("system_type") == "council" else "秘書處"
                                         done_embed = discord.Embed(
                                             title="✅ 國旗已收到",
-                                            description="國旗圖片已通過視覺 AI 驗證，所有欄位齊全！正在送交秘書處審核...",
+                                            description=f"國旗圖片已通過視覺 AI 驗證，所有欄位齊全！正在送交{reviewer_name}審核...",
                                             color=discord.Color.green(),
                                         )
                                         await message.reply(embed=done_embed, mention_author=False)
                                     except Exception:
                                         pass
 
-                                    # Trigger the notification by calling _process_new_application
-                                    # with a synthetic flag_image_url
-                                    # We need to re-fetch the original message to re-run the full check
-                                    try:
-                                        orig_ch_id = entry.get("channel_id")
-                                        orig_msg_id = entry.get("message_id")
-                                        guild_id = entry.get("guild_id", 0)
+                                    entry["secretariat_notified"] = True
+                                    save_applications()
+
+                                    # Notify the correct reviewer based on system_type
+                                    notify_target_id = application_settings.get("council_channel") if entry.get("system_type") == "council" else application_settings.get("secretariat_channel")
+                                    notify_title = "📝 新入盟申請（理事國審核）" if entry.get("system_type") == "council" else "📝 新入盟申請"
+                                    notify_footer = "請理事國點擊下方按鈕審核通過或退回此申請" if entry.get("system_type") == "council" else "請管理員點擊下方按鈕審核通過或退回此申請"
+                                    notify_color = discord.Color.dark_gold() if entry.get("system_type") == "council" else discord.Color.gold()
+
+                                    if notify_target_id:
+                                        notify_ch = None
                                         for guild in bot.guilds:
-                                            if guild.id == guild_id:
-                                                orig_ch = guild.get_channel(int(orig_ch_id)) if orig_ch_id else None
-                                                if orig_ch:
-                                                    # For forum threads, get the thread
-                                                    thread_id = entry.get("thread_id")
-                                                    if thread_id:
-                                                        try:
-                                                            orig_ch = guild.get_thread(int(thread_id)) or await orig_ch.fetch_thread(int(thread_id))
-                                                        except Exception:
-                                                            pass
-                                                    orig_msg = await orig_ch.fetch_message(int(orig_msg_id)) if orig_msg_id else None
-                                                    if orig_msg:
-                                                        # Attach the flag image to the message object
-                                                        # by temporarily adding it to attachments
-                                                        if not orig_msg.attachments:
-                                                            # Use a mock: set flag_image_url on entry
-                                                            # and call a simplified notification
-                                                            pass
-                                                    break
-
-                                        # Since we can't modify the original message's attachments,
-                                        # directly send notifications using the entry
-                                        entry["secretariat_notified"] = True
-                                        save_applications()
-
-                                        # Notify secretariat
-                                        sec_ch_id = application_settings.get("secretariat_channel")
-                                        if sec_ch_id:
-                                            sec_ch = None
-                                            for guild in bot.guilds:
-                                                ch = guild.get_channel(int(sec_ch_id))
-                                                if ch:
-                                                    sec_ch = ch
-                                                    break
-                                            if sec_ch:
-                                                notify_embed = discord.Embed(
-                                                    title="📝 新入盟申請",
-                                                    color=discord.Color.gold(),
-                                                    timestamp=discord.utils.utcnow(),
-                                                )
-                                                notify_embed.add_field(name="申請人", value=entry.get("applicant_name", "?"), inline=True)
-                                                notify_embed.add_field(name="申請頻道", value=f"#{entry.get('channel_name', '?')}", inline=True)
-                                                notify_embed.add_field(name="申請時間", value=entry.get("date", "?"), inline=True)
-                                                if entry.get("applicant_nation"):
-                                                    notify_embed.add_field(name="申請國家", value=entry["applicant_nation"], inline=True)
-                                                notify_embed.add_field(name="欄位檢查", value="✅ 全部必填欄位齊全（含國旗圖片）", inline=False)
-                                                if image_url:
-                                                    notify_embed.set_thumbnail(url=image_url)
-                                                notify_embed.add_field(name="原文連結", value=entry.get("message_url", "(無)"), inline=False)
-                                                notify_embed.add_field(name="申請 ID", value=entry["id"], inline=False)
-                                                notify_embed.set_footer(text="請管理員點擊下方按鈕審核通過或退回此申請")
-                                                try:
-                                                    await sec_ch.send(embed=notify_embed, view=ApplicationReviewView(entry["id"]))
-                                                    print(f"✅ 入盟申請通知已發送至秘書處 #{sec_ch.name}")
-                                                except Exception as e:
-                                                    print(f"❌ 秘書處通知失敗：{e}")
-
-                                        # Notify council
-                                        council_ch_id = application_settings.get("council_channel")
-                                        if council_ch_id:
-                                            council_ch = None
-                                            for guild in bot.guilds:
-                                                ch = guild.get_channel(int(council_ch_id))
-                                                if ch:
-                                                    council_ch = ch
-                                                    break
-                                            if council_ch:
-                                                council_embed = discord.Embed(
-                                                    title="📝 新入盟申請（理事國審核）",
-                                                    color=discord.Color.dark_gold(),
-                                                    timestamp=discord.utils.utcnow(),
-                                                )
-                                                council_embed.add_field(name="申請人", value=entry.get("applicant_name", "?"), inline=True)
-                                                council_embed.add_field(name="申請頻道", value=f"#{entry.get('channel_name', '?')}", inline=True)
-                                                council_embed.add_field(name="申請時間", value=entry.get("date", "?"), inline=True)
-                                                if entry.get("applicant_nation"):
-                                                    council_embed.add_field(name="申請國家", value=entry["applicant_nation"], inline=True)
-                                                council_embed.add_field(name="欄位檢查", value="✅ 全部必填欄位齊全（含國旗圖片）", inline=False)
-                                                if image_url:
-                                                    council_embed.set_thumbnail(url=image_url)
-                                                council_embed.add_field(name="原文連結", value=entry.get("message_url", "(無)"), inline=False)
-                                                council_embed.add_field(name="申請 ID", value=entry["id"], inline=False)
-                                                council_embed.set_footer(text="請理事國點擊下方按鈕審核通過或退回此申請")
-                                                try:
-                                                    await council_ch.send(embed=council_embed, view=ApplicationReviewView(entry["id"]))
-                                                    print(f"✅ 入盟申請通知已發送至理事國 #{council_ch.name}")
-                                                except Exception as e:
-                                                    print(f"❌ 理事國通知失敗：{e}")
-
-                                    except Exception as e:
-                                        print(f"⚠️ 國旗上傳後通知流程錯誤：{e}")
+                                            ch = guild.get_channel(int(notify_target_id))
+                                            if ch:
+                                                notify_ch = ch
+                                                break
+                                        if notify_ch:
+                                            notify_embed = discord.Embed(
+                                                title=notify_title,
+                                                color=notify_color,
+                                                timestamp=discord.utils.utcnow(),
+                                            )
+                                            notify_embed.add_field(name="申請人", value=entry.get("applicant_name", "?"), inline=True)
+                                            notify_embed.add_field(name="申請頻道", value=f"#{entry.get('channel_name', '?')}", inline=True)
+                                            notify_embed.add_field(name="申請時間", value=entry.get("date", "?"), inline=True)
+                                            if entry.get("applicant_nation"):
+                                                notify_embed.add_field(name="申請國家", value=entry["applicant_nation"], inline=True)
+                                            notify_embed.add_field(name="欄位檢查", value="✅ 全部必填欄位齊全（含國旗圖片）", inline=False)
+                                            if image_url:
+                                                notify_embed.set_thumbnail(url=image_url)
+                                            notify_embed.add_field(name="原文連結", value=entry.get("message_url", "(無)"), inline=False)
+                                            notify_embed.add_field(name="申請 ID", value=entry["id"], inline=False)
+                                            notify_embed.set_footer(text=notify_footer)
+                                            try:
+                                                await notify_ch.send(embed=notify_embed, view=ApplicationReviewView(entry["id"]))
+                                                print(f"✅ 入盟申請通知已發送至{'理事國' if entry.get('system_type') == 'council' else '秘書處'} #{notify_ch.name}")
+                                            except Exception as e:
+                                                print(f"❌ 通知發送失敗：{e}")
                                 else:
-                                    # Still missing other fields
                                     try:
                                         still_missing_embed = discord.Embed(
                                             title="⚠️ 國旗已收到，但仍有缺漏",
@@ -5208,7 +5165,6 @@ async def on_message(message):
                                     except Exception:
                                         pass
                             else:
-                                # Flag AI check failed
                                 try:
                                     fail_embed = discord.Embed(
                                         title="❌ 國旗驗證未通過",
@@ -5221,7 +5177,7 @@ async def on_message(message):
                         return  # Consumed the image, don't process further
 
             try:
-                await _process_new_application(message, message.channel)
+                await _process_new_application(message, message.channel, system_type=system_type)
             except Exception as e:
                 print(f"⚠️ 入盟申請處理錯誤：{e}")
 
@@ -6940,6 +6896,41 @@ class SystemGroup(app_commands.Group):
         else:
             await interaction.response.send_message("❌ action 只能是 add、remove 或 list。", ephemeral=True)
 
+    @app_commands.command(name="application_council_channel", description="新增/移除理事國入盟申請區頻道（機器人擁有者限定）")
+    @app_commands.describe(action="add=新增頻道, remove=移除頻道, list=列出已設定的頻道")
+    async def application_council_channel(self, interaction: discord.Interaction,
+                                            action: str,
+                                            channel: discord.TextChannel = None):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        channels = application_settings.get("council_channels", [])
+        if action == "list":
+            if channels:
+                ch_list = "\n".join(f"  • <#{cid}> (`{cid}`)" for cid in channels)
+                text = f"📝 **理事國入盟申請區頻道列表**（{len(channels)} 個）：\n{ch_list}"
+            else:
+                text = "📝 目前未設定任何理事國入盟申請區頻道。"
+            await interaction.response.send_message(text, ephemeral=True)
+        elif action == "add" and channel:
+            if channel.id not in channels:
+                channels.append(channel.id)
+                application_settings["council_channels"] = channels
+                save_application_settings()
+                await interaction.response.send_message(f"✅ 理事國入盟申請區頻道已新增 #{channel.name}。", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ #{channel.name} 已在理事國入盟申請區頻道列表中。", ephemeral=True)
+        elif action == "remove" and channel:
+            if channel.id in channels:
+                channels.remove(channel.id)
+                application_settings["council_channels"] = channels
+                save_application_settings()
+                await interaction.response.send_message(f"✅ 理事國入盟申請區頻道已移除 #{channel.name}。", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"⚠️ #{channel.name} 不在理事國入盟申請區頻道列表中。", ephemeral=True)
+        else:
+            await interaction.response.send_message("用法：`application_council_channel add/remove <#channel>` 或 `list`", ephemeral=True)
+
     @app_commands.command(name="application_secretariat", description="設定入盟申請秘書處通知頻道（機器人擁有者限定）")
     @app_commands.describe(channel="秘書處頻道（系統會在此發送申請通知供管理員審核）")
     async def application_secretariat(self, interaction: discord.Interaction, channel: discord.TextChannel):
@@ -6973,9 +6964,15 @@ class SystemGroup(app_commands.Group):
         lines.append(f"啟用狀態：{'✅ 已啟用' if enabled else '❌ 已停用（用 /system application_toggle 開啟）'}")
         if channels:
             ch_list = "\n".join(f"  • <#{cid}> (`{cid}`)" for cid in channels)
-            lines.append(f"入盟申請區頻道（{len(channels)} 個）：\n{ch_list}")
+            lines.append(f"秘書處入盟申請區頻道（{len(channels)} 個）：\n{ch_list}")
         else:
-            lines.append("入盟申請區頻道：❌ 尚未設定任何頻道")
+            lines.append("秘書處入盟申請區頻道：❌ 尚未設定（用 /system application_channel add 設定）")
+        council_chs = application_settings.get("council_channels", [])
+        if council_chs:
+            ch_list2 = "\n".join(f"  • <#{cid}> (`{cid}`)" for cid in council_chs)
+            lines.append(f"理事國入盟申請區頻道（{len(council_chs)} 個）：\n{ch_list2}")
+        else:
+            lines.append("理事國入盟申請區頻道：❌ 尚未設定（用 /system application_council_channel add 設定）")
         if sec_id:
             lines.append(f"秘書處通知頻道：<#{sec_id}> (`{sec_id}`)")
         else:
@@ -8692,9 +8689,10 @@ APPLICATION_REQUIRED_FIELDS = [
 
 application_settings = {
     "enabled": False,
-    "application_channels": [],     # list of channel IDs to monitor
-    "secretariat_channel": None,   # channel ID for admin notifications (秘書處)
-    "council_channel": None,       # channel ID for council notifications (理事國審核)
+    "application_channels": [],     # 秘書處入盟申請區 channels to monitor
+    "secretariat_channel": None,   # 秘書處 notification target
+    "council_channels": [],        # 理事國入盟申請區 channels to monitor (separate)
+    "council_channel": None,       # 理事國 notification target
     "ai_settings": {               # optional: separate AI config
         "api_url": "",
         "api_key": "",
@@ -8887,19 +8885,22 @@ async def _verify_flag_image(image_url: str) -> bool:
         return True
 
 
-async def _process_new_application(message: discord.Message, channel, is_edit: bool = False):
+async def _process_new_application(message: discord.Message, channel, is_edit: bool = False, system_type: str = "secretariat"):
     """Auto-reply to a membership application.
 
     Two-phase flow:
     1. First check — if fields are missing, reply with orange ⚠️ and tell the
-       applicant to EDIT their original post. Do NOT notify secretariat yet.
+       applicant to EDIT their original post. Do NOT notify reviewer yet.
     2. On edit re-check — when all fields pass (including flag image), reply
-       with blue ✅ and THEN notify the secretariat channel.
+       with blue ✅ and THEN notify the reviewer (秘書處 or 理事國).
     """
     if not application_settings.get("enabled"):
         return
-    application_channels = application_settings.get("application_channels", [])
-    if channel.id not in application_channels:
+    if system_type == "council":
+        monitored = application_settings.get("council_channels", [])
+    else:
+        monitored = application_settings.get("application_channels", [])
+    if channel.id not in monitored:
         return
 
     msg_id = str(message.id)
@@ -8981,6 +8982,7 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
             "missing_fields": missing_fields,
             "flag_status": flag_status,
             "flag_valid": flag_valid,
+            "system_type": system_type,
             "status": "pending",
             "secretariat_notified": False,
             "reviewed_by": "",
@@ -9054,26 +9056,38 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
     entry["secretariat_notified"] = True
     save_applications()
 
-    # ── Send notification to secretariat channel ──
-    sec_ch_id = application_settings.get("secretariat_channel")
-    if not sec_ch_id:
-        print("⚠️ 入盟申請系統：未設定秘書處頻道，無法發送通知")
+    # ── Send notification to the correct reviewer (秘書處 or 理事國) ──
+    if system_type == "council":
+        notify_ch_id = application_settings.get("council_channel")
+        notify_title = "📝 新入盟申請（理事國審核）"
+        notify_footer = "請理事國點擊下方按鈕審核通過或退回此申請"
+        notify_color = discord.Color.dark_gold()
+        reviewer_label = "理事國"
+    else:
+        notify_ch_id = application_settings.get("secretariat_channel")
+        notify_title = "📝 新入盟申請"
+        notify_footer = "請管理員點擊下方按鈕審核通過或退回此申請"
+        notify_color = discord.Color.gold()
+        reviewer_label = "秘書處"
+
+    if not notify_ch_id:
+        print(f"⚠️ 入盟申請系統：未設定{reviewer_label}通知頻道，無法發送通知")
         return
 
-    sec_ch = None
+    notify_ch = None
     for guild in bot.guilds:
-        ch = guild.get_channel(int(sec_ch_id))
+        ch = guild.get_channel(int(notify_ch_id))
         if ch:
-            sec_ch = ch
+            notify_ch = ch
             break
 
-    if not sec_ch:
-        print(f"⚠️ 入盟申請系統：找不到秘書處頻道 {sec_ch_id}")
+    if not notify_ch:
+        print(f"⚠️ 入盟申請系統：找不到{reviewer_label}頻道 {notify_ch_id}")
         return
 
     embed = discord.Embed(
-        title="📝 新入盟申請",
-        color=discord.Color.gold(),
+        title=notify_title,
+        color=notify_color,
         timestamp=discord.utils.utcnow(),
     )
     embed.add_field(name="申請人", value=message.author.display_name, inline=True)
@@ -9090,53 +9104,14 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
         inline=False,
     )
     embed.add_field(name="申請 ID", value=entry["id"], inline=False)
-    embed.set_footer(text="請管理員點擊下方按鈕審核通過或退回此申請")
+    embed.set_footer(text=notify_footer)
 
     view = ApplicationReviewView(entry["id"])
     try:
-        await sec_ch.send(embed=embed, view=view)
-        print(f"✅ 入盟申請通知已發送至秘書處 #{sec_ch.name}")
+        await notify_ch.send(embed=embed, view=view)
+        print(f"✅ 入盟申請通知已發送至{reviewer_label} #{notify_ch.name}")
     except Exception as e:
         print(f"❌ 入盟申請通知發送失敗：{e}")
-
-    # ── Also notify council channel (理事國審核) if configured ──
-    council_ch_id = application_settings.get("council_channel")
-    if council_ch_id:
-        council_ch = None
-        for guild in bot.guilds:
-            ch = guild.get_channel(int(council_ch_id))
-            if ch:
-                council_ch = ch
-                break
-        if council_ch:
-            council_embed = discord.Embed(
-                title="📝 新入盟申請（理事國審核）",
-                color=discord.Color.dark_gold(),
-                timestamp=discord.utils.utcnow(),
-            )
-            council_embed.add_field(name="申請人", value=message.author.display_name, inline=True)
-            council_embed.add_field(name="申請頻道", value=f"#{getattr(channel, 'name', '?')}", inline=True)
-            council_embed.add_field(name="申請時間", value=entry["date"], inline=True)
-            if applicant_name:
-                council_embed.add_field(name="申請國家", value=applicant_name, inline=True)
-            council_embed.add_field(name="欄位檢查", value="✅ 全部必填欄位齊全（含國旗圖片）", inline=False)
-            if image_url:
-                council_embed.set_thumbnail(url=image_url)
-            council_embed.add_field(
-                name="原文連結",
-                value=message.jump_url if hasattr(message, 'jump_url') else "(無)",
-                inline=False,
-            )
-            council_embed.add_field(name="申請 ID", value=entry["id"], inline=False)
-            council_embed.set_footer(text="請理事國點擊下方按鈕審核通過或退回此申請")
-            council_view = ApplicationReviewView(entry["id"])
-            try:
-                await council_ch.send(embed=council_embed, view=council_view)
-                print(f"✅ 入盟申請通知已發送至理事國 #{council_ch.name}")
-            except Exception as e:
-                print(f"❌ 理事國通知發送失敗：{e}")
-        else:
-            print(f"⚠️ 入盟申請系統：找不到理事國頻道 {council_ch_id}")
 
 
 # Track pending flag uploads: {app_id: {"user_id": str, "expires": timestamp}}
