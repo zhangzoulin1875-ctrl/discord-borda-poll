@@ -27,6 +27,15 @@
           <input id="nation-reps" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]" placeholder="如：123456789,987654321">
         </div>
         <div>
+          <label class="text-xs text-gray-400">類別</label>
+          <select id="nation-category" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2]">
+            <option value="member">🟢 成員國</option>
+            <option value="council">🔵 理事國</option>
+            <option value="observer">🟡 觀察國</option>
+            <option value="removed">⚫ 已除籍</option>
+          </select>
+        </div>
+        <div>
           <label class="text-xs text-gray-400">備註</label>
           <textarea id="nation-notes" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mt-1 outline-none focus:ring-2 ring-[#5865f2] resize-none" rows="2" placeholder="選填"></textarea>
         </div>
@@ -591,14 +600,14 @@ async function loadNations() {
     const reps = (n.representative_names && n.representative_names.length)
       ? n.representative_names.join('、')
       : (n.representatives && n.representatives.length ? n.representatives.map(r => '<@'+r+'>').join('、') : '未指定');
-    const statusBadge = n.status === 'active'
-      ? '<span class="text-green-400 text-xs">✅ 活躍</span>'
-      : '<span class="text-gray-500 text-xs">⚫ 停用</span>';
+    const catMap = {member:['🟢','成員國','text-green-400'],council:['🔵','理事國','text-blue-400'],observer:['🟡','觀察國','text-yellow-400'],removed:['⚫','已除籍','text-gray-500']};
+    const cat = catMap[n.category||'member'] || catMap.member;
+    const catBadge = `<span class="${cat[2]} text-xs">${cat[0]} ${cat[1]}</span>`;
     return `<div class="bg-[#2b2d31] rounded-xl p-4">
       <div class="flex items-center justify-between mb-2">
-        <div><h3 class="font-bold">${escHtml(n.name_zh)}（${escHtml(n.name_en)}）</h3><div class="text-xs text-gray-400 mt-1">ISO: <code class="bg-[#1e1f22] px-1.5 py-0.5 rounded">${escHtml(n.iso_code)}</code> · ${statusBadge}</div></div>
+        <div><h3 class="font-bold">${escHtml(n.name_zh)}（${escHtml(n.name_en)}）</h3><div class="text-xs text-gray-400 mt-1">ISO: <code class="bg-[#1e1f22] px-1.5 py-0.5 rounded">${escHtml(n.iso_code)}</code> · ${catBadge}</div></div>
         <div class="flex gap-1">
-          <button onclick="editNation('${n.id}','${escAttr(n.name_zh)}','${escAttr(n.name_en)}','${escAttr(n.iso_code)}','${escAttr((n.representatives||[]).join(','))}','${escAttr(n.notes||'')}','${escAttr(n.status)}')" class="text-xs bg-[#4e5058] hover:bg-[#3a3c43] px-2.5 py-1 rounded">編輯</button>
+          <button onclick="editNation('${n.id}','${escAttr(n.name_zh)}','${escAttr(n.name_en)}','${escAttr(n.iso_code)}','${escAttr((n.representatives||[]).join(','))}','${escAttr(n.notes||'')}','${escAttr(n.category||'member')}')" class="text-xs bg-[#4e5058] hover:bg-[#3a3c43] px-2.5 py-1 rounded">編輯</button>
           <button onclick="deleteNation('${n.id}','${escAttr(n.name_zh)}')" class="text-xs bg-red-500/20 hover:bg-red-500/30 text-red-400 px-2.5 py-1 rounded">刪除</button>
         </div>
       </div>
@@ -617,10 +626,11 @@ function showNationModal() {
   document.getElementById('nation-iso').value = '';
   document.getElementById('nation-reps').value = '';
   document.getElementById('nation-notes').value = '';
+  document.getElementById('nation-category').value = 'member';
   document.getElementById('nation-modal').classList.remove('hidden');
 }
 
-function editNation(id, nameZh, nameEn, iso, reps, notes, status) {
+function editNation(id, nameZh, nameEn, iso, reps, notes, category) {
   editingNationId = id;
   document.getElementById('nation-modal-title').textContent = '編輯會員國';
   document.getElementById('nation-name-zh').value = nameZh;
@@ -628,6 +638,7 @@ function editNation(id, nameZh, nameEn, iso, reps, notes, status) {
   document.getElementById('nation-iso').value = iso;
   document.getElementById('nation-reps').value = reps;
   document.getElementById('nation-notes').value = notes;
+  document.getElementById('nation-category').value = category || 'member';
   document.getElementById('nation-modal').classList.remove('hidden');
 }
 
@@ -644,12 +655,13 @@ async function saveNation() {
   const notes = document.getElementById('nation-notes').value.trim();
   if (!nameZh || !nameEn || !iso) { alert('國名（中英）和 ISO 代碼為必填'); return; }
   const reps = repsStr ? repsStr.split(',').map(s => s.trim()).filter(Boolean).slice(0, 3) : [];
+  const category = document.getElementById('nation-category').value;
   if (editingNationId) {
-    const r = await api(`/api/guilds/${currentGuild}/nations/${editingNationId}`, 'PUT', { name_zh: nameZh, name_en: nameEn, iso_code: iso, representatives: reps, notes: notes });
+    const r = await api(`/api/guilds/${currentGuild}/nations/${editingNationId}`, 'PUT', { name_zh: nameZh, name_en: nameEn, iso_code: iso, representatives: reps, notes: notes, category: category });
     if (r.error) { alert('儲存失敗：' + r.error); return; }
     showToast('✅ 會員國資料已更新！');
   } else {
-    const r = await api(`/api/guilds/${currentGuild}/nations`, 'POST', { name_zh: nameZh, name_en: nameEn, iso_code: iso, representatives: reps, notes: notes });
+    const r = await api(`/api/guilds/${currentGuild}/nations`, 'POST', { name_zh: nameZh, name_en: nameEn, iso_code: iso, representatives: reps, notes: notes, category: category });
     if (r.error) { alert('註冊失敗：' + r.error); return; }
     showToast('✅ 會員國註冊成功！');
   }

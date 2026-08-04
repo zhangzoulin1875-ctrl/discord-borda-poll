@@ -174,7 +174,7 @@ async def api_list_nations(request):
             "representative_names": e.get("representative_names", []),
             "registered_by_name": e.get("registered_by_name", ""),
             "registered_date": e.get("registered_date", ""),
-            "status": e.get("status", "active"),
+            "category": e.get("category", "member"),
             "notes": e.get("notes", ""),
         })
     return web.json_response(out)
@@ -198,12 +198,16 @@ async def api_create_nation(request):
     if len(iso_code) < 2 or len(iso_code) > 3:
         return web.json_response({"error": "ISO 代碼應為 2-3 碼"}, status=400)
 
-    # Check duplicate
+    cat = data.get("category", "member").strip().lower()
+    if cat not in ("member", "council", "observer", "removed"):
+        cat = "member"
+
+    # Check duplicate (excluding 已除籍)
     existing = [
         e for e in _member_nations["entries"]
         if e.get("guild_id") == gid
         and e.get("iso_code", "").upper() == iso_code
-        and e.get("status") == "active"
+        and e.get("category") != "removed"
     ]
     if existing:
         return web.json_response({"error": f"ISO 代碼 {iso_code} 已被註冊"}, status=409)
@@ -215,12 +219,12 @@ async def api_create_nation(request):
         "name_zh": name_zh,
         "name_en": name_en,
         "iso_code": iso_code,
+        "category": cat,
         "representatives": [int(r) for r in reps[:3]],
         "representative_names": [],
         "registered_by": user.get("user_id", 0),
         "registered_by_name": user.get("username", ""),
         "registered_date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-        "status": "active",
         "notes": notes,
     }
     _member_nations["entries"].append(entry)
@@ -252,8 +256,10 @@ async def api_update_nation(request):
         entry["iso_code"] = data["iso_code"].strip().upper()
     if "representatives" in data:
         entry["representatives"] = [int(r) for r in data["representatives"][:3]]
-    if "status" in data:
-        entry["status"] = data["status"]
+    if "category" in data:
+        cat = data["category"].strip().lower()
+        if cat in ("member", "council", "observer", "removed"):
+            entry["category"] = cat
     if "notes" in data:
         entry["notes"] = data["notes"].strip()
 
@@ -9591,6 +9597,33 @@ def load_member_nations():
 class MemberNationGroup(app_commands.Group):
     """會員國註冊與管理指令群組"""
 
+    # 四個類別
+    CATEGORIES = {
+        "成員國": "member",
+        "理事國": "council",
+        "觀察國": "observer",
+        "已除籍": "removed",
+    }
+    # 反向映射（英文 -> 中文）
+    CATEGORY_LABELS = {
+        "member": "成員國",
+        "council": "理事國",
+        "observer": "觀察國",
+        "removed": "已除籍",
+    }
+    CATEGORY_EMOJI = {
+        "member": "🟢",
+        "council": "🔵",
+        "observer": "🟡",
+        "removed": "⚫",
+    }
+    CATEGORY_COLOR = {
+        "member": discord.Color.green(),
+        "council": discord.Color.blue(),
+        "observer": discord.Color.gold(),
+        "removed": discord.Color.dark_gray(),
+    }
+
     def __init__(self):
         super().__init__(name="nation", description="會員國註冊與管理")
 
@@ -9599,17 +9632,24 @@ class MemberNationGroup(app_commands.Group):
         name_zh="國名（中文）",
         name_en="國名（英文）",
         iso_code="ISO-3166 國家代碼（如 TW、JP、US，2-3碼）",
+        category="會員國類別：成員國 / 理事國 / 觀察國",
         rep1="第一位派駐代表（@用戶）",
         rep2="第二位派駐代表（選填）",
         rep3="第三位派駐代表（選填）",
     )
+    @app_commands.choices(category=[
+        app_commands.Choice(name="成員國", value="member"),
+        app_commands.Choice(name="理事國", value="council"),
+        app_commands.Choice(name="觀察國", value="observer"),
+    ])
     async def register(
         self,
         interaction: discord.Interaction,
         name_zh: str,
         name_en: str,
         iso_code: str,
-        rep1: discord.Member,
+        category: app_commands.Choice[str] = None,
+        rep1: discord.Member = None,
         rep2: discord.Member = None,
         rep3: discord.Member = None,
     ):
@@ -9631,6 +9671,8 @@ class MemberNationGroup(app_commands.Group):
             await interaction.response.send_message("❌ ISO 代碼應為 2-3 碼英文字母（如 TW、USA）。", ephemeral=True)
             return
 
+        cat_value = category.value if category else "member"
+
         # Collect representatives (deduplicate, max 3)
         reps_input = [rep1, rep2, rep3]
         seen_ids = set()
@@ -9642,17 +9684,13 @@ class MemberNationGroup(app_commands.Group):
                 rep_ids.append(r.id)
                 rep_names.append(r.display_name)
 
-        if not rep_ids:
-            await interaction.response.send_message("❌ 至少需要指定一位派駐代表。", ephemeral=True)
-            return
-
-        # Check for duplicate ISO code in same guild
+        # Check for duplicate ISO code in same guild (excluding 已除籍)
         guild_id = interaction.guild_id
         existing = [
             e for e in _member_nations["entries"]
             if e.get("guild_id") == guild_id
             and e.get("iso_code", "").upper() == iso_code
-            and e.get("status") == "active"
+            and e.get("category") != "removed"
         ]
         if existing:
             await interaction.response.send_message(
@@ -9668,54 +9706,86 @@ class MemberNationGroup(app_commands.Group):
             "name_zh": name_zh,
             "name_en": name_en,
             "iso_code": iso_code,
+            "category": cat_value,
             "representatives": rep_ids,
             "representative_names": rep_names,  # for display, updated on load
             "registered_by": interaction.user.id,
             "registered_by_name": interaction.user.display_name,
             "registered_date": interaction.created_at.strftime("%Y-%m-%d %H:%M"),
-            "status": "active",
             "notes": "",
         }
 
         _member_nations["entries"].append(entry)
         save_member_nations()
 
+        cat_label = self.CATEGORY_LABELS.get(cat_value, "成員國")
+        cat_emoji = self.CATEGORY_EMOJI.get(cat_value, "🟢")
+        cat_color = self.CATEGORY_COLOR.get(cat_value, discord.Color.green())
+
         # Build confirmation embed
         embed = discord.Embed(
-            title=f"🌍 會員國註冊成功",
-            color=discord.Color.green(),
+            title=f"{cat_emoji} 會員國註冊成功",
+            color=cat_color,
         )
         embed.add_field(name="國名", value=f"{name_zh}（{name_en}）", inline=False)
         embed.add_field(name="ISO 代碼", value=f"`{iso_code}`", inline=True)
-        rep_mentions = " ".join(f"<@{rid}>" for rid in rep_ids)
+        embed.add_field(name="類別", value=f"{cat_emoji} {cat_label}", inline=True)
+        rep_mentions = " ".join(f"<@{rid}>" for rid in rep_ids) if rep_ids else "未指定"
         embed.add_field(name="派駐代表", value=rep_mentions, inline=False)
         embed.set_footer(text=f"由 {interaction.user.display_name} 註冊")
         embed.timestamp = interaction.created_at
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="list", description="列出所有已註冊的會員國")
-    async def list_nations(self, interaction: discord.Interaction):
+    @app_commands.command(name="list", description="列出所有會員國（可依類別篩選）")
+    @app_commands.describe(category="可選擇只看某個類別")
+    @app_commands.choices(category=[
+        app_commands.Choice(name="成員國", value="member"),
+        app_commands.Choice(name="理事國", value="council"),
+        app_commands.Choice(name="觀察國", value="observer"),
+        app_commands.Choice(name="已除籍", value="removed"),
+    ])
+    async def list_nations(self, interaction: discord.Interaction, category: app_commands.Choice[str] = None):
         guild_id = interaction.guildId if hasattr(interaction, 'guildId') else interaction.guild_id
         entries = [e for e in _member_nations["entries"] if e.get("guild_id") == guild_id]
 
+        if category:
+            cat_val = category.value
+            entries = [e for e in entries if e.get("category", "member") == cat_val]
+            filter_label = f"（{self.CATEGORY_LABELS.get(cat_val, cat_val)}）"
+        else:
+            filter_label = ""
+
         if not entries:
-            await interaction.response.send_message("📋 目前沒有已註冊的會員國。")
+            await interaction.response.send_message(f"📋 目前沒有符合條件的會員國{filter_label}。")
             return
 
+        # Sort by category order: member, council, observer, removed
+        cat_order = {"member": 0, "council": 1, "observer": 2, "removed": 3}
+        entries.sort(key=lambda e: cat_order.get(e.get("category", "member"), 99))
+
         embed = discord.Embed(
-            title="🌍 會員國一覽",
+            title=f"🌍 會員國一覽{filter_label}",
             color=discord.Color.blue(),
         )
         for e in entries:
-            status_emoji = "✅" if e.get("status") == "active" else "⚫"
+            cat = e.get("category", "member")
+            cat_emoji = self.CATEGORY_EMOJI.get(cat, "🟢")
+            cat_label = self.CATEGORY_LABELS.get(cat, "成員國")
             reps = " ".join(f"<@{rid}>" for rid in e.get("representatives", []))
             embed.add_field(
-                name=f"{status_emoji} {e['name_zh']}（{e['name_en']}）",
-                value=f"ISO: `{e['iso_code']}`\n代表：{reps or '未指定'}\n註冊日期：{e.get('registered_date', '未知')}",
+                name=f"{cat_emoji} {e['name_zh']}（{e['name_en']}）",
+                value=f"類別：{cat_emoji} {cat_label}\nISO：`{e['iso_code']}`\n代表：{reps or '未指定'}\n註冊日期：{e.get('registered_date', '未知')}",
                 inline=False,
             )
-        embed.set_footer(text=f"共 {len(entries)} 個會員國")
+
+        # Summary counts
+        counts = {}
+        for e in entries:
+            c = e.get("category", "member")
+            counts[c] = counts.get(c, 0) + 1
+        summary_parts = [f"{self.CATEGORY_EMOJI.get(c,'')} {self.CATEGORY_LABELS.get(c,c)} {n}" for c, n in counts.items()]
+        embed.set_footer(text=f"共 {len(entries)} 個會員國｜{'  '.join(summary_parts)}")
 
         await interaction.response.send_message(embed=embed)
 
@@ -9735,18 +9805,76 @@ class MemberNationGroup(app_commands.Group):
             await interaction.response.send_message(f"❌ 找不到 ISO 代碼為 `{iso_code}` 的會員國。", ephemeral=True)
             return
 
+        cat = entry.get("category", "member")
+        cat_emoji = self.CATEGORY_EMOJI.get(cat, "🟢")
+        cat_label = self.CATEGORY_LABELS.get(cat, "成員國")
+        cat_color = self.CATEGORY_COLOR.get(cat, discord.Color.green())
+
         embed = discord.Embed(
-            title=f"🌍 {entry['name_zh']}（{entry['name_en']}）",
-            color=discord.Color.gold(),
+            title=f"{cat_emoji} {entry['name_zh']}（{entry['name_en']}）",
+            color=cat_color,
         )
         embed.add_field(name="ISO 代碼", value=f"`{entry['iso_code']}`", inline=True)
-        embed.add_field(name="狀態", value="✅ 活躍" if entry.get("status") == "active" else "⚫ 停用", inline=True)
+        embed.add_field(name="類別", value=f"{cat_emoji} {cat_label}", inline=True)
         reps = " ".join(f"<@{rid}>" for rid in entry.get("representatives", []))
         embed.add_field(name="派駐代表", value=reps or "未指定", inline=False)
         embed.add_field(name="註冊者", value=f"{entry.get('registered_by_name', '未知')}", inline=True)
         embed.add_field(name="註冊日期", value=entry.get("registered_date", "未知"), inline=True)
         if entry.get("notes"):
             embed.add_field(name="備註", value=entry["notes"][:1024], inline=False)
+        embed.timestamp = interaction.created_at
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="recategorize", description="變更會員國的類別")
+    @app_commands.describe(
+        iso_code="ISO-3166 國家代碼",
+        category="新類別：成員國 / 理事國 / 觀察國 / 已除籍",
+    )
+    @app_commands.choices(category=[
+        app_commands.Choice(name="成員國", value="member"),
+        app_commands.Choice(name="理事國", value="council"),
+        app_commands.Choice(name="觀察國", value="observer"),
+        app_commands.Choice(name="已除籍", value="removed"),
+    ])
+    async def recategorize(self, interaction: discord.Interaction, iso_code: str, category: app_commands.Choice[str]):
+        if not is_owner(interaction):
+            perms = interaction.user.guild_permissions
+            if not (perms.administrator or perms.manage_guild):
+                await interaction.response.send_message("❌ 此指令需要管理員權限。", ephemeral=True)
+                return
+
+        iso_code = iso_code.strip().upper()
+        guild_id = interaction.guildId if hasattr(interaction, 'guildId') else interaction.guild_id
+        entry = next(
+            (e for e in _member_nations["entries"]
+             if e.get("guild_id") == guild_id
+             and e.get("iso_code", "").upper() == iso_code),
+            None,
+        )
+
+        if not entry:
+            await interaction.response.send_message(f"❌ 找不到 ISO 代碼為 `{iso_code}` 的會員國。", ephemeral=True)
+            return
+
+        old_cat = entry.get("category", "member")
+        new_cat = category.value
+        entry["category"] = new_cat
+        save_member_nations()
+
+        old_label = self.CATEGORY_LABELS.get(old_cat, old_cat)
+        new_label = self.CATEGORY_LABELS.get(new_cat, new_cat)
+        old_emoji = self.CATEGORY_EMOJI.get(old_cat, "🟢")
+        new_emoji = self.CATEGORY_EMOJI.get(new_cat, "🟢")
+
+        embed = discord.Embed(
+            title=f"🔄 類別變更成功",
+            color=self.CATEGORY_COLOR.get(new_cat, discord.Color.green()),
+        )
+        embed.add_field(name="國名", value=f"{entry['name_zh']}（{entry['name_en']}）", inline=False)
+        embed.add_field(name="ISO 代碼", value=f"`{entry['iso_code']}`", inline=True)
+        embed.add_field(name="變更", value=f"{old_emoji} {old_label} → {new_emoji} {new_label}", inline=False)
+        embed.set_footer(text=f"由 {interaction.user.display_name} 變更")
         embed.timestamp = interaction.created_at
 
         await interaction.response.send_message(embed=embed)
