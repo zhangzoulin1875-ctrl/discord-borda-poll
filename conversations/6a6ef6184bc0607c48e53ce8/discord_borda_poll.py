@@ -4487,6 +4487,7 @@ async def on_thread_create(thread):
             print(f"⚠️ 論壇貼文提案處理失敗：{e}")
 
 
+@bot.event
 async def on_message(message):
     global _last_global_reply
 
