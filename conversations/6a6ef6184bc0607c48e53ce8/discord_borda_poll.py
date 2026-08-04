@@ -4907,7 +4907,9 @@ async def setup_hook():
     load_feedback()
     load_proposal_settings()
     load_application_settings()
+    save_application_settings()  # Create file if not exists (ensures Drive sync)
     load_applications()
+    save_applications()  # Create file if not exists (ensures Drive sync)
     load_proposals()
     # Load local files (will use Drive-downloaded data if available)
     load_polls_from_disk()
@@ -5011,15 +5013,12 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
     # Check if we already have an entry for this message
     msg_id = str(after.id)
     existing = [a for a in _applications.get("entries", []) if a.get("message_id") == msg_id]
-    if not existing:
-        # Not a tracked application — ignore
-        return
-
-    entry = existing[0]
-    # Only re-check if not yet sent to secretariat, or if it was sent but
-    # we want to re-validate (status is still pending)
-    if entry.get("status") in ("accepted", "rejected"):
-        return  # Already reviewed, don't re-process
+    if existing:
+        entry = existing[0]
+        # Only re-check if not yet sent to reviewer, or if it was sent but
+        # we want to re-validate (status is still pending)
+        if entry.get("status") in ("accepted", "rejected"):
+            return  # Already reviewed, don't re-process
 
     print(f"📝 偵測到入盟申請編輯：msg {msg_id} by {after.author.display_name}")
 
