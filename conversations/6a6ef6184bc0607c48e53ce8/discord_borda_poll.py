@@ -10607,7 +10607,7 @@ async def ai_refine_loop():
     """Background task: every N minutes, cross-reference channel messages
     with micropedia articles, extract useful knowledge, save to database,
     and post a summary in the configured channel."""
-    global _refine_last_run
+    global _refine_last_run, ai_refined_knowledge
     await asyncio.sleep(90)  # Wait for bot to be fully ready
     while True:
         try:
