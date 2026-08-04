@@ -250,7 +250,7 @@
         <h2 class="text-xl font-bold">🌐 全局百科掃描 — 關係譜圖</h2>
       </div>
       <div class="flex gap-2">
-        <button id="scan-start-btn" onclick="startGlobalScan()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">🚀 掃描說明</button>
+        <button id="scan-start-btn" onclick="startGlobalScan()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">🚀 開始掃描</button>
         <button id="scan-refresh-btn" onclick="loadScanResult()" class="bg-[#4e5058] hover:bg-[#3a3c43] px-4 py-2 rounded-lg text-sm font-semibold">🔄 重新載入</button>
       </div>
     </div>
@@ -737,10 +737,27 @@ async function deleteNation(id, name) {
 }
 
 // ── Global Scan / Relationship Graph ──
-let scanPollTimer = null;
+// ── Global Scan / Relationship Graph (Browser-based crawler) ──
+const WIKI_API = "https://www.micropedia.site/api.php";
+const WIKI_SKIP = ["特殊:", "File:", "Category:", "Template:", "Help:", "MediaWiki:", "Module:"];
+let scanRunning = false;
+
+function cleanWikitext(text) {
+  text = text.replace(/\{\{[^}]*\}\}/g, "");
+  text = text.replace(/\[\[([^\]]*?)\|([^\]]*)\]\]/g, "$2");
+  text = text.replace(/\[\[([^\]]*)\]\]/g, "$1");
+  text = text.replace(/\[https?:\/\/\S+\s+([^\]]*)\]/g, "$1");
+  text = text.replace(/\[https?:\/\/\S+\]/g, "");
+  text = text.replace(/<[^>]+>/g, "");
+  text = text.replace(/\{\|.*?\|\}/gs, "");
+  text = text.replace(/^=+\s*(.*?)\s*=+$/gm, "$1");
+  text = text.replace(/^[\*#:]+\s*/gm, "");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
 
 async function showScanPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('scan-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('scan');
@@ -748,43 +765,49 @@ async function showScanPanel() {
   await loadScanResult();
 }
 
-async function startGlobalScan() {
-  if (!currentGuild) { alert('請先選擇伺服器'); navigate('guilds'); return; }
-  const renderUrl = window.location.origin;
-  const cmd = `python scan_runner.py --url ${renderUrl} --guild ${currentGuild}`;
-  alert(
-    '🔒 全局掃描已改為本地執行模式\n\n' +
-    'Render 的 CPU/RAM 不足以爬取全部百科條目。\n' +
-    '請在你自己的電腦上執行以下指令：\n\n' +
-    '1. 下載 scan_runner.py（從 GitHub repo）\n' +
-    '2. pip install aiohttp\n' +
-    '3. 執行:\n' +
-    cmd + '\n\n' +
-    '掃描完成後，結果會自動上傳到這裡。\n' +
-    '此頁面會即時顯示進度（每 5 秒更新）。'
-  );
-  // Start polling for progress even though we didn't start it locally
-  startScanPolling();
+async function fetchAllWikiTitles() {
+  const titles = [];
+  let apfrom = "";
+  for (let i = 0; i < 50; i++) {
+    let url = `${WIKI_API}?action=query&list=allpages&aplimit=500&format=json&origin=*`;
+    if (apfrom) url += `&apfrom=${encodeURIComponent(apfrom)}`;
+    const resp = await fetch(url);
+    if (!resp.ok) { console.warn("allpages API:", resp.status); break; }
+    const data = await resp.json();
+    const pages = (data.query && data.query.allpages) || [];
+    titles.push(...pages.map(p => p.title));
+    document.getElementById('scan-status-detail').textContent = `\u53d6\u5f97\u689d\u76ee\u6e05\u55ae\u4e2d... \u5df2\u53d6\u5f97 ${titles.length} \u500b`;
+    const cont = (data.continue && data.continue.apcontinue) || "";
+    if (!cont) break;
+    apfrom = cont;
+  }
+  return titles.filter(t => !WIKI_SKIP.some(p => t.startsWith(p)));
 }
 
-function startScanPolling() {
-  if (scanPollTimer) clearInterval(scanPollTimer);
-  scanPollTimer = setInterval(async () => {
-    await loadScanStatus();
-    const status = document.getElementById('scan-status-text').textContent;
-    if (status.includes('完成') || status.includes('錯誤') || status.includes('failed') || status.includes('error')) {
-      clearInterval(scanPollTimer);
-      scanPollTimer = null;
-      await loadScanResult();
+async function fetchWikiBatch(titles) {
+  const titlesParam = titles.map(encodeURIComponent).join("|");
+  const url = `${WIKI_API}?action=query&titles=${titlesParam}&prop=revisions&rvprop=content&format=json&redirects=1&origin=*`;
+  const resp = await fetch(url);
+  if (!resp.ok) { console.warn("batch fetch:", resp.status); return []; }
+  const data = await resp.json();
+  const pages = (data.query && data.query.pages) || {};
+  const articles = [];
+  for (const [pid, page] of Object.entries(pages)) {
+    if (pid === "-1" || page.missing) continue;
+    const revs = page.revisions || [];
+    if (!revs.length) continue;
+    const wikitext = (revs[0]["*"] || "");
+    if (!wikitext || wikitext.length < 10) continue;
+    let clean = cleanWikitext(wikitext);
+    if (clean && clean.length > 10) {
+      if (clean.length > 2000) clean = clean.slice(0, 2000) + "...";
+      articles.push({ title: page.title || "?", content: clean });
     }
-  }, 5000);
+  }
+  return articles;
 }
 
-async function loadScanStatus() {
-  if (!currentGuild) return;
-  const data = await api(`/api/guilds/${currentGuild}/global-scan/status`);
-  if (data.error) return;
-  const status = data.status || 'idle';
+function updateScanUI(phase, msg, progress, total) {
   const icon = document.getElementById('scan-status-icon');
   const text = document.getElementById('scan-status-text');
   const detail = document.getElementById('scan-status-detail');
@@ -792,44 +815,151 @@ async function loadScanStatus() {
   const progBarBg = document.getElementById('scan-progress-bar-bg');
   const progBar = document.getElementById('scan-progress-bar');
   const startBtn = document.getElementById('scan-start-btn');
+  const tabs = document.getElementById('scan-tabs');
 
-  if (status === 'running') {
-    icon.textContent = '🔄';
-    text.textContent = '掃描中...';
-    detail.textContent = data.current_batch || '處理中...';
-    const pct = data.total > 0 ? Math.round(data.progress / data.total * 100) : 0;
-    progText.textContent = `${data.progress} / ${data.total} 條目 (${pct}%)`;
+  if (phase === 'done') { icon.textContent = '\u2705'; text.textContent = '\u6383\u63cf\u5b8c\u6210'; startBtn.disabled = false; startBtn.classList.remove('opacity-50'); tabs.classList.remove('hidden'); }
+  else if (phase === 'finishing') { icon.textContent = '\u23f3'; text.textContent = '\u6700\u7d48\u5f59\u6574\u4e2d...'; startBtn.disabled = true; startBtn.classList.add('opacity-50'); }
+  else if (phase === 'scanning' || phase === 'fetching') { icon.textContent = '\ud83d\udd04'; text.textContent = phase === 'fetching' ? '\u53d6\u5f97\u689d\u76ee\u4e2d...' : '\u700f\u89bd\u5668\u722c\u53d6 + AI \u5206\u6790\u4e2d...'; startBtn.disabled = true; startBtn.classList.add('opacity-50'); }
+  else { icon.textContent = '\u26ab'; text.textContent = '\u5c1a\u672a\u958b\u59cb'; startBtn.disabled = false; startBtn.classList.remove('opacity-50'); }
+
+  detail.textContent = msg || '';
+  if (total > 0) {
     progBarBg.classList.remove('hidden');
-    progBar.style.width = pct + '%';
-    startBtn.disabled = true;
-    startBtn.classList.add('opacity-50');
-    if (!scanPollTimer) startScanPolling();
-  } else if (status === 'completed') {
-    icon.textContent = '✅';
-    text.textContent = '掃描完成';
-    detail.textContent = `開始：${data.started_at || '?'} · 完成：${data.completed_at || '?'}`;
+    const p = Math.min(100, Math.round(progress / total * 100));
+    progBar.style.width = p + '%';
+    progText.textContent = `${progress} / ${total} \u689d\u76ee (${p}%)`;
+  } else {
     progBarBg.classList.add('hidden');
     progText.textContent = '';
-    startBtn.disabled = false;
-    startBtn.classList.remove('opacity-50');
+  }
+}
+
+async function startGlobalScan() {
+  if (!currentGuild) { alert('\u8acb\u5148\u9078\u64c7\u4f3a\u670d\u5668'); navigate('guilds'); return; }
+  if (scanRunning) { alert('\u6383\u63cf\u6b63\u5728\u9032\u884c\u4e2d'); return; }
+  if (!confirm('\u958b\u59cb\u5168\u5c40\u767e\u79d1\u6383\u63cf\uff1f\n\n\u700f\u89bd\u5668\u6703\u722c\u53d6 micropedia.site \u5168\u90e8\u689d\u76ee\uff0c\u5206\u6279\u9001\u7d66 AI \u5206\u6790\u3002\n\u8acb\u4fdd\u6301\u6b64\u5206\u9801\u958b\u555f\u76f4\u5230\u6383\u63cf\u5b8c\u6210\u3002\n\uff08\u8996\u689d\u76ee\u6578\u91cf\u53ef\u80fd\u9700\u8981 10-30 \u5206\u9418\uff09')) return;
+
+  scanRunning = true;
+  const batchSize = 8;
+  const maxConcurrent = 3;
+  const startTime = Date.now();
+
+  try {
+    // Phase 1: Fetch all titles
+    updateScanUI('fetching', '\u6b63\u5728\u53d6\u5f97\u689d\u76ee\u6e05\u55ae...', 0, 0);
+    const titles = await fetchAllWikiTitles();
+    if (!titles.length) { alert('\u627e\u4e0d\u5230\u4efb\u4f55\u689d\u76ee'); updateScanUI('idle', '', 0, 0); return; }
+
+    const total = titles.length;
+    const batches = [];
+    for (let i = 0; i < total; i += batchSize) batches.push(titles.slice(i, i + batchSize));
+    const batchCount = batches.length;
+
+    // Phase 2: Init on Render
+    updateScanUI('fetching', `\u5171 ${total} \u7bc7\u689d\u76ee\uff0c\u5206 ${batchCount} \u6279\u3002\u521d\u59cb\u5316\u4e2d...`, 0, total);
+    const initR = await api(`/api/guilds/${currentGuild}/global-scan/init`, 'POST', { total });
+    if (initR.error) { alert('\u521d\u59cb\u5316\u5931\u6557\uff1a' + initR.error); updateScanUI('idle', '', 0, 0); return; }
+
+    // Phase 3: Pipeline
+    updateScanUI('scanning', `\u958b\u59cb\u722c\u53d6 + AI \u5206\u6790\uff08${maxConcurrent} \u6279\u4e26\u767c\uff09...`, 0, total);
+    let done = 0, sent = 0, extractedTotal = 0, nextIdx = 0;
+
+    async function processOne() {
+      while (nextIdx < batches.length) {
+        const myIdx = nextIdx++;
+        const batch = batches[myIdx];
+
+        const articles = await fetchWikiBatch(batch);
+        if (!articles.length) {
+          done++;
+          updateScanUI('scanning', `\u6279\u6b21 ${done}/${batchCount} \u8df3\u904e\uff08\u7121\u5167\u5bb9\uff09`, sent, total);
+          continue;
+        }
+
+        const titlesPreview = articles.slice(0, 3).map(a => a.title).join(', ');
+        updateScanUI('scanning', `\u6279\u6b21 ${done + 1}/${batchCount}: ${titlesPreview}...`, sent, total);
+
+        const result = await api(`/api/guilds/${currentGuild}/global-scan/batch`, 'POST', {
+          articles, batch_idx: myIdx, batch_count: batchCount
+        });
+
+        done++;
+        sent += articles.length;
+
+        if (result && !result.error) {
+          extractedTotal += (result.extracted_count || 0);
+        }
+
+        const elapsed = (Date.now() - startTime) / 1000;
+        const eta = elapsed / done * (batchCount - done);
+        updateScanUI('scanning',
+          `\u2714 \u6279\u6b21 ${done}/${batchCount} \u2014 \u63d0\u53d6 ${result && result.extracted_count || 0} \u9805 | \u5df2\u7528 ${elapsed.toFixed(0)}s | \u5269\u9918 ${eta.toFixed(0)}s`,
+          sent, total);
+      }
+    }
+
+    const workers = [];
+    for (let i = 0; i < Math.min(maxConcurrent, batches.length); i++) workers.push(processOne());
+    await Promise.all(workers);
+
+    // Phase 4: Final consolidation
+    updateScanUI('finishing', '\u5168\u90e8\u6279\u6b21\u5b8c\u6210\uff0cAI \u6b63\u5728\u505a\u6700\u7d48\u5f59\u6574...', sent, total);
+    const finishR = await api(`/api/guilds/${currentGuild}/global-scan/finish`, 'POST', {});
+    if (finishR.error) { alert('\u5f59\u6574\u5931\u6557\uff1a' + finishR.error); }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    updateScanUI('done', `\u5b8c\u6210\uff01\u5171\u6383\u63cf ${total} \u7bc7\uff0c\u7528\u6642 ${elapsed}s`, sent, total);
+    await loadScanResult();
+    showToast(`\u2705 \u6383\u63cf\u5b8c\u6210\uff01\u57ce\u5821 ${finishR.countries||'?'} \u00b7 \u95dc\u4fc2 ${finishR.relationships||'?'} \u00b7 \u4eba\u7269 ${finishR.key_figures||'?'} \u00b7 \u4e8b\u4ef6 ${finishR.major_events||'?'}`);
+
+  } catch (e) {
+    console.error('Scan error:', e);
+    updateScanUI('idle', '\u6383\u63cf\u5931\u6557\uff1a' + (e.message || e), 0, 0);
+    alert('\u6383\u63cf\u5931\u6557\uff1a' + (e.message || e));
+  } finally {
+    scanRunning = false;
+  }
+}
+
+async function loadScanStatus() {
+  if (!currentGuild) return;
+  const data = await api(`/api/guilds/${currentGuild}/global-scan/status`);
+  if (data.error) return;
+  const status = data.status || 'idle';
+  if (status === 'running' && !scanRunning) {
+    document.getElementById('scan-status-icon').textContent = '\ud83d\udd04';
+    document.getElementById('scan-status-text').textContent = '\u6383\u63cf\u4e2d...';
+    document.getElementById('scan-status-detail').textContent = data.current_batch || '\u8655\u7406\u4e2d...';
+    const pct = data.total > 0 ? Math.round(data.progress / data.total * 100) : 0;
+    document.getElementById('scan-progress-text').textContent = `${data.progress} / ${data.total} \u689d\u76ee (${pct}%)`;
+    document.getElementById('scan-progress-bar-bg').classList.remove('hidden');
+    document.getElementById('scan-progress-bar').style.width = pct + '%';
+    document.getElementById('scan-start-btn').disabled = true;
+    document.getElementById('scan-start-btn').classList.add('opacity-50');
+  } else if (status === 'completed') {
+    document.getElementById('scan-status-icon').textContent = '\u2705';
+    document.getElementById('scan-status-text').textContent = '\u6383\u63cf\u5b8c\u6210';
+    document.getElementById('scan-status-detail').textContent = `\u958b\u59cb\uff1a${data.started_at || '?'} \u00b7 \u5b8c\u6210\uff1a${data.completed_at || '?'}`;
+    document.getElementById('scan-progress-text').textContent = '';
+    document.getElementById('scan-progress-bar-bg').classList.add('hidden');
+    document.getElementById('scan-start-btn').disabled = false;
+    document.getElementById('scan-start-btn').classList.remove('opacity-50');
     document.getElementById('scan-tabs').classList.remove('hidden');
   } else if (status === 'error') {
-    icon.textContent = '❌';
-    text.textContent = '掃描失敗';
-    detail.textContent = data.error || '未知錯誤';
-    progBarBg.classList.add('hidden');
-    progText.textContent = '';
-    startBtn.disabled = false;
-    startBtn.classList.remove('opacity-50');
+    document.getElementById('scan-status-icon').textContent = '\u274c';
+    document.getElementById('scan-status-text').textContent = '\u6383\u63cf\u5931\u6557';
+    document.getElementById('scan-status-detail').textContent = data.error || '\u672a\u77e5\u932f\u8aa4';
+    document.getElementById('scan-progress-bar-bg').classList.add('hidden');
+    document.getElementById('scan-start-btn').disabled = false;
+    document.getElementById('scan-start-btn').classList.remove('opacity-50');
   } else {
-    icon.textContent = '⚪';
-    text.textContent = '尚未開始';
-    detail.textContent = '點擊「開始掃描」讀取百科全部條目並建立關係譜圖';
-    progBarBg.classList.add('hidden');
-    progText.textContent = '';
-    startBtn.disabled = false;
-    startBtn.classList.remove('opacity-50');
-    document.getElementById('scan-tabs').classList.add('hidden');
+    document.getElementById('scan-status-icon').textContent = '\u26aa';
+    document.getElementById('scan-status-text').textContent = '\u5c1a\u672a\u958b\u59cb';
+    document.getElementById('scan-status-detail').textContent = '\u9ede\u64ca\u300c\ud83d\ude80 \u958b\u59cb\u6383\u63cf\u300d\u7531\u700f\u89bd\u5668\u722c\u53d6\u767e\u79d1\u5168\u90e8\u689d\u76ee\u4e26\u5efa\u7acb\u95dc\u4fc2\u8b5c\u5716';
+    document.getElementById('scan-progress-text').textContent = '';
+    document.getElementById('scan-progress-bar-bg').classList.add('hidden');
+    document.getElementById('scan-start-btn').disabled = false;
+    document.getElementById('scan-start-btn').classList.remove('opacity-50');
   }
 }
 
@@ -842,58 +972,55 @@ async function loadScanResult() {
   const figures = data.key_figures || [];
   const events = data.major_events || [];
 
-  // Countries
   const countriesDiv = document.getElementById('scan-countries');
   if (!countries.length) {
-    countriesDiv.innerHTML = '<p class="text-gray-400 text-sm">尚無資料。請先執行掃描。</p>';
+    countriesDiv.innerHTML = '<p class="text-gray-400 text-sm">\u5c1a\u7121\u8cc7\u6599\u3002\u8acb\u5148\u57f7\u884c\u6383\u63cf\u3002</p>';
   } else {
-    const typeMap = {micronation:'🏳️',organization:'🏛️',individual:'👤'};
-    const statusMap = {active:'🟢',dissolved:'🔴',unknown:'⚪'};
+    const typeMap = {micronation:'\ud83c\udff3\ufe0f',organization:'\ud83c\udfdb\ufe0f',individual:'\ud83d\udc64'};
+    const statusMap = {active:'\ud83d\udfe2',dissolved:'\ud83d\udd34',unknown:'\u26aa'};
     countriesDiv.innerHTML = countries.map(c => `
       <div class="bg-[#2b2d31] rounded-xl p-4">
         <div class="flex items-center gap-2 mb-1">
-          <span class="text-lg">${typeMap[c.type]||'📍'}</span>
+          <span class="text-lg">${typeMap[c.type]||'\ud83d\udccd'}</span>
           <h3 class="font-bold">${escHtml(c.name)}</h3>
-          <span class="text-xs">${statusMap[c.status]||'⚪'} ${escHtml(c.status||'unknown')}</span>
+          <span class="text-xs">${statusMap[c.status]||'\u26aa'} ${escHtml(c.status||'unknown')}</span>
         </div>
-        ${c.aliases && c.aliases.length ? `<div class="text-xs text-gray-400 mb-1">別名：${c.aliases.map(escHtml).join('、')}</div>` : ''}
+        ${c.aliases && c.aliases.length ? `<div class="text-xs text-gray-400 mb-1">\u5225\u540d\uff1a${c.aliases.map(escHtml).join('\u3001')}</div>` : ''}
         <div class="text-sm text-gray-300">${escHtml(c.description||'')}</div>
       </div>
     `).join('');
   }
 
-  // Relationships
   const relsDiv = document.getElementById('scan-relationships');
   if (!rels.length) {
-    relsDiv.innerHTML = '<p class="text-gray-400 text-sm">尚無關係資料。</p>';
+    relsDiv.innerHTML = '<p class="text-gray-400 text-sm">\u5c1a\u7121\u95dc\u4fc2\u8cc7\u6599\u3002</p>';
   } else {
     const typeColors = {alliance:'text-green-400',conflict:'text-red-400',treaty:'text-blue-400',trade:'text-yellow-400',diplomatic:'text-purple-400',cultural:'text-pink-400',personal:'text-gray-400'};
-    const typeIcons = {alliance:'🤝',conflict:'⚔️',treaty:'📑',trade:'💼',diplomatic:'🤵',cultural:'🎭',personal:'👤'};
+    const typeIcons = {alliance:'\ud83e\udd1d',conflict:'\u2694\ufe0f',treaty:'\ud83d\udcd3',trade:'\ud83d\udcbc',diplomatic:'\ud83e\udd35',cultural:'\ud83c\udfad',personal:'\ud83d\udc64'};
     relsDiv.innerHTML = rels.map(r => `
       <div class="bg-[#2b2d31] rounded-xl p-4">
         <div class="flex items-center gap-2 mb-1">
-          <span>${typeIcons[r.type]||'🔗'}</span>
+          <span>${typeIcons[r.type]||'\ud83d\udd17'}</span>
           <span class="font-semibold">${escHtml(r.from)}</span>
-          <span class="${typeColors[r.type]||'text-gray-400'} text-sm">→</span>
+          <span class="${typeColors[r.type]||'text-gray-400'} text-sm">\u2192</span>
           <span class="font-semibold">${escHtml(r.to)}</span>
           <span class="text-xs ${typeColors[r.type]||'text-gray-400'}">(${escHtml(r.type||'')})</span>
         </div>
         <div class="text-sm text-gray-300">${escHtml(r.description||'')}</div>
-        ${r.context ? `<div class="text-xs text-gray-500 mt-1">背景：${escHtml(r.context)}</div>` : ''}
-        <div class="text-xs text-gray-500 mt-1">狀態：${escHtml(r.status||'')}</div>
+        ${r.context ? `<div class="text-xs text-gray-500 mt-1">\u80cc\u666f\uff1a${escHtml(r.context)}</div>` : ''}
+        <div class="text-xs text-gray-500 mt-1">\u72c0\u614b\uff1a${escHtml(r.status||'')}</div>
       </div>
     `).join('');
   }
 
-  // Key Figures
   const figuresDiv = document.getElementById('scan-figures');
   if (!figures.length) {
-    figuresDiv.innerHTML = '<p class="text-gray-400 text-sm">尚無人物資料。</p>';
+    figuresDiv.innerHTML = '<p class="text-gray-400 text-sm">\u5c1a\u7121\u4eba\u7269\u8cc7\u6599\u3002</p>';
   } else {
     figuresDiv.innerHTML = figures.map(f => `
       <div class="bg-[#2b2d31] rounded-xl p-4">
         <div class="flex items-center gap-2 mb-1">
-          <span class="text-lg">👤</span>
+          <span class="text-lg">\ud83d\udc64</span>
           <h3 class="font-bold">${escHtml(f.name)}</h3>
           ${f.affiliation ? `<span class="text-xs text-gray-400">(${escHtml(f.affiliation)})</span>` : ''}
         </div>
@@ -903,26 +1030,24 @@ async function loadScanResult() {
     `).join('');
   }
 
-  // Events
   const eventsDiv = document.getElementById('scan-events');
   if (!events.length) {
-    eventsDiv.innerHTML = '<p class="text-gray-400 text-sm">尚無事件資料。</p>';
+    eventsDiv.innerHTML = '<p class="text-gray-400 text-sm">\u5c1a\u7121\u4e8b\u4ef6\u8cc7\u6599\u3002</p>';
   } else {
     eventsDiv.innerHTML = events.map(e => `
       <div class="bg-[#2b2d31] rounded-xl p-4">
         <div class="flex items-center gap-2 mb-1">
-          <span class="text-lg">📜</span>
+          <span class="text-lg">\ud83d\udcdc</span>
           <h3 class="font-bold">${escHtml(e.event||'')}</h3>
           ${e.date ? `<span class="text-xs text-gray-400">${escHtml(e.date)}</span>` : ''}
         </div>
-        ${e.participants && e.participants.length ? `<div class="text-xs text-gray-500 mb-1">參與者：${e.participants.map(escHtml).join('、')}</div>` : ''}
+        ${e.participants && e.participants.length ? `<div class="text-xs text-gray-500 mb-1">\u53c3\u8207\u8005\uff1a${e.participants.map(escHtml).join('\u3001')}</div>` : ''}
         <div class="text-sm text-gray-300">${escHtml(e.description||'')}</div>
-        ${e.consequences ? `<div class="text-xs text-gray-400 mt-1 bg-[#1e1f22] rounded px-2 py-1">影響：${escHtml(e.consequences)}</div>` : ''}
+        ${e.consequences ? `<div class="text-xs text-gray-400 mt-1 bg-[#1e1f22] rounded px-2 py-1">\u5f71\u97ff\uff1a${escHtml(e.consequences)}</div>` : ''}
       </div>
     `).join('');
   }
 
-  // Show tabs if there's data
   if (countries.length || rels.length || figures.length || events.length) {
     document.getElementById('scan-tabs').classList.remove('hidden');
   }
