@@ -8974,12 +8974,26 @@ class BriefingGroup(app_commands.Group):
 # 國號評價 (Nation Name Rating)
 # ──────────────────────────────────────────────
 
-async def _rate_nation_name(nation_name: str, ai_settings: dict) -> dict:
+async def _rate_nation_name(nation_name: str, ai_settings: dict, nation_info: str = "", gov_info: str = "") -> dict:
     """Call the AI to rate a micronation name and return structured result.
     Returns {"score": float, "comment": str, "suggestions": str, "error": str?}."""
+    context_section = ""
+    if nation_info or gov_info:
+        context_section = "\n\n─── 創作者提供的背景資料 ───\n"
+        if nation_info:
+            context_section += f"【國情簡介】{nation_info}\n"
+        if gov_info:
+            context_section += f"【政體簡介】{gov_info}\n"
+        context_section += (
+            "以上是創作者自己對這個微國家的描述，請納入評分考量——"
+            "國號是否與其設定的國情/政體調性一致、是否有效傳達其理念。"
+            "這些資料是加分參考（幫助你理解名稱背後的脈絡），不是額外的評分項目。\n"
+        )
+
     prompt = (
         f"你是微國家社群的國號評鑑專家。請對以下國號進行評價。\n\n"
         f"國號：「{nation_name}」\n\n"
+        f"{context_section}"
         f"⚠️⚠️ 評分鐵則（極重要，違反此原則的評分視為無效）：\n"
         f"微國家（micronation）是個人或小群體基於理念、藝術創作、政治實驗、幽默諷刺、"
         f"角色扮演等目的自行成立的虛擬國家/組織，國號本來就常常刻意跳脫真實主權國家的"
@@ -9070,8 +9084,18 @@ class NationGroup(app_commands.Group):
     """微國家相關指令群組"""
 
     @app_commands.command(name="name_rate", description="評價微國家國號（1-10分 + AI評論 + 修改建議）")
-    @app_commands.describe(nation_name="要評價的國號名稱")
-    async def nation_name_rate(self, interaction: discord.Interaction, nation_name: str):
+    @app_commands.describe(
+        nation_name="要評價的國號名稱",
+        nation_info="（選填）國情簡介：這個微國家的背景、理念、文化等",
+        gov_info="（選填）政體簡介：政府體制、政治結構、運作方式等",
+    )
+    async def nation_name_rate(
+        self,
+        interaction: discord.Interaction,
+        nation_name: str,
+        nation_info: str = "",
+        gov_info: str = "",
+    ):
         await interaction.response.defer()  # public, not ephemeral
 
         nation_name = nation_name.strip()
@@ -9079,8 +9103,11 @@ class NationGroup(app_commands.Group):
             await interaction.followup.send("❌ 國號名稱無效（請輸入 1-100 字）。")
             return
 
+        nation_info = nation_info.strip()[:500]
+        gov_info = gov_info.strip()[:500]
+
         # Use the briefing AI settings (more reliable than the chat AI settings)
-        result = await _rate_nation_name(nation_name, ai_settings)
+        result = await _rate_nation_name(nation_name, ai_settings, nation_info, gov_info)
 
         if "error" in result:
             await interaction.followup.send(f"❌ 評價失敗：{result['error']}")
