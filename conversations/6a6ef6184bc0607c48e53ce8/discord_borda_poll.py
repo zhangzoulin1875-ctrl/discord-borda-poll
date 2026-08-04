@@ -1282,15 +1282,19 @@ def _compute_dynamic_refine_interval() -> int:
     """Compute the effective refine interval in seconds based on:
     - Current API call rate (calls/min)
     - Knowledge base fullness
+    - Recent yield (consecutive cycles producing no new knowledge)
 
     Rules:
     - High traffic (>20 calls/min): slow down to 15 min
     - Medium traffic (10-20 calls/min): 5 min
-    - Low traffic (<10 calls/min): speed up to 1 min (minimum)
+    - Low traffic (<10 calls/min): may speed up, but the user's base
+      interval is a CEILING for the "normal" case — we only shorten it
+      moderately (down to half, floor 2 min), never collapse to a fixed
+      60s regardless of what the user configured.
     - Knowledge base full (>90%): slow down to 60 min regardless of traffic
-    - User-set interval_minutes acts as the BASELINE; dynamic adjustments
-      only push the interval UP (never below the user's setting unless
-      traffic is very low and the user explicitly set a low interval).
+    - If recent cycles kept coming back empty/duplicate (no real knowledge
+      produced), back off further — no point burning API calls every
+      minute when the well is dry.
     """
     base_minutes = ai_refine_settings.get("interval_minutes", 5)
     base_secs = base_minutes * 60
@@ -1310,8 +1314,18 @@ def _compute_dynamic_refine_interval() -> int:
         # Medium traffic — moderate pace
         dynamic = max(base_secs, 300)  # at least 5 min
     else:
-        # Low traffic — allow speeding up, but not below 1 min
-        dynamic = max(60, min(base_secs, 60))
+        # Low traffic — speed up moderately, but respect the user's base
+        # setting as a ceiling: at most half the base interval, with an
+        # absolute floor of 2 minutes (never hammer every 60s).
+        dynamic = max(120, base_secs // 2)
+
+    # Back off if recent cycles kept yielding nothing (duplicate/empty).
+    # Prevents wasting API calls every cycle when there's simply nothing
+    # new left to extract right now.
+    if _refine_empty_streak >= 5:
+        dynamic = max(dynamic, 1200)  # at least 20 min
+    elif _refine_empty_streak >= 3:
+        dynamic = max(dynamic, 600)  # at least 10 min
 
     return dynamic
 
@@ -7175,6 +7189,8 @@ class SystemGroup(app_commands.Group):
         lines.append(f"知識庫：{knowledge_count}/{max_entries} ({kb_ratio:.0%})")
         lines.append(f"  ├─ 高可信度（百科來源）：{high_count} 條")
         lines.append(f"  └─ 低可信度（閒聊來源）：{low_count} 條（不會注入 AI 上下文）")
+        if _refine_empty_streak > 0:
+            lines.append(f"⚠️ 連續空手：{_refine_empty_streak} 次（找不到新知識，已觸發退避）")
         if ch_id:
             lines.append(f"發布頻道：<#{ch_id}> (`{ch_id}`)")
         else:
@@ -8062,6 +8078,7 @@ ai_refine_settings = {
 }
 ai_refined_knowledge = []  # [{date, source, topic, summary, details}]
 _refine_last_run = 0  # 上次精煉的時間戳
+_refine_empty_streak = 0  # 連續空手（無新知識）的次數，用於動態退避
 
 def save_refine_settings():
     _save_json_file(REFINE_SETTINGS_FILE, ai_refine_settings, indent=None)
@@ -10778,7 +10795,7 @@ async def ai_refine_loop():
     """Background task: every N minutes, cross-reference channel messages
     with micropedia articles, extract useful knowledge, save to database,
     and post a summary in the configured channel."""
-    global _refine_last_run, ai_refined_knowledge
+    global _refine_last_run, ai_refined_knowledge, _refine_empty_streak
     await asyncio.sleep(90)  # Wait for bot to be fully ready
     while True:
         try:
@@ -10852,6 +10869,7 @@ async def ai_refine_loop():
 
             if not wiki_text:
                 print("🔍 AI精煉: 沒有可用的百科資料，跳過")
+                _refine_empty_streak += 1
                 await asyncio.sleep(20)
                 continue
 
@@ -10866,14 +10884,16 @@ async def ai_refine_loop():
                 print(f"🔍 AI精煉: AI 回傳空結果（可能百科內容不值得萃取）")
 
             if not knowledge or not knowledge.get("topic"):
-                print("🔍 AI精煉: 本次未萃取到有價值的知識")
+                print(f"🔍 AI精煉: 本次未萃取到有價值的知識（連續空手 {_refine_empty_streak + 1} 次）")
+                _refine_empty_streak += 1
                 await asyncio.sleep(20)
                 continue
 
             # Step 3: Check for duplicates (don't store the same topic twice)
             existing_topics = [k.get("topic", "") for k in ai_refined_knowledge]
             if knowledge["topic"] in existing_topics:
-                print(f"🔍 AI精煉: 主題「{knowledge['topic']}」已存在，跳過")
+                print(f"🔍 AI精煉: 主題「{knowledge['topic']}」已存在，跳過（連續空手 {_refine_empty_streak + 1} 次）")
+                _refine_empty_streak += 1
                 await asyncio.sleep(20)
                 continue
 
@@ -10892,6 +10912,7 @@ async def ai_refine_loop():
                 ai_refined_knowledge = ai_refined_knowledge[-max_entries:]
             save_refine_knowledge()
             print(f"🔍 AI精煉: 已儲存知識「{knowledge['topic']}」 (累計 {len(ai_refined_knowledge)} 條)")
+            _refine_empty_streak = 0  # Reset backoff — we found something new
 
             # Step 5: Post in the designated channel
             await _ai_refine_post_to_channel(channel, entry)
