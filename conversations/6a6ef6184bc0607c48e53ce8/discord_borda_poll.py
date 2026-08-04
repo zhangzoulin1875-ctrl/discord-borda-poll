@@ -568,10 +568,14 @@ async def api_global_scan_batch(request):
         _global_scan_state["batch_count"] = batch_idx + 1
         _global_scan_result["last_updated"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
 
-        # Consolidation every 10 batches
-        if (batch_idx + 1) % 10 == 0:
-            await _consolidate_global_scan_graph()
-
+        # NOTE: intra-scan consolidation removed — with high concurrency (many
+        # batches in flight at once) an every-N-batches full-graph consolidation
+        # would (a) resend an ever-growing accumulated dataset as context on
+        # every trigger, getting slower as the scan progresses, and (b) stall
+        # whichever concurrent request happens to hit the trigger index for
+        # however long that consolidation takes. A single consolidation pass
+        # at /finish (after all batches land) achieves the same end result
+        # without this per-batch tax. See api_global_scan_finish.
         _save_global_scan_result()
         return web.json_response({
             "status": "ok",

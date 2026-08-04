@@ -837,11 +837,11 @@ function updateScanUI(phase, msg, progress, total) {
 async function startGlobalScan() {
   if (!currentGuild) { alert('\u8acb\u5148\u9078\u64c7\u4f3a\u670d\u5668'); navigate('guilds'); return; }
   if (scanRunning) { alert('\u6383\u63cf\u6b63\u5728\u9032\u884c\u4e2d'); return; }
-  if (!confirm('\u958b\u59cb\u5168\u5c40\u767e\u79d1\u6383\u63cf\uff1f\n\n\u700f\u89bd\u5668\u6703\u722c\u53d6 micropedia.site \u5168\u90e8\u689d\u76ee\uff0c\u5206\u6279\u9001\u7d66 AI \u5206\u6790\u3002\n\u8acb\u4fdd\u6301\u6b64\u5206\u9801\u958b\u555f\u76f4\u5230\u6383\u63cf\u5b8c\u6210\u3002\n\uff08\u8996\u689d\u76ee\u6578\u91cf\u53ef\u80fd\u9700\u8981 10-30 \u5206\u9418\uff09')) return;
+  if (!confirm('\u958b\u59cb\u5168\u5c40\u767e\u79d1\u6383\u63cf\uff1f\n\n\u700f\u89bd\u5668\u6703\u722c\u53d6 micropedia.site \u5168\u90e8\u689d\u76ee\uff0c\u5206\u6279\u9001\u7d66 AI \u5206\u6790\u3002\n\u8acb\u4fdd\u6301\u6b64\u5206\u9801\u958b\u555f\u76f4\u5230\u6383\u63cf\u5b8c\u6210\u3002\n\uff08\u5df2\u5927\u5e45\u63d0\u9ad8\u4e26\u767c\u6578\uff0c\u9810\u4f30\u53ef\u572820\u5206\u9418\u5167\u5b8c\u6210\uff09')) return;
 
   scanRunning = true;
   const batchSize = 8;
-  const maxConcurrent = 3;
+  const maxConcurrent = 80; // AI 後端無併發限制，大幅拉高以在短時間內跑完全部批次
   const startTime = Date.now();
 
   try {
@@ -864,7 +864,11 @@ async function startGlobalScan() {
     updateScanUI('scanning', `\u958b\u59cb\u722c\u53d6 + AI \u5206\u6790\uff08${maxConcurrent} \u6279\u4e26\u767c\uff09...`, 0, total);
     let done = 0, sent = 0, extractedTotal = 0, nextIdx = 0;
 
-    async function processOne() {
+    // 每個 worker 錯開啟動（間隔 ~120ms），避免瞬間對 micropedia.site 打出
+    // maxConcurrent 個同時請求造成過大突發流量；穩態時因為 AI 分析耗時遠大於
+    // wiki 抓取耗時，實際同時打 micropedia 的請求數會自然收斂到很低。
+    async function processOne(workerIdx) {
+      await new Promise(r => setTimeout(r, workerIdx * 120));
       while (nextIdx < batches.length) {
         const myIdx = nextIdx++;
         const batch = batches[myIdx];
@@ -872,12 +876,8 @@ async function startGlobalScan() {
         const articles = await fetchWikiBatch(batch);
         if (!articles.length) {
           done++;
-          updateScanUI('scanning', `\u6279\u6b21 ${done}/${batchCount} \u8df3\u904e\uff08\u7121\u5167\u5bb9\uff09`, sent, total);
           continue;
         }
-
-        const titlesPreview = articles.slice(0, 3).map(a => a.title).join(', ');
-        updateScanUI('scanning', `\u6279\u6b21 ${done + 1}/${batchCount}: ${titlesPreview}...`, sent, total);
 
         const result = await api(`/api/guilds/${currentGuild}/global-scan/batch`, 'POST', {
           articles, batch_idx: myIdx, batch_count: batchCount
@@ -891,15 +891,16 @@ async function startGlobalScan() {
         }
 
         const elapsed = (Date.now() - startTime) / 1000;
-        const eta = elapsed / done * (batchCount - done);
+        const eta = done > 0 ? (elapsed / done * (batchCount - done)) : 0;
         updateScanUI('scanning',
-          `\u2714 \u6279\u6b21 ${done}/${batchCount} \u2014 \u63d0\u53d6 ${result && result.extracted_count || 0} \u9805 | \u5df2\u7528 ${elapsed.toFixed(0)}s | \u5269\u9918 ${eta.toFixed(0)}s`,
+          `\u5df2\u5b8c\u6210 ${done}/${batchCount} \u6279\uff08${maxConcurrent} \u6279\u4e26\u767c\uff09\u2014 \u5df2\u63d0\u53d6 ${extractedTotal} \u9805 | \u5df2\u7528 ${elapsed.toFixed(0)}s | \u9810\u4f30\u5269\u9918 ${eta.toFixed(0)}s`,
           sent, total);
       }
     }
 
     const workers = [];
-    for (let i = 0; i < Math.min(maxConcurrent, batches.length); i++) workers.push(processOne());
+    const workerCount = Math.min(maxConcurrent, batches.length);
+    for (let i = 0; i < workerCount; i++) workers.push(processOne(i));
     await Promise.all(workers);
 
     // Phase 4: Final consolidation
