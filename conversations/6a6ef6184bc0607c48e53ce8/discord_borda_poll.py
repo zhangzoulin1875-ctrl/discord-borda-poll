@@ -1274,6 +1274,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             return resp.status, error_text
 
         content_parts = []
+        reasoning_parts = []  # diagnostic only — see note below
         tool_calls_acc = {}  # index -> {id, name, arguments}
         finish_reason = None
         _first_chunk_time = None
@@ -1307,6 +1308,15 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                 # Accumulate content
                 if "content" in delta and delta["content"]:
                     content_parts.append(delta["content"])
+                # Some "reasoning" models (e.g. nvidia/nemotron, deepseek-r1
+                # style APIs) stream chain-of-thought under a separate
+                # `reasoning_content` field instead of `content`. We deliberately
+                # do NOT treat this as the actual answer (too unstructured to
+                # safely surface to users) — just capture it so we can tell,
+                # when `content` ends up empty, whether the model "thought but
+                # never answered" vs. produced literally nothing at all.
+                if "reasoning_content" in delta and delta["reasoning_content"]:
+                    reasoning_parts.append(delta["reasoning_content"])
                 # Accumulate tool_calls (they come as deltas across chunks)
                 if "tool_calls" in delta:
                     for tc in delta["tool_calls"]:
@@ -1355,109 +1365,154 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         body = json_module.dumps(body_dict)
         _elapsed = _first_chunk_time - _time.time() if _first_chunk_time else 0
         _total_chars = sum(len(p) for p in content_parts)
-        print(f"📦 串流完成：{_chunk_count} chunks, content={_total_chars} chars, tool_calls={len(tool_calls_acc)}")
+        _reasoning_chars = sum(len(p) for p in reasoning_parts)
+        print(f"📦 串流完成：{_chunk_count} chunks, content={_total_chars} chars, reasoning={_reasoning_chars} chars, tool_calls={len(tool_calls_acc)}")
+        if _total_chars == 0 and _reasoning_chars > 0:
+            print(f"⚠️ 模型只輸出了 reasoning_content（思考過程）但最終 content 完全空白——"
+                  f"這是模型/API 本身「只想不答」，不是我們的串流解析漏抓")
         return 200, body
 
-    payload = {
-        "model": settings.get("model", "gpt-4o-mini"),
-        "messages": messages,
-        "temperature": 0.7,
-        # Default kept low (300) for normal quick chat replies. Callers that
-        # need longer structured output (name rating, daily/weekly briefings,
-        # etc.) should pass a higher max_tokens explicitly — otherwise
-        # reasoning-style models (e.g. nvidia/nemotron) can burn the entire
-        # budget on internal "The user wants me to..." preamble before ever
-        # reaching the actual requested format, causing silent truncation.
-        "max_tokens": max_tokens,
-        "stream_options": {"include_usage": True},
-    }
-    if use_tools:
-        payload["tools"] = use_tools
-        payload["tool_choice"] = "auto"
-
-    # When trying with tools, use a SHORTER timeout (12s) — if the endpoint
-    # hangs on the tools param (common with non-OpenAI proxies), we fail fast
-    # and retry without tools at the normal timeout, instead of burning 30s.
-    ok = False
-    data = None
-    _t0 = _time.time()
-    try:
-        status, body_text = await _post(payload)
-        print(f"⏱️ call_chat_api: _post 耗時 {_time.time()-_t0:.1f}s (status={status}, tools={'yes' if use_tools else 'no'})")
-    except (asyncio.TimeoutError, Exception) as e:
+    async def _attempt():
+        """One full attempt: streaming call, with fallbacks for endpoints
+        that don't support streaming or don't support `tools`. Raises on
+        unrecoverable failure; otherwise returns the assistant message dict
+        (which may legitimately have empty content — the outer retry loop
+        decides whether that's worth retrying)."""
+        payload = {
+            "model": settings.get("model", "gpt-4o-mini"),
+            "messages": messages,
+            "temperature": 0.7,
+            # Default kept low (300) for normal quick chat replies. Callers that
+            # need longer structured output (name rating, daily/weekly briefings,
+            # etc.) should pass a higher max_tokens explicitly — otherwise
+            # reasoning-style models (e.g. nvidia/nemotron) can burn the entire
+            # budget on internal "The user wants me to..." preamble before ever
+            # reaching the actual requested format, causing silent truncation.
+            "max_tokens": max_tokens,
+            "stream_options": {"include_usage": True},
+        }
         if use_tools:
-            # The endpoint HUNG on the tools param (didn't return an error,
-            # just sat there until our timeout fired). Mark it as unsupported
-            # and retry immediately WITHOUT tools at the normal timeout.
-            print(f"⚠️ Chat AI 端點帶 tools 參數逾時/錯誤（{type(e).__name__}: {e}），判定不支援 tools，立即重試...")
+            payload["tools"] = use_tools
+            payload["tool_choice"] = "auto"
+
+        ok = False
+        data = None
+        status = None
+        body_text = ""
+        _t0 = _time.time()
+        try:
+            status, body_text = await _post(payload)
+            print(f"⏱️ call_chat_api: _post 耗時 {_time.time()-_t0:.1f}s (status={status}, tools={'yes' if use_tools else 'no'})")
+        except (asyncio.TimeoutError, Exception) as e:
+            if use_tools:
+                # The endpoint HUNG on the tools param (didn't return an error,
+                # just sat there until our timeout fired). Mark it as unsupported
+                # and retry immediately WITHOUT tools at the normal timeout.
+                print(f"⚠️ Chat AI 端點帶 tools 參數逾時/錯誤（{type(e).__name__}: {e}），判定不支援 tools，立即重試...")
+                _tools_unsupported_apis.add(api_url)
+                save_tools_unsupported()
+                payload.pop("tools", None)
+                payload.pop("tool_choice", None)
+                status, body_text = await _post(payload)
+            else:
+                raise
+
+        if status == 200:
+            try:
+                data = json_module.loads(body_text)
+                if "choices" in data:
+                    # Check if streaming returned empty content — either the
+                    # API doesn't support streaming (returned a regular JSON
+                    # response _read_stream couldn't parse as SSE), OR the
+                    # model itself genuinely produced no answer this time
+                    # (finish_reason=stop with hollow content — a known
+                    # intermittent quirk on some free/weak reasoning-model
+                    # endpoints, not something a non-streaming retry fixes,
+                    # but worth trying since some endpoints DO behave
+                    # differently between the two modes).
+                    _msg = data["choices"][0].get("message", {})
+                    _content = _msg.get("content", "")
+                    _tc = _msg.get("tool_calls")
+                    if not _content and not _tc:
+                        print(f"⚠️ 串流回應為空（可能是 API 不支援 streaming，或本次回應本身就是空的），回退為非串流模式重試...")
+                        payload_ns = dict(payload)
+                        payload_ns.pop("stream", None)
+                        t2 = aiohttp.ClientTimeout(total=300, connect=15, sock_read=120)
+                        async with aiohttp.ClientSession() as sess:
+                            async with sess.post(api_url, json=payload_ns, headers=headers, timeout=t2) as resp2:
+                                if resp2.status == 200:
+                                    body_text = await resp2.text()
+                                    data = json_module.loads(body_text)
+                                    if "choices" in data:
+                                        ok = True
+                                        if use_tools:
+                                            _tools_supported_apis.add(api_url)
+                                            save_tools_supported()
+                                        _fb_content = data["choices"][0].get("message", {}).get("content", "")
+                                        if _fb_content:
+                                            print(f"✅ 非串流回退成功，取得 {len(_fb_content)} chars")
+                                        else:
+                                            print(f"⚠️ 非串流回退回應仍是空的（確認是 API/模型本身沒答案，非串流解析問題）")
+                                else:
+                                    print(f"⚠️ 非串流回退也失敗：status={resp2.status}")
+                    else:
+                        ok = True
+                        if use_tools:
+                            _tools_supported_apis.add(api_url)
+                            save_tools_supported()
+            except Exception as e:
+                print(f"⚠️ 解析回應失敗：{e}")
+
+        if not ok and use_tools:
+            # Endpoint returned a non-200 or malformed response WITH tools —
+            # assume it doesn't support function calling and never try again.
+            print(f"⚠️ Chat AI 端點帶 tools 參數呼叫失敗（status={status}），之後略過 tools：{body_text[:200]}")
             _tools_unsupported_apis.add(api_url)
             save_tools_unsupported()
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
             status, body_text = await _post(payload)
-        else:
-            raise
+            if status == 200:
+                try:
+                    data = json_module.loads(body_text)
+                    ok = "choices" in data
+                except Exception:
+                    ok = False
 
-    if status == 200:
+        if not ok:
+            raise Exception(f"Chat AI API returned {status}: {body_text[:300]}")
+
+        _track_token_usage(data)
+        return data["choices"][0]["message"]
+
+    # ── Retry once on a hollow result ──
+    # Two real failure modes show up in production with free/weak API
+    # endpoints (e.g. nvidia/nemotron): (1) a transient connection hiccup
+    # that raises an exception, and (2) a 200 response with
+    # finish_reason=stop but a completely empty message — no content, no
+    # tool_calls. The latter is sampling noise from the model, not a
+    # permanent error (a fresh request with the same prompt often just
+    # works), so it's worth one automatic retry before giving up.
+    last_exc = None
+    msg = None
+    for _attempt_i in range(2):
         try:
-            data = json_module.loads(body_text)
-            if "choices" in data:
-                # Check if streaming returned empty content — API may not
-                # support streaming and returned a regular JSON response that
-                # _read_stream couldn't parse as SSE chunks.
-                _msg = data["choices"][0].get("message", {})
-                _content = _msg.get("content", "")
-                _tc = _msg.get("tool_calls")
-                if not _content and not _tc:
-                    print(f"⚠️ 串流回應為空（API 可能不支援 streaming），回退為非串流模式重試...")
-                    payload_ns = {k: v for k, v in payload.items() if k != "stream"}
-                    # Actually we need to rebuild without stream=True
-                    payload_ns = dict(payload)
-                    payload_ns.pop("stream", None)
-                    t2 = aiohttp.ClientTimeout(total=300, connect=15, sock_read=120)
-                    async with aiohttp.ClientSession() as sess:
-                        async with sess.post(api_url, json=payload_ns, headers=headers, timeout=t2) as resp2:
-                            if resp2.status == 200:
-                                body_text = await resp2.text()
-                                data = json_module.loads(body_text)
-                                if "choices" in data:
-                                    ok = True
-                                    if use_tools:
-                                        _tools_supported_apis.add(api_url)
-                                        save_tools_supported()
-                                    print(f"✅ 非串流回退成功")
-                            else:
-                                print(f"⚠️ 非串流回退也失敗：status={resp2.status}")
-                else:
-                    ok = True
-                    if use_tools:
-                        _tools_supported_apis.add(api_url)
-                        save_tools_supported()
+            msg = await _attempt()
         except Exception as e:
-            print(f"⚠️ 解析回應失敗：{e}")
-
-    if not ok and use_tools:
-        # Endpoint returned a non-200 or malformed response WITH tools —
-        # assume it doesn't support function calling and never try again.
-        print(f"⚠️ Chat AI 端點帶 tools 參數呼叫失敗（status={status}），之後略過 tools：{body_text[:200]}")
-        _tools_unsupported_apis.add(api_url)
-        save_tools_unsupported()
-        payload.pop("tools", None)
-        payload.pop("tool_choice", None)
-        status, body_text = await _post(payload)
-        if status == 200:
-            try:
-                data = json_module.loads(body_text)
-                ok = "choices" in data
-            except Exception:
-                ok = False
-
-    if not ok:
-        raise Exception(f"Chat AI API returned {status}: {body_text[:300]}")
-
-    _track_token_usage(data)
-
-    return data["choices"][0]["message"]
+            last_exc = e
+            if _attempt_i == 0:
+                print(f"⚠️ Chat AI 呼叫失敗（{e}），重試一次...")
+                continue
+            raise
+        if not msg.get("content") and not msg.get("tool_calls") and _attempt_i == 0:
+            print(f"⚠️ AI 回應為空（finish_reason=stop 但沒有實際內容），重試一次...")
+            continue
+        return msg
+    # Unreachable in practice (the loop above always returns or raises),
+    # but keep a safety net.
+    if last_exc:
+        raise last_exc
+    return msg
 
 
 # ──────────────────────────────────────────────
@@ -8977,9 +9032,13 @@ async def _rate_nation_name(nation_name: str, ai_settings: dict) -> dict:
 
         return {"score": score, "comment": comment, "suggestions": suggestions}
     except asyncio.TimeoutError:
-        return {"error": "AI 回應逾時"}
+        return {"error": "AI 回應逾時，請稍後再試一次"}
     except Exception as e:
-        return {"error": str(e)}
+        # call_chat_api already retries once internally on a hollow/failed
+        # response — if we're still here, both attempts failed. Show a
+        # friendly message instead of the raw API error dump.
+        print(f"⚠️ 國號評價 AI 呼叫失敗：{e}")
+        return {"error": "AI 暫時沒有給出有效回覆，可能是評鑑模型當下比較忙，稍後再試一次應該就能過"}
 
 
 class NationGroup(app_commands.Group):
