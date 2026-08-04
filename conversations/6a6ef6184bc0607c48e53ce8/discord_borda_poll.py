@@ -3630,6 +3630,128 @@ _MICROPEDIA_TOOL_SCHEMA = {
 }
 
 
+async def _web_search(query: str) -> str:
+    """Search the web using Wikipedia (zh+en) + DuckDuckGo.
+    Returns combined text results — no API keys needed, all endpoints are
+    free and HTTPS-accessible from Render."""
+    results = []
+    _ws_timeout = aiohttp.ClientTimeout(total=10, connect=5)
+    _ws_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            # 1. Wikipedia (Chinese first, then English)
+            for lang in ["zh", "en"]:
+                try:
+                    search_url = (
+                        f"https://{lang}.wikipedia.org/w/api.php?action=query"
+                        f"&list=search&srsearch={urllib.parse.quote(query)}"
+                        f"&format=json&utf8=1&srlimit=3"
+                    )
+                    async with session.get(search_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        search_results = data.get("query", {}).get("search", [])
+                        if not search_results:
+                            continue
+                        page_ids = "|".join(str(r["pageid"]) for r in search_results[:3])
+                        extract_url = (
+                            f"https://{lang}.wikipedia.org/w/api.php?action=query"
+                            f"&prop=extracts&exintro=1&explaintext=1&format=json"
+                            f"&exchars=800&pageids={page_ids}"
+                        )
+                        async with session.get(extract_url, headers=_ws_headers, timeout=_ws_timeout) as resp2:
+                            if resp2.status != 200:
+                                continue
+                            ext_data = await resp2.json()
+                            pages = ext_data.get("query", {}).get("pages", {})
+                            for pid, page in pages.items():
+                                title = page.get("title", "")
+                                extract = page.get("extract", "")
+                                if extract and len(extract) > 30:
+                                    results.append(f"📖 維基百科({lang})：{title}\n{extract[:600]}")
+                                    break  # one result per language
+                except Exception as e:
+                    print(f"⚠️ web_search Wikipedia({lang}) 例外：{e}")
+
+            # 2. DuckDuckGo Instant Answer API
+            try:
+                ddg_url = (
+                    f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}"
+                    f"&format=json&no_html=1&skip_disambig=1"
+                )
+                async with session.get(ddg_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        abstract = data.get("Abstract", "")
+                        if abstract:
+                            results.append(f"🔍 {abstract[:500]}")
+                        related = data.get("RelatedTopics", [])
+                        for r in related[:3]:
+                            if isinstance(r, dict) and r.get("Text"):
+                                results.append(f"🔍 {r['Text'][:300]}")
+            except Exception as e:
+                print(f"⚠️ web_search DDG API 例外：{e}")
+
+            # 3. DuckDuckGo HTML fallback (for queries the API doesn't answer well)
+            if len(results) < 2:
+                try:
+                    ddg_html_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+                    async with session.get(ddg_html_url, headers=_ws_headers, timeout=_ws_timeout) as resp:
+                        if resp.status == 200:
+                            html = await resp.text()
+                            # DDG HTML: results in <a class="result__a" ...>title</a>
+                            # and <a class="result__snippet" ...>snippet</a>
+                            snippets = re.findall(
+                                r'class="result__snippet"[^>]*>(.*?)</a>',
+                                html, re.DOTALL
+                            )
+                            titles = re.findall(
+                                r'class="result__a"[^>]*>(.*?)</a>',
+                                html, re.DOTALL
+                            )
+                            for i in range(min(len(titles), len(snippets), 5)):
+                                clean_title = re.sub(r'<[^>]+>', '', titles[i]).strip()
+                                clean_snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip()
+                                if clean_snippet and len(clean_snippet) > 20:
+                                    results.append(f"🌐 {clean_title}：{clean_snippet[:300]}")
+                except Exception as e:
+                    print(f"⚠️ web_search DDG HTML 例外：{e}")
+    except Exception as e:
+        print(f"⚠️ web_search 整體例外：{e}")
+
+    return "\n\n".join(results[:6]) if results else ""
+
+
+_WEB_SEARCH_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "搜尋網際網路，取得即時、最新的資訊。用於："
+            "（1）你不確定的事實，（2）你可能認為「不存在」「沒發生過」的事，"
+            "（3）涉及時事、新聞、近期事件、或你的訓練資料可能過時的問題，"
+            "（4）任何需要查證而非憑記憶回答的問題。"
+            "⚠️ 當你準備說「這不存在」「這沒發生過」「這不是真的」「沒有這個」時，"
+            "必須先呼叫這個工具確認，不要憑訓練資料直接否定。"
+            "可以用英文或中文搜尋，視問題性質決定。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜尋關鍵字，用你認為最可能找到答案的詞。可以用中文或英文。"
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
 
 
 def _fix_emoji_shortcodes(text: str, guild) -> str:
@@ -3801,6 +3923,22 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
 
     # Build system prompt with memory — STRICTLY scoped to current user
     system_prompt = settings["system_prompt"]
+
+    # ── 注入即時日期時間 ──
+    # The AI's training data has a cutoff and it has no internal clock — it
+    # will hallucinate dates ("今天是2024年...") or claim "還沒發生" for
+    # events that happened after its cutoff. Inject the real current time
+    # so it never needs to guess.
+    _now = datetime.now(GMT8)
+    _weekday_cn = ["一", "二", "三", "四", "五", "六", "日"][_now.weekday()]
+    system_prompt += (
+        f"\n\n─── 即時時間 ───\n"
+        f"現在時間：{_now.strftime('%Y年%m月%d日')}（星期{_weekday_cn}）"
+        f" {_now.strftime('%H:%M')}，GMT+8 台灣時間。"
+        f"你的訓練資料有截止日期，可能不知道最近發生的事。"
+        f"遇到你不確定、或認為「沒發生過」「不存在」的事，"
+        f"請使用 web_search 工具上網查證，不要憑訓練資料直接否定。"
+    )
 
     # Inject server context (channels, roles, emojis, members, current user identity)
     if message.guild:
@@ -4041,6 +4179,9 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"如果查詢的關鍵字找不到結果，試試看換成更短的核心詞再查一次"
             f"（這個 wiki 的搜尋不支援中文斷詞，完整片語常常查不到，但拆開的核心詞可以）。"
             f"如果自動比對和你的查詢都找不到資料，才誠實告知使用者你沒有找到相關資料。"
+            f"\n⚠️ 工具優先級：微國家相關的問題先用 search_micropedia；"
+            f"真實世界的事實、新聞、時事、或你認為「不存在/沒發生過」的事，"
+            f"用 web_search 上網查證。兩者可以同時呼叫。"
         )
 
     # ── search_discord AUTO context injection ──
@@ -4171,15 +4312,20 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
 
     tools = []
     _search_discord_available = False
+    _web_search_available = False
     if tools_ok:
         if micropedia_enabled:
             tools.append(_MICROPEDIA_TOOL_SCHEMA)
         tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)
+        tools.append(_WEB_SEARCH_TOOL_SCHEMA)
         _search_discord_available = True
-    elif micropedia_enabled and not _tools_unsup and not _tools_supported:
-        # Endpoint not yet tested — send micropedia tool only (known to work
-        # in the past) but NOT search_discord (new, might slow things down).
-        tools.append(_MICROPEDIA_TOOL_SCHEMA)
+        _web_search_available = True
+    elif not _tools_unsup and not _tools_supported:
+        # Endpoint not yet tested — send safe read-only tools
+        if micropedia_enabled:
+            tools.append(_MICROPEDIA_TOOL_SCHEMA)
+        tools.append(_WEB_SEARCH_TOOL_SCHEMA)
+        _web_search_available = True
     tools = tools if tools else None
 
     # Only add search_discord instructions to system prompt when the tool
@@ -4225,6 +4371,24 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"例如搜尋結果顯示「了千勾當選第三任秘書長，8月4日上任」，"
             f"你應該回答類似：「剛看到公告，新秘書長是了千勾，8/4正式上任喔」"
             f"這種自然口語，而不是把整段搜尋結果貼上去。"
+        )
+
+    # ── web_search 工具說明 ──
+    if _web_search_available:
+        system_prompt += (
+            f"\n\n─── web_search 工具（搜尋網際網路）───\n"
+            f"你有一個 web_search 工具，可以搜尋網際網路（維基百科 + DuckDuckGo），"
+            f"取得即時、最新的資訊。\n\n"
+            f"⚠️ 強制使用規則（必須遵守）：\n"
+            f"1. 當你準備回答「這不存在」「沒這回事」「沒發生過」「不是真的」「沒有這個國家/組織/事件」"
+            f"之類的否定結論時，必須先呼叫 web_search 查證。你的訓練資料有截止日期，"
+            f"很多你認為「不存在」的東西可能只是在你訓練截止後才出現的。\n"
+            f"2. 當你不確定某個事實、日期、事件是否屬實時，先查再答。\n"
+            f"3. 當使用者問到近期新聞、時事、或你的訓練資料可能過時的問題時，先查再答。\n"
+            f"4. 查到的結果用自然口語回答，不要貼搜尋結果原文。\n"
+            f"5. 可以用中文或英文搜尋，視問題性質決定。如果中文查不到，試試英文。\n"
+            f"6. 如果搜尋也查不到，才誠實說「網路上也找不到相關資訊」。\n"
+            f"寧可多查一次確認，也不要給出錯誤的否定結論。"
         )
 
     # ── 注入本人近期對話歷史（僅限本人，不含其他人的訊息）──
@@ -4291,6 +4455,18 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                 else:
                     result = "無法搜尋（沒有 guild 或搜尋詞為空）"
                 tool_content = result if result else "沒有找到相關訊息，試試看換一個不同的關鍵字。"
+            elif name == "web_search":
+                try:
+                    args = json_module.loads(fn.get("arguments") or "{}")
+                except Exception:
+                    args = {}
+                query = (args.get("query") or "").strip()
+                print(f"🔧 AI 呼叫 web_search('{query}')")
+                if query:
+                    result = await _web_search(query)
+                else:
+                    result = ""
+                tool_content = result if result else "網路搜尋沒有找到相關結果。可能這個詞太冷門或太新，試試看換一個更通用的關鍵字。"
             else:
                 tool_content = f"未知工具：{name}"
             msgs = msgs + [{
