@@ -4272,6 +4272,22 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             print(f"🔍 search_discord 自動比對錯誤：{e}")
             return ""
 
+    # Also run web_search in parallel for real-world questions — this means
+    # the AI gets internet search results WITHOUT needing to call the
+    # web_search tool, saving a full AI round-trip.
+    _need_web = len(clean_content) >= 6
+    async def _do_web():
+        if not _need_web:
+            return ""
+        try:
+            return await asyncio.wait_for(_web_search(clean_content[:200]), timeout=6)
+        except asyncio.TimeoutError:
+            print("🌐 web_search 自動搜尋逾時（>6s），跳過")
+            return ""
+        except Exception as e:
+            print(f"🌐 web_search 自動搜尋錯誤：{e}")
+            return ""
+
     _t_pre = _time.time()
     auto_context, _discord_auto, _web_auto = await asyncio.gather(
         _do_micropedia(), _do_discord(), _do_web()
@@ -4420,7 +4436,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # tools entirely → single AI round (saves a full 7-15s round-trip on slow
     # free APIs). Only offer tools when auto-context came up thin, meaning
     # the AI genuinely needs to search to answer well.
-    _context_rich = bool(auto_context and len(auto_context) > 400) or bool(_discord_auto and len(_discord_auto) > 400) or bool(_web_auto and len(_web_auto) > 200) or bool(_web_auto and len(_web_auto) > 200)
+    _context_rich = bool(auto_context and len(auto_context) > 400) or bool(_discord_auto and len(_discord_auto) > 400) or bool(_web_auto and len(_web_auto) > 200)
     if _context_rich:
         print(f"⚡ 快速路徑：自動注入已找到豐富資料（百科 {len(auto_context)} + Discord {len(_discord_auto)} chars），跳過工具呼叫，單輪 AI 回答")
 
