@@ -526,6 +526,11 @@ async def api_global_scan_batch(request):
             '【鐵律 — 絕對不可違反】\n'
             '1. 條目中提到的每一個人物、國家/組織、事件都必須收錄，不論看起來多不重要、只被提及一次、'
             '或只是配角。絕對不准因為「精簡」「統整」「篇幅」等理由省略任何一個人或國家或事件。\n'
+            '   【特別注意】有些人或國家在微國家百科中沒有自己的獨立條目，他們的資訊散落在'
+            '其他人的條目裡（例如張三的資料出現在李四的條目描述中）。即使如此，你仍然必須'
+            '為這些「只在別人條目中被提到」的人/國家/組織建立獨立的 countries 或 key_figures 條目，'
+            '把你在本批次條目中能找到的相關資訊都填進去。不准因為「他沒有自己的條目」就只在'
+            '別人的 description 裡順帶提及而不建獨立條目。\n'
             '2. 每個事件的描述要完整還原條目中的細節與背景，不要壓縮成一句話簡述。\n'
             '3. 對於人物，除了基本身份資訊外，務必仔細挖掘條目中提到的：'
             '恩怨、對立、私人衝突、爭議（disputes）——是跟誰、為什麼；'
@@ -624,6 +629,9 @@ async def api_global_scan_finish(request):
         return web.json_response({"error": "invalid api key"}, status=403)
     global _global_scan_state
     try:
+        # 1. Rescue orphan entities (those referenced but without standalone entries)
+        await _rescue_orphan_entities()
+        # 2. Build causal chains between events (additive only)
         await _link_event_causal_chains()
         _global_scan_state["status"] = "completed"
         _global_scan_state["completed_at"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M:%S")
@@ -7886,6 +7894,214 @@ async def _link_event_causal_chains():
     print(f"✨ 事件因果鏈分析完成，共處理 {processed_chunks} 個關聯群組（原始資料完全保留，僅新增因果標註）")
 
 
+async def _rescue_orphan_entities():
+    """Post-scan pass that finds entities referenced in relationships,
+    event participants, or figure affiliations but lacking their own
+    standalone country/figure entry — then builds proper entries for them
+    from whatever scattered mentions exist across the entire dataset.
+
+    This addresses the user's core complaint: some people/countries never
+    had their own micropedia article, so their info is fragmented across
+    many other articles' descriptions. The per-batch extraction already
+    tries to create entries for them (prompt rule #1), but if the AI
+    missed some — or if the entity was only mentioned obliquely (by an
+    alias, or embedded in a relationship's from/to without a matching
+    countries entry) — this pass catches them.
+
+    Algorithm:
+    1. Collect all names that appear as from/to in relationships,
+       participants in events, or affiliations in key_figures.
+    2. Check each against existing countries (by name+aliases) and
+       key_figures (by name). Any name not found = orphan.
+    3. For each orphan, gather every text fragment across the entire
+       dataset that mentions it (from descriptions, contexts,
+       consequences, disputes, anecdotes, event descriptions).
+    4. Chunk orphans (≤20 at a time) and send the gathered fragments
+       to AI with instructions to build standalone entries. Add the
+       results back via the same merge logic (additive only).
+    """
+    countries = _global_scan_result.get("countries", [])
+    relationships = _global_scan_result.get("relationships", [])
+    key_figures = _global_scan_result.get("key_figures", [])
+    major_events = _global_scan_result.get("major_events", [])
+
+    # Build name lookup sets (lowercased, including aliases)
+    country_names = set()
+    for c in countries:
+        if not isinstance(c, dict):
+            continue
+        n = c.get("name", "").strip().lower()
+        if n:
+            country_names.add(n)
+        for a in (c.get("aliases") or []):
+            country_names.add(str(a).strip().lower())
+
+    figure_names = set()
+    for f in key_figures:
+        if not isinstance(f, dict):
+            continue
+        n = f.get("name", "").strip().lower()
+        if n:
+            figure_names.add(n)
+
+    all_known = country_names | figure_names
+
+    # Collect all referenced names
+    referenced = set()
+    for r in relationships:
+        if not isinstance(r, dict):
+            continue
+        for field in ("from", "to"):
+            val = str(r.get(field, "")).strip().lower()
+            if val:
+                referenced.add(val)
+    for e in major_events:
+        if not isinstance(e, dict):
+            continue
+        for p in (e.get("participants") or []):
+            referenced.add(str(p).strip().lower())
+    for f in key_figures:
+        if not isinstance(f, dict):
+            continue
+        aff = str(f.get("affiliation", "")).strip().lower()
+        if aff:
+            referenced.add(aff)
+
+    # Orphans = referenced but not in any known entry
+    orphans = referenced - all_known
+    # Filter out generic/empty terms
+    _SKIP_ORPHAN = {"", "unknown", "未知", "無", "none", "n/a", "various", "多個", "多位"}
+    orphans = {o for o in orphans if o not in _SKIP_ORPHAN and len(o) >= 2}
+
+    if not orphans:
+        print("✨ 孤兒救援：沒有遺漏的實體，所有被提及的名稱都有獨立條目")
+        return
+
+    print(f"🔍 孤兒救援：發現 {len(orphans)} 個被提及但沒有獨立條目的實體，開始彙集散落資訊...")
+
+    # For each orphan, gather all text fragments mentioning it
+    all_texts = []
+    for c in countries:
+        if isinstance(c, dict):
+            all_texts.append(("country", c.get("name", ""), c.get("description", "")))
+    for r in relationships:
+        if isinstance(r, dict):
+            all_texts.append(("rel", f"{r.get('from','')}→{r.get('to','')}", f"{r.get('description','')} {r.get('context','')}"))
+    for f in key_figures:
+        if isinstance(f, dict):
+            all_texts.append(("figure", f.get("name", ""), f"{f.get('description','')} {' '.join(f.get('disputes',[]))} {' '.join(f.get('anecdotes',[]))}"))
+    for e in major_events:
+        if isinstance(e, dict):
+            all_texts.append(("event", e.get("event", ""), f"{e.get('description','')} {e.get('consequences','')}"))
+
+    orphan_fragments = {}
+    for orphan in orphans:
+        frags = []
+        for kind, source_name, text in all_texts:
+            if not text:
+                continue
+            # Check if orphan name appears in the text or source name
+            if orphan in text.lower() or orphan in source_name.lower():
+                # Extract a window of text around the mention
+                idx = text.lower().find(orphan)
+                while idx != -1:
+                    start = max(0, idx - 100)
+                    end = min(len(text), idx + len(orphan) + 200)
+                    frag = text[start:end].strip()
+                    if frag and frag not in frags:
+                        frags.append(frag)
+                    idx = text.lower().find(orphan, idx + 1)
+        if frags:
+            orphan_fragments[orphan] = frags
+
+    if not orphan_fragments:
+        print("✨ 孤兒救援：雖有遺漏實體名稱，但在現有資料中找不到足夠的散落文字，跳過")
+        return
+
+    # Chunk orphans (≤20 per AI call) and build standalone entries
+    orphan_list = list(orphan_fragments.keys())
+    CHUNK = 20
+    rescued = 0
+
+    for i in range(0, len(orphan_list), CHUNK):
+        chunk_orphans = orphan_list[i:i + CHUNK]
+        fragment_text = ""
+        for orphan in chunk_orphans:
+            frags = orphan_fragments[orphan][:5]  # cap at 5 fragments per orphan
+            fragment_text += f"\n\n【{orphan}】\n" + "\n---\n".join(frags)
+
+        system_prompt = (
+            '你是微國家歷史學家。以下是一些在微國家百科中沒有自己獨立條目、'
+            '但其相關資訊散落在其他條目中的人物/國家/組織。請根據這些散落的文字片段，'
+            '為每個實體建立盡可能完整的獨立條目。\n\n'
+            '【鐵律】\n'
+            '1. 必須為每一個列出的實體都建立條目，不准跳過任何一個。\n'
+            '2. 只使用以下散落文字中提到的資訊，不要編造不存在的事實。如果某個欄位'
+            '在文字中找不到資訊，就留空或寫「未知」，不要猜測。\n'
+            '3. 盡可能從文字中挖掘出恩怨、軼事、參與的事件等細節。\n'
+            '4. 如果散落文字中有提到此實體參與的事件，也請在 major_events 中建立事件條目。\n\n'
+            '請以嚴格 JSON 格式輸出（不可使用 markdown 程式碼區塊），包含以下 key：\n'
+            '1. countries: [{"name": "...", "aliases": ["..."], "type": "micronation/organization/individual", '
+            '"description": "...", "status": "active/dissolved/unknown"}]\n'
+            '2. key_figures: [{"name": "...", "affiliation": "...", "role": "...", "description": "...", '
+            '"disputes": ["..."], "anecdotes": ["..."]}]\n'
+            '3. major_events: [{"event": "...", "participants": ["..."], "date": "...", "description": "...", '
+            '"consequences": "...", "leads_to": [], "caused_by": []}]\n'
+            '4. relationships: [{"from": "...", "to": "...", "type": "alliance/conflict/treaty/trade/diplomatic/cultural/personal", '
+            '"description": "...", "context": "...", "status": "active/historical/ended"}]\n'
+            '每個實體只需放入 countries 或 key_figures 其中一個（判斷它是國家/組織還是個人）。\n'
+            '如果某個實體從散落文字中看不出是什麼類型，預設放入 key_figures。\n'
+            '僅輸出 JSON 物件，請勿附加任何額外文字。'
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "以下是散落在其他條目中的資訊片段，請為每個實體建立獨立條目：" + fragment_text}
+        ]
+
+        try:
+            resp = await call_chat_api(messages, chat_ai_settings, max_tokens=4000)
+            ai_text = (resp.get("content") or "").strip()
+            if ai_text.startswith("```"):
+                ai_text = re.sub(r"^```(?:json)?\s*", "", ai_text, flags=re.IGNORECASE)
+                ai_text = re.sub(r"\s*```$", "", ai_text).strip()
+
+            rescued_data = None
+            try:
+                rescued_data = json_module.loads(ai_text)
+            except Exception:
+                m = re.search(r"\{.*\}", ai_text, re.DOTALL)
+                if m:
+                    try:
+                        rescued_data = json_module.loads(m.group(0))
+                    except Exception:
+                        pass
+                if rescued_data is None:
+                    salvaged = _salvage_scan_extraction(ai_text)
+                    if salvaged:
+                        rescued_data = salvaged
+
+            if isinstance(rescued_data, dict):
+                before_counts = {
+                    k: len(_global_scan_result.get(k, []))
+                    for k in ("countries", "key_figures", "major_events", "relationships")
+                }
+                _merge_scan_batch(rescued_data)
+                after_counts = {
+                    k: len(_global_scan_result.get(k, []))
+                    for k in ("countries", "key_figures", "major_events", "relationships")
+                }
+                new_items = sum(after_counts[k] - before_counts[k] for k in before_counts)
+                rescued += new_items
+                print(f"  ✅ 孤兒救援批次 {i//CHUNK + 1}: 新增 {new_items} 項條目")
+        except Exception as e:
+            print(f"  ⚠️ 孤兒救援批次 {i//CHUNK + 1} 失敗: {e}")
+            continue
+
+    _save_global_scan_result()
+    print(f"✨ 孤兒救援完成：從散落資訊中為 {len(orphan_fragments)} 個實體建立了獨立條目（共新增 {rescued} 項）")
+
+
 async def _run_global_micropedia_scan():
     global _global_scan_state, _global_scan_result
     _global_scan_state["status"] = "running"
@@ -8002,7 +8218,8 @@ async def _run_global_micropedia_scan():
                 _save_global_scan_result()
                 await asyncio.sleep(0.5)
 
-            # Final pass: additive causal-chain linking only (never rewrites/drops data)
+            # Final passes: rescue orphans, then link causal chains (all additive, never drops data)
+            await _rescue_orphan_entities()
             await _link_event_causal_chains()
 
             _global_scan_state["status"] = "completed"
