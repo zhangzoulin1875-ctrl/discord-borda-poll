@@ -1314,10 +1314,10 @@ def _compute_dynamic_refine_interval() -> int:
         # Medium traffic — moderate pace
         dynamic = max(base_secs, 300)  # at least 5 min
     else:
-        # Low traffic — go as fast as possible. No artificial floor;
-        # if there's bandwidth, the next round starts ~15s after the
-        # previous one finishes (just enough to let the loop breathe).
-        dynamic = 15
+        # Low traffic — a new cycle may be DISPATCHED at most every 60s.
+        # (This is a dispatch interval, not a wait-for-completion interval —
+        # concurrency lets multiple cycles run in parallel, see ai_refine_loop.)
+        dynamic = 60
 
     # Back off if recent cycles kept yielding nothing (duplicate/empty).
     # Prevents wasting API calls every cycle when there's simply nothing
@@ -4845,9 +4845,11 @@ async def _probe_tools_support(settings: dict, api_url: str):
 
 @bot.event
 async def on_ready():
-    global _chat_semaphore, _shared_session
+    global _chat_semaphore, _shared_session, _refine_write_lock
     if _chat_semaphore is None:
         _chat_semaphore = asyncio.Semaphore(5)
+    if _refine_write_lock is None:
+        _refine_write_lock = asyncio.Lock()
     if _shared_session is not None and not _shared_session.closed:
         pass  # reuse existing session
     else:
@@ -7179,14 +7181,15 @@ class SystemGroup(app_commands.Group):
         max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
         kb_ratio = knowledge_count / max(1, max_entries)
         if kb_ratio >= 0.9:
-            lines.append(f"動態間隔：60 分鐘（知識庫已滿 {kb_ratio:.0%}，自動放慢）")
+            lines.append(f"派工間隔：60 分鐘（知識庫已滿 {kb_ratio:.0%}，自動放慢）")
         elif cpm > 20:
-            lines.append(f"動態間隔：{dynamic_secs // 60} 分鐘（API 流量高 {cpm} calls/min，已降速）")
+            lines.append(f"派工間隔：{dynamic_secs // 60} 分鐘（API 流量高 {cpm} calls/min，已降速）")
         elif cpm > 10:
-            lines.append(f"動態間隔：{dynamic_secs // 60} 分鐘（API 流量中等 {cpm} calls/min）")
+            lines.append(f"派工間隔：{dynamic_secs // 60} 分鐘（API 流量中等 {cpm} calls/min）")
         else:
-            lines.append(f"動態間隔：{dynamic_secs} 秒（API 流量低 {cpm} calls/min，已加速）")
+            lines.append(f"派工間隔：{dynamic_secs} 秒（API 流量低 {cpm} calls/min）")
         lines.append(f"當前 API 速率：{cpm} calls/min")
+        lines.append(f"併發執行中：{len(_refine_active_tasks)} 個精煉週期（不互相阻塞）")
         # Confidence breakdown
         high_count = sum(1 for k in ai_refined_knowledge if k.get("confidence", "high") == "high")
         low_count = knowledge_count - high_count
@@ -10919,12 +10922,109 @@ async def _ai_refine_post_to_channel(channel, knowledge_entry):
         print(f"🔍 AI精煉: 發布到頻道失敗: {e}")
 
 
+# Concurrency support: multiple refine cycles can run in parallel.
+# _refine_active_tasks tracks in-flight cycles (for visibility/status).
+# _refine_write_lock protects the "check duplicate topic → append → save"
+# critical section so two concurrent cycles can't both write the same
+# topic or clobber each other's save.
+_refine_active_tasks: set = set()
+_refine_write_lock: asyncio.Lock = None  # initialised in on_ready (needs running loop)
+
+
+async def _ai_refine_one_cycle(guild, channel, cycle_id: int):
+    """Run ONE full refine cycle (Discord extraction → wiki verify → save).
+    Designed to be launched as an independent asyncio.Task so multiple
+    cycles can be in flight concurrently — a slow cycle never blocks
+    the next one from starting."""
+    global ai_refined_knowledge, _refine_empty_streak
+    now = _time.time()
+    try:
+        # Step 0: Fetch Discord channel snippets (no API)
+        channel_snippets = await _ai_refine_fetch_channel_snippets(guild)
+        if isinstance(channel_snippets, Exception):
+            print(f"🔍 AI精煉#{cycle_id}: 頻道抓取失敗: {channel_snippets}")
+            channel_snippets = ""
+
+        if not channel_snippets:
+            print(f"🔍 AI精煉#{cycle_id}: 無頻道訊息，跳過")
+            _refine_empty_streak += 1
+            return
+
+        # Step 1 (API call 1): Extract preliminary knowledge from Discord
+        existing_topics = [k.get("topic", "") for k in ai_refined_knowledge]
+        preliminary = await _ai_refine_extract_from_discord(channel_snippets, existing_topics)
+
+        if not preliminary:
+            print(f"🔍 AI精煉#{cycle_id}: Discord 萃取為空（連續空手 {_refine_empty_streak + 1} 次）")
+            _refine_empty_streak += 1
+            return
+
+        # Step 2 (no API): Search encyclopedia for each entry's search terms
+        wiki_articles = await _ai_refine_fetch_wiki_for_knowledge(preliminary)
+
+        # Step 3 (API call 2): Verify, correct, and reorganize using wiki
+        verified = await _ai_refine_verify_and_reorganize(preliminary, wiki_articles)
+
+        if not verified:
+            print(f"🔍 AI精煉#{cycle_id}: 驗證後無有效知識（連續空手 {_refine_empty_streak + 1} 次）")
+            _refine_empty_streak += 1
+            return
+
+        # Step 4: Save all verified entries + post to channel.
+        # Locked so concurrent cycles don't both write the same topic or
+        # race on save_refine_knowledge().
+        async with _refine_write_lock:
+            max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
+            # Re-check duplicates against the LATEST state (another
+            # concurrent cycle may have just added something).
+            current_topics = {k.get("topic", "") for k in ai_refined_knowledge}
+            saved = []
+            for entry_data in verified:
+                if entry_data["topic"] in current_topics:
+                    print(f"🔍 AI精煉#{cycle_id}: 「{entry_data['topic']}」已被其他併發精煉存入，跳過")
+                    continue
+                entry = {
+                    "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
+                    "_ts": now,
+                    "topic": entry_data["topic"],
+                    "summary": entry_data["summary"],
+                    "details": entry_data["details"],
+                    "confidence": entry_data.get("confidence", "low"),
+                }
+                ai_refined_knowledge.append(entry)
+                current_topics.add(entry["topic"])
+                saved.append(entry)
+                if len(ai_refined_knowledge) > max_entries:
+                    ai_refined_knowledge = ai_refined_knowledge[-max_entries:]
+                print(f"🔍 AI精煉#{cycle_id}: 已儲存「{entry['topic']}」({entry['confidence']}) (累計 {len(ai_refined_knowledge)} 條)")
+
+            if saved:
+                save_refine_knowledge()
+
+        for entry in saved:
+            await _ai_refine_post_to_channel(channel, entry)
+
+        if saved:
+            api_calls = 1 + len(verified)  # 1 for extraction + 1 per entry for verification
+            print(f"🔍 AI精煉#{cycle_id}: 本輪產出 {len(saved)} 條知識（{api_calls} 次 API call）")
+            _refine_empty_streak = 0  # Reset backoff
+        else:
+            _refine_empty_streak += 1
+
+    except Exception as e:
+        print(f"⚠️ AI精煉#{cycle_id}循環錯誤: {e}")
+    finally:
+        _refine_active_tasks.discard(cycle_id)
+
+
 async def ai_refine_loop():
-    """Background task: every N minutes, cross-reference channel messages
-    with micropedia articles, extract useful knowledge, save to database,
-    and post a summary in the configured channel."""
-    global _refine_last_run, ai_refined_knowledge, _refine_empty_streak
+    """Background dispatcher: every dynamic interval, LAUNCH a new refine
+    cycle as an independent task — without waiting for any previous cycle
+    to finish. This means multiple cycles can run concurrently; a slow
+    cycle (waiting on AI API latency) never blocks the next dispatch."""
+    global _refine_last_run
     await asyncio.sleep(90)  # Wait for bot to be fully ready
+    cycle_counter = 0
     while True:
         try:
             if not ai_refine_settings.get("enabled"):
@@ -10935,12 +11035,8 @@ async def ai_refine_loop():
             interval_secs = _compute_dynamic_refine_interval()
             now = _time.time()
             if _refine_last_run and (now - _refine_last_run) < interval_secs:
-                await asyncio.sleep(20)
+                await asyncio.sleep(5)
                 continue
-
-            # Log the dynamic decision for visibility
-            cpm = _get_api_calls_per_minute()
-            kb_full = len(ai_refined_knowledge) / max(1, ai_refine_settings.get("max_knowledge_entries", 500))
 
             guild_id = ai_refine_settings.get("guild_id")
             channel_id = ai_refine_settings.get("channel_id")
@@ -10964,71 +11060,27 @@ async def ai_refine_loop():
                 await asyncio.sleep(20)
                 continue
 
-            print(f"🔍 AI精煉: 開始精煉 (API {cpm} calls/min, 知識庫 {len(ai_refined_knowledge)}/{ai_refine_settings.get('max_knowledge_entries', 500)} ({kb_full:.0%}), 動態間隔 {interval_secs}s)")
+            if _refine_write_lock is None:
+                await asyncio.sleep(5)
+                continue
 
-            # Mark as running NOW — prevents infinite retry loop on exception
+            # Dispatch NOW — mark as running so the next dispatch respects
+            # the interval, but DON'T await the cycle. It runs independently;
+            # if it's still going when the next interval hits, a second
+            # cycle is dispatched alongside it (concurrent, not blocking).
             _refine_last_run = now
-
-            # Step 0: Fetch Discord channel snippets (no API)
-            channel_snippets = await _ai_refine_fetch_channel_snippets(guild)
-            if isinstance(channel_snippets, Exception):
-                print(f"🔍 AI精煉: 頻道抓取失敗: {channel_snippets}")
-                channel_snippets = ""
-
-            if not channel_snippets:
-                print("🔍 AI精煉: 無頻道訊息，跳過")
-                _refine_empty_streak += 1
-                await asyncio.sleep(20)
-                continue
-
-            # Step 1 (API call 1): Extract preliminary knowledge from Discord
-            existing_topics = [k.get("topic", "") for k in ai_refined_knowledge]
-            preliminary = await _ai_refine_extract_from_discord(channel_snippets, existing_topics)
-
-            if not preliminary:
-                print(f"🔍 AI精煉: Discord 萃取為空（連續空手 {_refine_empty_streak + 1} 次）")
-                _refine_empty_streak += 1
-                await asyncio.sleep(20)
-                continue
-
-            # Step 2 (no API): Search encyclopedia for each entry's search terms
-            wiki_articles = await _ai_refine_fetch_wiki_for_knowledge(preliminary)
-
-            # Step 3 (API call 2): Verify, correct, and reorganize using wiki
-            verified = await _ai_refine_verify_and_reorganize(preliminary, wiki_articles)
-
-            if not verified:
-                print(f"🔍 AI精煉: 驗證後無有效知識（連續空手 {_refine_empty_streak + 1} 次）")
-                _refine_empty_streak += 1
-                await asyncio.sleep(20)
-                continue
-
-            # Step 4: Save all verified entries + post to channel
-            max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
-            for entry_data in verified:
-                entry = {
-                    "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
-                    "_ts": now,
-                    "topic": entry_data["topic"],
-                    "summary": entry_data["summary"],
-                    "details": entry_data["details"],
-                    "confidence": entry_data.get("confidence", "low"),
-                }
-                ai_refined_knowledge.append(entry)
-                if len(ai_refined_knowledge) > max_entries:
-                    ai_refined_knowledge = ai_refined_knowledge[-max_entries:]
-                print(f"🔍 AI精煉: 已儲存「{entry['topic']}」({entry['confidence']}) (累計 {len(ai_refined_knowledge)} 條)")
-                await _ai_refine_post_to_channel(channel, entry)
-
-            save_refine_knowledge()
-            api_calls = 1 + len(verified)  # 1 for extraction + 1 per entry for verification
-            print(f"🔍 AI精煉: 本輪產出 {len(verified)} 條知識（{api_calls} 次 API call）")
-            _refine_empty_streak = 0  # Reset backoff
+            cycle_counter += 1
+            cid = cycle_counter
+            cpm = _get_api_calls_per_minute()
+            kb_full = len(ai_refined_knowledge) / max(1, ai_refine_settings.get("max_knowledge_entries", 500))
+            print(f"🔍 AI精煉#{cid}: 開始（併發中 {len(_refine_active_tasks)} 個, API {cpm} calls/min, 知識庫 {len(ai_refined_knowledge)}/{ai_refine_settings.get('max_knowledge_entries', 500)} ({kb_full:.0%}), 派工間隔 {interval_secs}s）")
+            _refine_active_tasks.add(cid)
+            asyncio.create_task(_ai_refine_one_cycle(guild, channel, cid))
 
         except Exception as e:
-            print(f"⚠️ AI精煉循環錯誤: {e}")
+            print(f"⚠️ AI精煉派工錯誤: {e}")
 
-        await asyncio.sleep(20)
+        await asyncio.sleep(5)
 
 
 # ── Slash Command Group ──
