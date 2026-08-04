@@ -153,6 +153,50 @@ async def self_ping_loop():
 
 async def keep_alive_server():
     """啟動 HTTP keep-alive server（Render Web Service 用）。"""
+    port = int(os.getenv("PORT", 10000))
+
+    async def health(request):
+        return web.Response(text="Bot is running ✅", status=200)
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    # AI settings API
+    app.router.add_get("/api/ai-settings", api_get_ai_settings)
+    app.router.add_put("/api/ai-settings", api_set_ai_settings)
+    # Chat AI settings API
+    app.router.add_get("/api/chat-ai-settings", api_get_chat_ai_settings)
+    app.router.add_put("/api/chat-ai-settings", api_set_chat_ai_settings)
+    # Dashboard routes
+    app.router.add_get("/dashboard", dashboard_index)
+    app.router.add_get("/login", dashboard_login)
+    app.router.add_get("/callback", dashboard_callback)
+    app.router.add_post("/logout", dashboard_logout)
+    app.router.add_get("/api/me", api_me)
+    app.router.add_get("/api/guilds", api_guilds)
+    app.router.add_get("/api/guilds/{gid}/polls", api_polls)
+    app.router.add_get("/api/guilds/{gid}/polls/{pid}", api_poll_detail)
+    app.router.add_post("/api/guilds/{gid}/polls", api_create_poll)
+    app.router.add_post("/api/guilds/{gid}/polls/{pid}/start", api_start_poll)
+    app.router.add_post("/api/guilds/{gid}/polls/{pid}/end", api_end_poll)
+    app.router.add_delete("/api/guilds/{gid}/polls/{pid}", api_delete_poll)
+    app.router.add_post("/api/guilds/{gid}/polls/{pid}/options", api_add_option)
+    app.router.add_put("/api/guilds/{gid}/polls/{pid}/roles", api_set_roles)
+    app.router.add_get("/oauth/drive/callback", oauth_drive_callback)
+    # Member nations API
+    app.router.add_get("/api/guilds/{gid}/nations", api_list_nations)
+    app.router.add_post("/api/guilds/{gid}/nations", api_create_nation)
+    app.router.add_put("/api/guilds/{gid}/nations/{nid}", api_update_nation)
+    app.router.add_delete("/api/guilds/{gid}/nations/{nid}", api_delete_nation)
+    print(f"📊 Dashboard routes registered")
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Keep-alive HTTP server started on port {port}")
+
 
 # ── Dashboard API: 會員國管理 ──
 
@@ -300,54 +344,6 @@ async def api_delete_nation(request):
 
     save_member_nations()
     return web.json_response({"ok": True})
-
-
-    """啟動 HTTP keep-alive server（Render Web Service 用）。"""
-    port = int(os.getenv("PORT", 10000))
-
-    async def health(request):
-        return web.Response(text="Bot is running ✅", status=200)
-
-    app = web.Application()
-    app.router.add_get("/", health)
-    app.router.add_get("/health", health)
-
-    # AI settings API
-    app.router.add_get("/api/ai-settings", api_get_ai_settings)
-    app.router.add_put("/api/ai-settings", api_set_ai_settings)
-    # Chat AI settings API
-    app.router.add_get("/api/chat-ai-settings", api_get_chat_ai_settings)
-    app.router.add_put("/api/chat-ai-settings", api_set_chat_ai_settings)
-    # Dashboard routes
-    app.router.add_get("/dashboard", dashboard_index)
-    app.router.add_get("/login", dashboard_login)
-    app.router.add_get("/callback", dashboard_callback)
-    app.router.add_post("/logout", dashboard_logout)
-    app.router.add_get("/api/me", api_me)
-    app.router.add_get("/api/guilds", api_guilds)
-    app.router.add_get("/api/guilds/{gid}/polls", api_polls)
-    app.router.add_get("/api/guilds/{gid}/polls/{pid}", api_poll_detail)
-    app.router.add_post("/api/guilds/{gid}/polls", api_create_poll)
-    app.router.add_post("/api/guilds/{gid}/polls/{pid}/start", api_start_poll)
-    app.router.add_post("/api/guilds/{gid}/polls/{pid}/end", api_end_poll)
-    app.router.add_delete("/api/guilds/{gid}/polls/{pid}", api_delete_poll)
-    app.router.add_post("/api/guilds/{gid}/polls/{pid}/options", api_add_option)
-    app.router.add_put("/api/guilds/{gid}/polls/{pid}/roles", api_set_roles)
-    app.router.add_get("/oauth/drive/callback", oauth_drive_callback)
-    # Member nations API
-    app.router.add_get("/api/guilds/{gid}/nations", api_list_nations)
-    app.router.add_post("/api/guilds/{gid}/nations", api_create_nation)
-    app.router.add_put("/api/guilds/{gid}/nations/{nid}", api_update_nation)
-    app.router.add_delete("/api/guilds/{gid}/nations/{nid}", api_delete_nation)
-    print(f"📊 Dashboard routes registered")
-
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"🌐 Keep-alive HTTP server started on port {port}")
-
 
 
 # ──────────────────────────────────────────────
