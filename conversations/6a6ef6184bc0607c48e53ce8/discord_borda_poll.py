@@ -3593,9 +3593,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                 for k in recent_knowledge:
                     knowledge_lines.append(f"- [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
                 system_prompt += (
-                    f"\n\n─── 微國家百科冷知識（僅供參考，非絕對事實）───\n"
-                    f"以下是由百科文章中萃取的冷門知識摘要。這些僅是背景參考，"
-                    f"如果你不確定，請以即時百科查詢結果為準，不要直接引用這些摘要。\n"
+                    f"\n\n─── 微國家百科精煉知識（社群話題 × 百科驗證）───\n"
+                    f"以下是根據社群近期討論話題，從百科文章中萃取整理的知識摘要。"
+                    f"這些知識已過濾不可靠來源，可信度較高。"
+                    f"回答相關問題時可優先參考這些摘要，但仍可自行搜尋百科確認。\n"
                     + "\n".join(knowledge_lines)
                 )
                 print(f"🔍 AI精煉: 已注入 {len(recent_knowledge)} 條高可信度知識 (篩掉 {len(ai_refined_knowledge) - len(high_confidence)} 條低可信度)")
@@ -10581,53 +10582,117 @@ async def _ai_refine_fetch_channel_snippets(guild, max_channels=15, msgs_per_cha
     return "\n\n".join(snippets)
 
 
-async def _ai_refine_fetch_micropedia():
-    """Fetch a random micropedia article for cross-referencing."""
-    search_terms = [
-        "共和國", "聯邦", "王國", "帝國", "公國", "自由邦",
-        "城邦", "聯盟", "組織", "條約", "宣言", "憲法",
-        "政府", "選舉", "文化", "歷史", "外交", "國旗",
+async def _ai_refine_extract_topics(channel_snippets: str) -> list:
+    """Ask AI to extract interesting micronation-related TOPICS from Discord
+    channel messages. These topics are NOT knowledge — they're discovery
+    signals telling us what the community is discussing. We'll then look up
+    these topics in the encyclopedia to find verified knowledge."""
+    if not chat_ai_settings.get("api_key") or not channel_snippets:
+        return []
+
+    system_prompt = (
+        "你是一個微國家社群話題分析師。你會收到 Discord 伺服器中多個頻道的近期訊息摘要。\n"
+        "你的任務是從這些訊息中找出 1-3 個跟微國家相關的「話題」（不是事實，只是討論主題）。\n"
+        "例如：用戶在討論某個國家的選舉、某個條約的內容、某個組織的運作方式等。\n"
+        "話題應該是可以在微國家百科中搜尋的關鍵詞（名詞、國名、制度名等）。\n"
+        "忽略純閒聊、打招呼、跟微國家無關的內容。\n"
+        "嚴格回覆 JSON 陣列，不要加其他文字：\n"
+        '["話題1", "話題2"]\n'
+        "如果沒有跟微國家相關的話題，回覆 []"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": channel_snippets[:3000]},
     ]
-    term = _quiz_random.choice(search_terms)
     try:
-        return await asyncio.wait_for(_fetch_micropedia(term, max_results=2), timeout=8)
+        result = await asyncio.wait_for(call_chat_api(messages, chat_ai_settings), timeout=30)
     except Exception as e:
-        print(f"🔍 AI精煉: 百科抓取失敗: {e}")
-        return ""
+        print(f"🔍 AI精煉: 話題萃取失敗: {e}")
+        return []
+
+    raw = result.get("content", "").strip()
+    if not raw:
+        return []
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1] if "\n" in raw else raw[3:]
+    if raw.endswith("```"):
+        raw = raw[:-3]
+    raw = raw.strip()
+
+    try:
+        topics = json_module.loads(raw)
+        if isinstance(topics, list):
+            return [str(t).strip() for t in topics if t and str(t).strip()][:3]
+    except Exception:
+        pass
+    return []
 
 
-async def _ai_refine_cross_reference(channel_snippets, wiki_text):
-    """Ask AI to cross-reference channel messages with wiki articles and
-    extract useful/obscure knowledge about micronations.
-    Returns a dict {topic, summary, details} or None."""
+async def _ai_refine_fetch_micropedia_for_topics(topics: list) -> str:
+    """Fetch micropedia articles for specific topics discovered from Discord.
+    Returns concatenated article text. Falls back to random terms if no topics."""
+    if not topics:
+        # Fallback: random terms when no Discord topics found
+        search_terms = [
+            "共和國", "聯邦", "王國", "帝國", "公國", "自由邦",
+            "城邦", "聯盟", "組織", "條約", "宣言", "憲法",
+            "政府", "選舉", "文化", "歷史", "外交", "國旗",
+        ]
+        term = _quiz_random.choice(search_terms)
+        try:
+            return await asyncio.wait_for(_fetch_micropedia(term, max_results=2), timeout=8)
+        except Exception as e:
+            print(f"🔍 AI精煉: 百科抓取失敗: {e}")
+            return ""
+
+    # Fetch articles for each discovered topic (parallel)
+    articles = []
+    async def _safe_fetch(term):
+        try:
+            return await asyncio.wait_for(_fetch_micropedia(term, max_results=1), timeout=8)
+        except Exception:
+            return ""
+
+    results = await asyncio.gather(*[_safe_fetch(t) for t in topics], return_exceptions=True)
+    for r in results:
+        if isinstance(r, str) and r.strip():
+            articles.append(r)
+
+    return "\n\n".join(articles) if articles else ""
+
+
+async def _ai_refine_cross_reference(channel_snippets, wiki_text, discovered_topics=None):
+    """Ask AI to synthesize verified knowledge from encyclopedia articles.
+    The articles were fetched based on topics discovered from Discord
+    discussions — so the knowledge is community-relevant AND verified.
+    Returns a dict {topic, summary, details, confidence} or None."""
     if not chat_ai_settings.get("api_key"):
         return None
 
+    topics_note = ""
+    if discovered_topics:
+        topics_note = f"\n本次查詢的話題（來自社群討論）：{', '.join(discovered_topics)}\n"
+
     system_prompt = (
-        "你是一個微國家百科知識精煉引擎。你會收到兩份資料：\n"
-        "1. 微國家百科的一篇百科文章（可信來源）\n"
-        "2. Discord 伺服器中多個頻道的近期訊息摘要（不可信來源）\n\n"
-        "【重要原則】\n"
-        "- 百科文章是唯一可信的知識來源。你萃取的知識必須主要來自百科內容。\n"
-        "- Discord 訊息只是用戶閒聊，可能包含玩笑、猜測、錯誤資訊。\n"
-        "  絕對不要把 Discord 訊息中未經百科證實的內容當作「知識」來萃取。\n"
-        "- 你只能從百科文章中萃取冷門但有趣的知識（歷史細節、制度設計、條約內容、文化特色等）。\n"
-        "- 如果百科文章內容太少或沒有值得萃取的知識，直接回覆空結果。\n"
-        "- 不要為了「每次都要產出」而從 Discord 閒聊中編造知識。寧可空手而歸。\n\n"
+        "你是一個微國家百科知識精煉引擎。你會收到一篇或多篇微國家百科文章。\n"
+        "這些文章是根據社群目前正在討論的話題去搜尋來的，所以它們跟社群關心的事相關。\n\n"
+        "你的任務是從這些百科文章中萃取一條有價值的知識——但不是照搬原文，而是：\n"
+        "1. 綜合整理：如果有多篇文章，找出跨文章的關聯或整體脈絡\n"
+        "2. 深入解讀：找出文章中容易被忽略但有意義的細節（制度設計的巧思、歷史因果關係等）\n"
+        "3. 連結社群：用社群正在討論的話題作為切入點，讓知識跟當前討論產生連結\n\n"
+        "萃取的知識必須完全來自百科文章內容，不要加入百科沒有的推測。\n"
+        "如果百科文章內容太少或沒有值得萃取的知識，回覆空結果——寧可空手而歸。\n\n"
+        f"{topics_note}"
         "每次只萃取一條知識，格式如下 JSON：\n"
-        '{"topic": "簡短主題（10字以內）", "summary": "一句話摘要", "details": "詳細說明（50-200字）", "confidence": "high或low"}\n'
-        "- confidence=high：知識完全來自百科文章內容\n"
-        "- confidence=low：知識部分依賴 Discord 訊息（此類知識不會被長期使用）\n"
+        '{"topic": "簡短主題（10字以內）", "summary": "一句話摘要", "details": "詳細說明（50-200字）", "confidence": "high"}\n'
         "嚴格回覆 JSON，不要加 markdown code block 或其他文字。\n"
-        "如果沒有值得萃取的百科知識，回覆 "
+        "如果沒有值得萃取的知識，回覆 "
         '{\"topic\": \"\", \"summary\": \"\", \"details\": \"\", \"confidence\": \"\"}'
     )
 
-    # Wiki goes FIRST as the primary/trusted source.
-    # Discord goes SECOND as unverified reference context only.
     user_content = (
-        f"── 【可信】微國家百科文章 ──\n{wiki_text[:2500]}\n\n"
-        f"── 【不可信】Discord 頻道訊息（僅供參考，不代表事實）──\n{channel_snippets[:1500]}"
+        f"── 微國家百科文章 ──\n{wiki_text[:3000]}"
     )
 
     messages = [
@@ -10755,28 +10820,34 @@ async def ai_refine_loop():
 
             print(f"🔍 AI精煉: 開始精煉 (API {cpm} calls/min, 知識庫 {len(ai_refined_knowledge)}/{ai_refine_settings.get('max_knowledge_entries', 500)} ({kb_full:.0%}), 動態間隔 {interval_secs}s)")
 
-            # Step 1: Fetch channel snippets and micropedia article in parallel
-            channel_task = asyncio.ensure_future(_ai_refine_fetch_channel_snippets(guild))
-            wiki_task = asyncio.ensure_future(_ai_refine_fetch_micropedia())
-            channel_snippets, wiki_text = await asyncio.gather(
-                channel_task, wiki_task, return_exceptions=True
-            )
-
+            # Step 1: Fetch Discord channel snippets
+            channel_snippets = await _ai_refine_fetch_channel_snippets(guild)
             if isinstance(channel_snippets, Exception):
                 print(f"🔍 AI精煉: 頻道抓取失敗: {channel_snippets}")
                 channel_snippets = ""
+
+            # Step 2: Extract topics from Discord (what is the community discussing?)
+            discovered_topics = []
+            if channel_snippets:
+                discovered_topics = await _ai_refine_extract_topics(channel_snippets)
+                if discovered_topics:
+                    print(f"🔍 AI精煉: 從社群討論發現話題: {discovered_topics}")
+
+            # Step 3: Fetch wiki articles for discovered topics
+            # (falls back to random terms if no topics found)
+            wiki_text = await _ai_refine_fetch_micropedia_for_topics(discovered_topics)
             if isinstance(wiki_text, Exception):
                 print(f"🔍 AI精煉: 百科抓取失敗: {wiki_text}")
                 wiki_text = ""
 
-            if not channel_snippets and not wiki_text:
-                print("🔍 AI精煉: 沒有可用的資料來源，跳過")
+            if not wiki_text:
+                print("🔍 AI精煉: 沒有可用的百科資料，跳過")
                 _refine_last_run = now
                 await asyncio.sleep(20)
                 continue
 
-            # Step 2: Ask AI to cross-reference and extract knowledge
-            knowledge = await _ai_refine_cross_reference(channel_snippets, wiki_text)
+            # Step 4: Synthesize verified knowledge from wiki articles
+            knowledge = await _ai_refine_cross_reference(channel_snippets, wiki_text, discovered_topics)
 
             if not knowledge or not knowledge.get("topic"):
                 print("🔍 AI精煉: 本次未萃取到有價值的知識")
