@@ -10606,35 +10606,78 @@ async def _ai_refine_fetch_channel_snippets(guild, max_channels=15, msgs_per_cha
     return "\n\n".join(snippets)
 
 
+def _char_bigrams(text: str) -> set:
+    """Character-bigram shingles of a string, for cheap fuzzy similarity
+    on Chinese text (which has no whitespace word boundaries)."""
+    t = "".join(text.split())
+    if len(t) < 2:
+        return {t} if t else set()
+    return {t[i:i+2] for i in range(len(t) - 1)}
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """Jaccard similarity over character bigrams. 0.0-1.0."""
+    sa, sb = _char_bigrams(a), _char_bigrams(b)
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    return inter / union if union else 0.0
+
+
+def _is_near_duplicate(topic: str, summary: str, existing_entries: list, threshold: float = 0.45) -> str:
+    """Check if a candidate entry is a near-duplicate of anything already in
+    the knowledge base — catches cases where the AI rephrases the same
+    underlying content under a different topic name across cycles.
+    Compares against the last 150 entries (bounded cost) using combined
+    topic+summary text. Returns the matched existing topic if found, else ''."""
+    candidate_text = f"{topic} {summary}"
+    for existing in existing_entries[-150:]:
+        existing_text = f"{existing.get('topic', '')} {existing.get('summary', '')}"
+        if _text_similarity(candidate_text, existing_text) >= threshold:
+            return existing.get("topic", "")
+    return ""
+
+
 async def _ai_refine_extract_from_discord(channel_snippets: str, existing_topics: list) -> list:
     """STEP 1 (API call 1): Extract PRELIMINARY knowledge from Discord
     community discussions. This is raw community knowledge — may contain
-    errors, jokes, or speculation. That's OK; Step 2 will verify it.
+    errors, jokes, or speculation, and Step 3 will verify it against the
+    encyclopedia. BUT it must still be a concrete, substantive claim about
+    THIS micronation community — not generic philosophy or vague musing.
     Returns a list of {topic, summary, details, search_terms} dicts.
-    Retries once with a different prompt if the result is empty/garbage."""
+    Retries once (same strict bar, not loosened) if the result is empty."""
     if not chat_ai_settings.get("api_key") or not channel_snippets:
         return []
 
-    existing_list = ", ".join(existing_topics[-30:]) if existing_topics else "（無）"
+    existing_list = ", ".join(existing_topics[-40:]) if existing_topics else "（無）"
 
     system_prompt = (
-        "你是一個微國家社群知識萃取師。你會收到 Discord 伺服器中多個頻道的近期訊息。\n"
-        "你的任務是從這些社群討論中萃取 1-3 條「初步知識」——也就是社群成員在討論中\n"
-        "提到或推導出的、跟微國家相關的知識或見解。\n\n"
-        "初步知識的特徵：\n"
-        "- 來自社群成員的討論，不是從百科查的\n"
-        "- 可能是成員分享的經驗、對制度的觀察、對事件的解讀、對歷史的討論等\n"
-        "- 可能包含不完全準確的內容——這沒關係，後續會用百科驗證\n"
-        "- 必須是實質的知識或見解，不是純閒聊、打招呼、表情符號\n\n"
-        "每條初步知識需要：\n"
-        '- topic: 簡短主題（10字以內）\n'
+        "你是一個微國家社群知識萃取師，標準非常嚴格，寧缺勿濫。你會收到 Discord\n"
+        "伺服器中多個頻道的近期訊息，任務是從中萃取 0-3 條「初步知識」。\n\n"
+        "【合格的知識】必須符合以下至少一項，且要具體、可查證：\n"
+        "- 具名的事件、決策、投票結果、制度變更（有國家名/人名/日期/具體規則）\n"
+        "- 某個微國家實際採行的具體制度、政策、慶典、外交行動（不是泛泛而談）\n"
+        "- 社群歷史上真實發生過的具體事件或先例\n"
+        "- 具體的文化習俗、國旗/國歌/憲法等具體內容的討論\n\n"
+        "【一律拒絕，即使跟微國家沾上邊也不要萃取】：\n"
+        "- 個人哲學觀點、形上學辯論（例如「自我連續性」「忒修斯之船」之類的\n"
+        "  身份哲學討論，即使是拿刪頻道、換頭銜等小事當引子講的也算）\n"
+        "- 空泛的通則或猜測，沒有指名道姓（例如「部分微國家會模仿現實政治\n"
+        "  體系」——這種沒說是哪個國家、什麼具體制度，就是空話，拒絕）\n"
+        "- 純粹的個人意見、抱怨、開玩笑、閒聊、心情發言\n"
+        "- 未經證實的臆測、八卦、「聽說」「可能」等不確定語氣的內容\n\n"
+        "判斷原則：如果把這條知識讀給不熟悉當下對話情境的人聽，他能不能明確\n"
+        "指出「哪個國家/哪個事件/哪個具體規則」？不能的話就不合格，直接跳過。\n\n"
+        "每條合格知識需要：\n"
+        '- topic: 簡短主題（10字以內，需包含具體名稱或事件）\n'
         '- summary: 一句話摘要\n'
-        '- details: 詳細說明（50-200字）\n'
+        '- details: 詳細說明（50-200字，需包含具體細節）\n'
         '- search_terms: 用於百科搜尋的關鍵詞（1-3個，用於驗證這條知識）\n\n'
-        f"現有知識庫已有這些主題（請勿重複）：{existing_list}\n\n"
+        f"現有知識庫已有這些主題和摘要，內容相近的請勿重複萃取：{existing_list}\n\n"
         "嚴格回覆 JSON 陣列，不要加 markdown code block 或其他文字：\n"
         '[{"topic": "...", "summary": "...", "details": "...", "search_terms": ["詞1", "詞2"]}]\n'
-        "如果訊息中沒有值得萃取的微國家知識，回傳 []"
+        "如果訊息中沒有符合上述嚴格標準的知識，寧可回傳空陣列 []，也不要硬湊。"
     )
 
     messages = [
@@ -10642,16 +10685,9 @@ async def _ai_refine_extract_from_discord(channel_snippets: str, existing_topics
         {"role": "user", "content": channel_snippets[:3500]},
     ]
 
-    for attempt in range(2):  # Max 2 attempts
-        prompt_label = "首次萃取" if attempt == 0 else "重試萃取（放寬標準）"
+    for attempt in range(2):  # Max 2 attempts — SAME strict bar both times, no loosening
+        prompt_label = "首次萃取" if attempt == 0 else "重試萃取（標準不變，只是再看一次）"
         print(f"🔍 AI精煉: {prompt_label} from Discord...")
-
-        if attempt == 1:
-            # Loosen the prompt for retry
-            messages[0]["content"] = messages[0]["content"].replace(
-                "必須是實質的知識或見解",
-                "即使是稍微牽強的知識或見解也可以，只要跟微國家有關"
-            )
 
         try:
             result = await asyncio.wait_for(
@@ -10816,17 +10852,24 @@ async def _ai_refine_verify_and_reorganize(preliminary_entries: list, wiki_artic
                 f"── 百科文章（可信參考資料）──\n{wiki_text[:2500]}"
             )
         else:
-            # No wiki article found — keep as low confidence
+            # No wiki article found — only keep if it's still concrete and
+            # specific (named event/decision/practice). Reject vague
+            # generalizations or philosophical musing that slipped through
+            # extraction — these are common false positives.
             system_prompt = (
-                "你是一個微國家知識整理師。你會收到一條從 Discord 社群討論中\n"
-                "萃取的初步知識。沒有找到相關百科文章來驗證。\n\n"
-                "你的任務是：\n"
-                "1. 整理這條知識，讓它更清晰簡潔\n"
-                "2. 移除明顯的推測或不確定語氣\n"
-                "3. 標記為低可信度（未經百科驗證）\n\n"
+                "你是一個微國家知識審核員，標準嚴格。你會收到一條從 Discord\n"
+                "社群討論中萃取的初步知識。沒有找到相關百科文章來驗證，所以你\n"
+                "需要自行判斷這條知識是否夠具體、值得保留。\n\n"
+                "保留的條件（必須全部符合）：\n"
+                "- 內容具體，指名道姓（有國家名/人名/日期/明確規則或事件）\n"
+                "- 不是個人哲學觀點、形上學辯論、空泛通則、意見或閒聊\n"
+                "- 讀者不需要對話情境也能看懂「哪個國家/哪個事件」\n\n"
+                "如果符合，整理成清晰簡潔的知識條目，標記低可信度（未經百科驗證）。\n"
+                "如果不符合（太空泛、太哲學、太主觀），直接回傳空結果，不要保留。\n\n"
                 "嚴格回覆 JSON：\n"
                 '{"topic": "...", "summary": "...", "details": "...", "confidence": "low"}\n'
-                "如果這條知識明顯是玩笑或無意義，回傳空結果"
+                "不符合標準時回傳 "
+                '{"topic": "", "summary": "", "details": "", "confidence": ""}'
             )
             user_content = (
                 f"主題：{entry['topic']}\n"
@@ -10954,9 +10997,11 @@ async def _ai_refine_one_cycle(guild, channel, cycle_id: int):
             _refine_empty_streak += 1
             return
 
-        # Step 1 (API call 1): Extract preliminary knowledge from Discord
-        existing_topics = [k.get("topic", "") for k in ai_refined_knowledge]
-        preliminary = await _ai_refine_extract_from_discord(channel_snippets, existing_topics)
+        # Step 1 (API call 1): Extract preliminary knowledge from Discord.
+        # Pass topic+summary (not just bare topics) so the AI can recognize
+        # near-duplicate CONTENT, not just exact-name matches.
+        existing_context = [f"{k.get('topic', '')}：{k.get('summary', '')}" for k in ai_refined_knowledge]
+        preliminary = await _ai_refine_extract_from_discord(channel_snippets, existing_context)
 
         if not preliminary:
             print(f"🔍 AI精煉#{cycle_id}: Discord 萃取為空（連續空手 {_refine_empty_streak + 1} 次）")
@@ -10979,13 +11024,15 @@ async def _ai_refine_one_cycle(guild, channel, cycle_id: int):
         # race on save_refine_knowledge().
         async with _refine_write_lock:
             max_entries = ai_refine_settings.get("max_knowledge_entries", 500)
-            # Re-check duplicates against the LATEST state (another
-            # concurrent cycle may have just added something).
-            current_topics = {k.get("topic", "") for k in ai_refined_knowledge}
             saved = []
             for entry_data in verified:
-                if entry_data["topic"] in current_topics:
-                    print(f"🔍 AI精煉#{cycle_id}: 「{entry_data['topic']}」已被其他併發精煉存入，跳過")
+                # Re-check against the LATEST state (another concurrent
+                # cycle may have just added something) using FUZZY
+                # similarity — catches rephrased duplicates, not just
+                # exact topic-string matches.
+                dup_of = _is_near_duplicate(entry_data["topic"], entry_data["summary"], ai_refined_knowledge)
+                if dup_of:
+                    print(f"🔍 AI精煉#{cycle_id}: 「{entry_data['topic']}」與現有「{dup_of}」內容相近，跳過")
                     continue
                 entry = {
                     "date": datetime.now(GMT8).strftime("%Y-%m-%d %H:%M"),
@@ -10996,7 +11043,6 @@ async def _ai_refine_one_cycle(guild, channel, cycle_id: int):
                     "confidence": entry_data.get("confidence", "low"),
                 }
                 ai_refined_knowledge.append(entry)
-                current_topics.add(entry["topic"])
                 saved.append(entry)
                 if len(ai_refined_knowledge) > max_entries:
                     ai_refined_knowledge = ai_refined_knowledge[-max_entries:]
