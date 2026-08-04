@@ -4544,7 +4544,7 @@ def _global_interaction_check(interaction: discord.Interaction) -> bool:
 
 async def setup_hook():
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception:
@@ -9151,6 +9151,220 @@ class NationGroup(app_commands.Group):
             inline=False,
         )
         embed.set_footer(text=f"由 {interaction.user.display_name} 發起評價")
+        embed.timestamp = interaction.created_at
+
+        await interaction.followup.send(embed=embed)
+
+
+# ──────────────────────────────────────────────
+# 用戶分析系統
+# ──────────────────────────────────────────────
+
+async def _fetch_user_messages(guild, user_id: int, limit: int = 200) -> list:
+    """Fetch a user's recent messages across all text channels and forum
+    threads in the guild. Returns a list of {"channel": str, "content": str,
+    "date": str} dicts. Skips bot messages, empty messages, and test/log
+    channels (same exclusions as the search indexer)."""
+    messages_collected = []
+    _skip_keywords = {"測試", "test", "log", "紀錄", "ai-log", "bot-log"}
+
+    # Text channels
+    for ch in guild.text_channels:
+        ch_name_lower = ch.name.lower()
+        if any(sk in ch_name_lower for sk in _skip_keywords):
+            continue
+        try:
+            async for msg in ch.history(limit=limit, oldest_first=False):
+                if msg.author.id != user_id:
+                    continue
+                if not msg.content or msg.content.strip().startswith("/"):
+                    continue
+                messages_collected.append({
+                    "channel": f"#{ch.name}",
+                    "content": msg.content.strip()[:300],
+                    "date": msg.created_at.strftime("%Y-%m-%d"),
+                })
+        except (discord.Forbidden, discord.HTTPException):
+            continue
+
+    # Forum threads
+    for ch in guild.forums:
+        try:
+            async for thread in ch.archived_threads(limit=50):
+                async for msg in thread.history(limit=limit, oldest_first=False):
+                    if msg.author.id != user_id:
+                        continue
+                    if not msg.content or msg.content.strip().startswith("/"):
+                        continue
+                    messages_collected.append({
+                        "channel": f"📋 {ch.name} > {thread.name}",
+                        "content": msg.content.strip()[:300],
+                        "date": msg.created_at.strftime("%Y-%m-%d"),
+                    })
+            async for thread in ch.threads:
+                async for msg in thread.history(limit=limit, oldest_first=False):
+                    if msg.author.id != user_id:
+                        continue
+                    if not msg.content or msg.content.strip().startswith("/"):
+                        continue
+                    messages_collected.append({
+                        "channel": f"📋 {ch.name} > {thread.name}",
+                        "content": msg.content.strip()[:300],
+                        "date": msg.created_at.strftime("%Y-%m-%d"),
+                    })
+        except (discord.Forbidden, discord.HTTPException):
+            continue
+
+    # Sort by date descending, cap at 200 total
+    messages_collected.sort(key=lambda m: m["date"], reverse=True)
+    return messages_collected[:200]
+
+
+async def _analyze_user(user_name: str, messages: list, ai_settings: dict) -> dict:
+    """Call the AI to analyze a user based on their message history.
+    Returns {"analysis": str, "mbti": str, "one_liner": str, "error": str?}."""
+    if not messages:
+        return {"error": "沒有找到該用戶的訊息紀錄"}
+
+    # Build a compact transcript for the AI
+    transcript_parts = []
+    for m in messages[:150]:  # cap at 150 messages to keep prompt manageable
+        transcript_parts.append(f"[{m['date']}][{m['channel']}] {m['content']}")
+    transcript = "\n".join(transcript_parts)
+
+    # Truncate to ~8000 chars to avoid blowing the token budget on free APIs
+    if len(transcript) > 8000:
+        transcript = transcript[:8000] + "\n...（已截斷）"
+
+    prompt = (
+        f"你是微國家社群的心理分析專家。以下是「{user_name}」在 Discord 伺服器中的歷史訊息紀錄。"
+        f"請根據這些訊息分析這個人的性格特徵和行為模式。\n\n"
+        f"─── 訊息紀錄 ───\n"
+        f"{transcript}\n\n"
+        f"請嚴格按以下格式回覆（不要加其他多餘內容）：\n"
+        f"分析：（200-400字的中文分析，描述該用戶的發言風格、關注話題、"
+        f"互動方式、情緒傾向、社群角色等）\n"
+        f"MBTI：（16型人格中的哪一型，附一句簡短理由，格式如「INTJ — 因為...」）\n"
+        f"一句話：（用一句話送給這個人，可以是鼓勵、吐槽或觀察，語氣自然不造作）\n"
+        f"⚠️ 以上分析僅基於有限的 Discord 訊息，僅供娛樂參考，不代表專業心理評估。"
+    )
+
+    messages_payload = [
+        {
+            "role": "system",
+            "content": (
+                "你是一位擅長從文字行為分析性格的專家，用繁體中文回答。"
+                "你的分析應該客觀但不冷冰冰，有觀察力但不過度解讀。"
+                "MBTI 判斷要基於訊息中展現出的實際溝通風格和思考方式，不要勉強套型。"
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        result = await call_chat_api(
+            messages_payload,
+            {
+                "api_url": ai_settings.get("api_url", ""),
+                "api_key": ai_settings.get("api_key", ""),
+                "model": ai_settings.get("model", "gpt-4o-mini"),
+            },
+            max_tokens=1500,
+        )
+        text = result.get("content", "") if isinstance(result, dict) else ""
+        if not text:
+            return {"error": "AI 回應為空"}
+
+        import re as _re
+
+        # Parse analysis
+        analysis_match = _re.search(r'分析[：:]\s*(.+?)(?=MBTI[：:]|$)', text, _re.DOTALL)
+        analysis = analysis_match.group(1).strip() if analysis_match else ""
+
+        # Parse MBTI
+        mbti_match = _re.search(r'MBTI[：:]\s*(.+?)(?=一句話[：:]|$)', text, _re.DOTALL)
+        mbti = mbti_match.group(1).strip() if mbti_match else ""
+
+        # Parse one-liner
+        oneliner_match = _re.search(r'一句話[：:]\s*(.+?)(?=⚠️|$)', text, _re.DOTALL)
+        one_liner = oneliner_match.group(1).strip() if oneliner_match else ""
+
+        if not analysis:
+            analysis = text[:500]
+
+        return {"analysis": analysis, "mbti": mbti, "one_liner": one_liner}
+    except asyncio.TimeoutError:
+        return {"error": "AI 回應逾時，請稍後再試一次"}
+    except Exception as e:
+        print(f"⚠️ 用戶分析 AI 呼叫失敗：{e}")
+        return {"error": "AI 暫時沒有給出有效回覆，稍後再試一次應該就能過"}
+
+
+class AnalyzeGroup(app_commands.Group):
+    """用戶分析指令群組"""
+
+    def __init__(self):
+        super().__init__(name="analyze", description="用戶分析系統")
+
+    @app_commands.command(name="user", description="分析指定用戶的發言風格、MBTI 人格分析與一句話（機器人擁有者限定）")
+    @app_commands.describe(user="要分析的用戶")
+    async def analyze_user(self, interaction: discord.Interaction, user: discord.Member):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        user_name = user.display_name
+        user_id = user.id
+
+        await interaction.followup.send(f"🔍 正在抓取「{user_name}」的歷史訊息並分析中，請稍候...")
+
+        # Fetch user messages
+        messages = await _fetch_user_messages(interaction.guild, user_id, limit=200)
+
+        if not messages:
+            await interaction.followup.send(f"❌ 沒有找到「{user_name}」的訊息紀錄。")
+            return
+
+        print(f"📊 用戶分析：抓到 {len(messages)} 則訊息，呼叫 AI 分析中...")
+
+        # Use the briefing AI settings (more reliable)
+        result = await _analyze_user(user_name, messages, ai_settings)
+
+        if "error" in result:
+            await interaction.followup.send(f"❌ 分析失敗：{result['error']}")
+            return
+
+        analysis = result["analysis"]
+        mbti = result["mbti"]
+        one_liner = result["one_liner"]
+
+        embed = discord.Embed(
+            title=f"🔍 用戶分析：{user_name}",
+            color=discord.Color.purple(),
+        )
+        embed.add_field(
+            name="📝 行為分析",
+            value=analysis[:1024] if analysis else "（無分析）",
+            inline=False,
+        )
+        embed.add_field(
+            name="🧠 MBTI 人格分析",
+            value=mbti[:1024] if mbti else "（無法判斷）",
+            inline=False,
+        )
+        embed.add_field(
+            name="💬 一句話",
+            value=f"「{one_liner}」" if one_liner else "（無）",
+            inline=False,
+        )
+        embed.add_field(
+            name="⚠️ 免責聲明",
+            value="以上分析僅基於 Discord 訊息紀錄，由 AI 生成，僅供娛樂參考，不代表專業心理評估。",
+            inline=False,
+        )
+        embed.set_footer(text=f"分析 {len(messages)} 則訊息 | 由 {interaction.user.display_name} 發起")
         embed.timestamp = interaction.created_at
 
         await interaction.followup.send(embed=embed)
