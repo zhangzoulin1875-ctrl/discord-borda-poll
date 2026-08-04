@@ -7448,25 +7448,21 @@ async def _consolidate_global_scan_graph():
         return
 
     system_prompt = (
-        "你是一位資料庫整合專家與微國家歷史學家。請審視並整合以下微國家關係圖譜資料，合併重複條目、融合別名與敘述、整合矛盾狀態，並保持資料精簡與精準。
-"
-        "請以繁體中文輸出嚴格 JSON 格式（不可使用 markdown 程式碼區塊 ```json ... ```），包含以下 4 個 key：
-"
-        "1. "countries": [{"name": "...", "aliases": ["..."], "type": "micronation/organization/individual", "description": "...", "status": "active/dissolved/unknown"}]
-"
-        "2. "relationships": [{"from": "...", "to": "...", "type": "alliance/conflict/treaty/trade/diplomatic/cultural/personal", "description": "...", "context": "...", "status": "active/historical/ended"}]
-"
-        "3. "key_figures": [{"name": "...", "affiliation": "...", "role": "...", "description": "..."}]
-"
-        "4. "major_events": [{"event": "...", "participants": ["..."], "date": "...", "description": "...", "consequences": "..."}]
-"
-        "僅輸出 JSON 物件，請勿附加任何額外文字。"
+        '你是一位資料庫整合專家與微國家歷史學家。請審視並整合以下微國家關係圖譜資料，'
+        '合併重複條目、融合別名與敘述、整合矛盾狀態，並保持資料精簡與精準。\n'
+        '請以繁體中文輸出嚴格 JSON 格式（不可使用 markdown 程式碼區塊），包含以下 4 個 key：\n'
+        '1. countries: [{"name": "...", "aliases": ["..."], "type": "micronation/organization/individual", '
+        '"description": "...", "status": "active/dissolved/unknown"}]\n'
+        '2. relationships: [{"from": "...", "to": "...", "type": "alliance/conflict/treaty/trade/diplomatic/cultural/personal", '
+        '"description": "...", "context": "...", "status": "active/historical/ended"}]\n'
+        '3. key_figures: [{"name": "...", "affiliation": "...", "role": "...", "description": "..."}]\n'
+        '4. major_events: [{"event": "...", "participants": ["..."], "date": "...", "description": "...", "consequences": "..."}]\n'
+        '僅輸出 JSON 物件，請勿附加任何額外文字。'
     )
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"當前圖譜資料：
-{json_module.dumps(current_data, ensure_ascii=False)}"}
+        {"role": "user", "content": '當前圖譜資料:\n' + json_module.dumps(current_data, ensure_ascii=False)}
     ]
 
     try:
@@ -7560,35 +7556,28 @@ async def _run_global_micropedia_scan():
                                     p_title = page.get("title", "?")
                                     if len(clean) > 2000:
                                         clean = clean[:2000] + "..."
-                                    content_parts.append(f"【{p_title}】
-{clean}")
+                                    content_parts.append(f"【{p_title}】\n{clean}")
                 except Exception as fe:
                     print(f"⚠️ 全球掃描取得內文失敗 (批次 {b_idx + 1}): {fe}")
 
                 if content_parts:
-                    batch_text = "
-
-".join(content_parts)
+                    batch_text = "\n\n".join(content_parts)
                     system_prompt = (
-                        "你是一位歷史學家與微國家學學者。請分析以下維基條目內容，提取國家/組織/個人、關係、關鍵人物、重大事件。
-"
-                        "請以繁體中文輸出嚴格 JSON 格式（不可使用 markdown 程式碼區塊 ```json ... ```），包含以下 4 個 key：
-"
-                        "1. "countries": [{"name": "...", "aliases": ["..."], "type": "micronation/organization/individual", "description": "...", "status": "active/dissolved/unknown"}]
-"
-                        "2. "relationships": [{"from": "...", "to": "...", "type": "alliance/conflict/treaty/trade/diplomatic/cultural/personal", "description": "...", "context": "...", "status": "active/historical/ended"}]
-"
-                        "3. "key_figures": [{"name": "...", "affiliation": "...", "role": "...", "description": "..."}]
-"
-                        "4. "major_events": [{"event": "...", "participants": ["..."], "date": "...", "description": "...", "consequences": "..."}]
-"
-                        "僅輸出 JSON 物件，請勿附加任何額外文字。"
+                        '你是一位歷史學家與微國家學學者。請分析以下維基條目內容，'
+                        '提取國家/組織/個人、關係、關鍵人物、重大事件。\n'
+                        '請以繁體中文輸出嚴格 JSON 格式（不可使用 markdown 程式碼區塊），包含以下 4 個 key：\n'
+                        '1. countries: [{"name": "...", "aliases": ["..."], "type": "micronation/organization/individual", '
+                        '"description": "...", "status": "active/dissolved/unknown"}]\n'
+                        '2. relationships: [{"from": "...", "to": "...", "type": "alliance/conflict/treaty/trade/diplomatic/cultural/personal", '
+                        '"description": "...", "context": "...", "status": "active/historical/ended"}]\n'
+                        '3. key_figures: [{"name": "...", "affiliation": "...", "role": "...", "description": "..."}]\n'
+                        '4. major_events: [{"event": "...", "participants": ["..."], "date": "...", "description": "...", "consequences": "..."}]\n'
+                        '僅輸出 JSON 物件，請勿附加任何額外文字。'
                     )
 
                     messages = [
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"條目內容：
-{batch_text}"}
+                        {"role": "user", "content": '條目內容:\n' + batch_text}
                     ]
 
                     try:
@@ -7636,8 +7625,7 @@ async def _run_global_micropedia_scan():
 
     except Exception as e:
         import traceback
-        err_msg = f"{e}
-{traceback.format_exc()}"
+        err_msg = f"{e}\n{traceback.format_exc()}"
         print(f"❌ 全球掃描失敗: {err_msg}")
         _global_scan_state["status"] = "error"
         _global_scan_state["error"] = str(e)

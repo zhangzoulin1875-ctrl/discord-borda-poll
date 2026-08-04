@@ -59,6 +59,54 @@
     <div id="nation-list" class="space-y-3"></div>
   </div>
 
+  <!-- Global Scan / Relationship Graph -->
+  <div id="scan-view" class="hidden fade-in">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-3">
+        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+        <h2 class="text-xl font-bold">🌐 全局百科掃描 — 關係譜圖</h2>
+      </div>
+      <div class="flex gap-2">
+        <button id="scan-start-btn" onclick="startGlobalScan()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">🚀 開始掃描</button>
+        <button id="scan-refresh-btn" onclick="loadScanResult()" class="bg-[#4e5058] hover:bg-[#3a3c43] px-4 py-2 rounded-lg text-sm font-semibold">🔄 重新載入</button>
+      </div>
+    </div>
+
+    <!-- Status Bar -->
+    <div id="scan-status-bar" class="bg-[#2b2d31] rounded-xl p-4 mb-4">
+      <div class="flex items-center justify-between mb-2">
+        <div class="flex items-center gap-2">
+          <span id="scan-status-icon" class="text-2xl">⚪</span>
+          <div>
+            <div id="scan-status-text" class="font-semibold text-sm">尚未開始</div>
+            <div id="scan-status-detail" class="text-xs text-gray-400">點擊「開始掃描」讀取百科全部條目並建立關係譜圖</div>
+          </div>
+        </div>
+        <div id="scan-progress-text" class="text-sm text-gray-400"></div>
+      </div>
+      <div id="scan-progress-bar-bg" class="w-full bg-[#1e1f22] rounded-full h-2 mt-2 hidden">
+        <div id="scan-progress-bar" class="bg-[#5865f2] rounded-full h-2 transition-all duration-500" style="width: 0%"></div>
+      </div>
+    </div>
+
+    <!-- Tab switcher for result views -->
+    <div id="scan-tabs" class="flex gap-2 mb-4 hidden">
+      <button onclick="showScanTab('countries')" id="scan-tab-countries" class="scan-tab-btn active px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#5865f2]">🏰 國家/組織</button>
+      <button onclick="showScanTab('relationships')" id="scan-tab-relationships" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">🔗 關係</button>
+      <button onclick="showScanTab('figures')" id="scan-tab-figures" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">👤 關鍵人物</button>
+      <button onclick="showScanTab('events')" id="scan-tab-events" class="scan-tab-btn px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#4e5058]">📜 重大事件</button>
+    </div>
+
+    <!-- Countries View -->
+    <div id="scan-countries" class="space-y-2 hidden"></div>
+    <!-- Relationships View -->
+    <div id="scan-relationships" class="space-y-2 hidden"></div>
+    <!-- Figures View -->
+    <div id="scan-figures" class="space-y-2 hidden"></div>
+    <!-- Events View -->
+    <div id="scan-events" class="space-y-2 hidden"></div>
+  </div>
+
 <script>tailwind.config={darkMode:'class'}</script>
 <style>
   body{font-family:'Segoe UI',system-ui,sans-serif}
@@ -90,6 +138,7 @@
       <div class="nav-tab" data-tab="chat-ai" onclick="showChatAIPanel()">🤖 AI 聊天</div>
       <div class="nav-tab" data-tab="meeting-ai" onclick="showMeetingAIPanel()">📝 會議AI</div>
       <div class="nav-tab" data-tab="nations" onclick="showNationsPanel()">🌍 會員國</div>
+      <div class="nav-tab" data-tab="scan" onclick="showScanPanel()">🌐 關係譜圖</div>
     </div>
   </div>
   <div id="nav-user" class="hidden flex items-center gap-3">
@@ -402,7 +451,7 @@ function showLoading(msg) { document.getElementById('loading-msg').textContent =
 
 function navigate(view) {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   showOnly('main-view');
   if (view === 'guilds') { document.getElementById('guilds-view').classList.remove('hidden'); loadGuilds(); setActiveTab('polls'); }
   else if (view === 'polls') { document.getElementById('polls-view').classList.remove('hidden'); setActiveTab('polls'); }
@@ -591,7 +640,7 @@ async function saveMeetingAISettings() {
 let editingNationId = null;
 
 async function showNationsPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('nations-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('nations');
@@ -684,6 +733,202 @@ async function deleteNation(id, name) {
   if (r.error) { alert('刪除失敗：' + r.error); return; }
   showToast('✅ 會員國已刪除');
   loadNations();
+}
+
+// ── Global Scan / Relationship Graph ──
+let scanPollTimer = null;
+
+async function showScanPanel() {
+  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  document.getElementById('scan-view').classList.remove('hidden');
+  showOnly('main-view');
+  setActiveTab('scan');
+  await loadScanStatus();
+  await loadScanResult();
+}
+
+async function startGlobalScan() {
+  if (!currentGuild) { alert('請先選擇伺服器'); navigate('guilds'); return; }
+  if (!confirm('開始全局百科掃描？\n這會讀取 micropedia.site 上所有條目，分批用 AI 提取國家/人物關係。\n過程可能需要 10-30 分鐘，視條目數量而定。')) return;
+  const r = await api(`/api/guilds/${currentGuild}/global-scan/start`, 'POST');
+  if (r.error) {
+    if (r.status === 409) { alert('掃描正在進行中'); return; }
+    alert('啟動失敗：' + r.error); return;
+  }
+  showToast('🚀 全局掃描已啟動');
+  startScanPolling();
+}
+
+function startScanPolling() {
+  if (scanPollTimer) clearInterval(scanPollTimer);
+  scanPollTimer = setInterval(async () => {
+    await loadScanStatus();
+    const status = document.getElementById('scan-status-text').textContent;
+    if (status.includes('完成') || status.includes('錯誤') || status.includes('failed') || status.includes('error')) {
+      clearInterval(scanPollTimer);
+      scanPollTimer = null;
+      await loadScanResult();
+    }
+  }, 5000);
+}
+
+async function loadScanStatus() {
+  if (!currentGuild) return;
+  const data = await api(`/api/guilds/${currentGuild}/global-scan/status`);
+  if (data.error) return;
+  const status = data.status || 'idle';
+  const icon = document.getElementById('scan-status-icon');
+  const text = document.getElementById('scan-status-text');
+  const detail = document.getElementById('scan-status-detail');
+  const progText = document.getElementById('scan-progress-text');
+  const progBarBg = document.getElementById('scan-progress-bar-bg');
+  const progBar = document.getElementById('scan-progress-bar');
+  const startBtn = document.getElementById('scan-start-btn');
+
+  if (status === 'running') {
+    icon.textContent = '🔄';
+    text.textContent = '掃描中...';
+    detail.textContent = data.current_batch || '處理中...';
+    const pct = data.total > 0 ? Math.round(data.progress / data.total * 100) : 0;
+    progText.textContent = `${data.progress} / ${data.total} 條目 (${pct}%)`;
+    progBarBg.classList.remove('hidden');
+    progBar.style.width = pct + '%';
+    startBtn.disabled = true;
+    startBtn.classList.add('opacity-50');
+    if (!scanPollTimer) startScanPolling();
+  } else if (status === 'completed') {
+    icon.textContent = '✅';
+    text.textContent = '掃描完成';
+    detail.textContent = `開始：${data.started_at || '?'} · 完成：${data.completed_at || '?'}`;
+    progBarBg.classList.add('hidden');
+    progText.textContent = '';
+    startBtn.disabled = false;
+    startBtn.classList.remove('opacity-50');
+    document.getElementById('scan-tabs').classList.remove('hidden');
+  } else if (status === 'error') {
+    icon.textContent = '❌';
+    text.textContent = '掃描失敗';
+    detail.textContent = data.error || '未知錯誤';
+    progBarBg.classList.add('hidden');
+    progText.textContent = '';
+    startBtn.disabled = false;
+    startBtn.classList.remove('opacity-50');
+  } else {
+    icon.textContent = '⚪';
+    text.textContent = '尚未開始';
+    detail.textContent = '點擊「開始掃描」讀取百科全部條目並建立關係譜圖';
+    progBarBg.classList.add('hidden');
+    progText.textContent = '';
+    startBtn.disabled = false;
+    startBtn.classList.remove('opacity-50');
+    document.getElementById('scan-tabs').classList.add('hidden');
+  }
+}
+
+async function loadScanResult() {
+  if (!currentGuild) return;
+  const data = await api(`/api/guilds/${currentGuild}/global-scan/result`);
+  if (data.error) return;
+  const countries = data.countries || [];
+  const rels = data.relationships || [];
+  const figures = data.key_figures || [];
+  const events = data.major_events || [];
+
+  // Countries
+  const countriesDiv = document.getElementById('scan-countries');
+  if (!countries.length) {
+    countriesDiv.innerHTML = '<p class="text-gray-400 text-sm">尚無資料。請先執行掃描。</p>';
+  } else {
+    const typeMap = {micronation:'🏳️',organization:'🏛️',individual:'👤'};
+    const statusMap = {active:'🟢',dissolved:'🔴',unknown:'⚪'};
+    countriesDiv.innerHTML = countries.map(c => `
+      <div class="bg-[#2b2d31] rounded-xl p-4">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-lg">${typeMap[c.type]||'📍'}</span>
+          <h3 class="font-bold">${escHtml(c.name)}</h3>
+          <span class="text-xs">${statusMap[c.status]||'⚪'} ${escHtml(c.status||'unknown')}</span>
+        </div>
+        ${c.aliases && c.aliases.length ? `<div class="text-xs text-gray-400 mb-1">別名：${c.aliases.map(escHtml).join('、')}</div>` : ''}
+        <div class="text-sm text-gray-300">${escHtml(c.description||'')}</div>
+      </div>
+    `).join('');
+  }
+
+  // Relationships
+  const relsDiv = document.getElementById('scan-relationships');
+  if (!rels.length) {
+    relsDiv.innerHTML = '<p class="text-gray-400 text-sm">尚無關係資料。</p>';
+  } else {
+    const typeColors = {alliance:'text-green-400',conflict:'text-red-400',treaty:'text-blue-400',trade:'text-yellow-400',diplomatic:'text-purple-400',cultural:'text-pink-400',personal:'text-gray-400'};
+    const typeIcons = {alliance:'🤝',conflict:'⚔️',treaty:'📑',trade:'💼',diplomatic:'🤵',cultural:'🎭',personal:'👤'};
+    relsDiv.innerHTML = rels.map(r => `
+      <div class="bg-[#2b2d31] rounded-xl p-4">
+        <div class="flex items-center gap-2 mb-1">
+          <span>${typeIcons[r.type]||'🔗'}</span>
+          <span class="font-semibold">${escHtml(r.from)}</span>
+          <span class="${typeColors[r.type]||'text-gray-400'} text-sm">→</span>
+          <span class="font-semibold">${escHtml(r.to)}</span>
+          <span class="text-xs ${typeColors[r.type]||'text-gray-400'}">(${escHtml(r.type||'')})</span>
+        </div>
+        <div class="text-sm text-gray-300">${escHtml(r.description||'')}</div>
+        ${r.context ? `<div class="text-xs text-gray-500 mt-1">背景：${escHtml(r.context)}</div>` : ''}
+        <div class="text-xs text-gray-500 mt-1">狀態：${escHtml(r.status||'')}</div>
+      </div>
+    `).join('');
+  }
+
+  // Key Figures
+  const figuresDiv = document.getElementById('scan-figures');
+  if (!figures.length) {
+    figuresDiv.innerHTML = '<p class="text-gray-400 text-sm">尚無人物資料。</p>';
+  } else {
+    figuresDiv.innerHTML = figures.map(f => `
+      <div class="bg-[#2b2d31] rounded-xl p-4">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-lg">👤</span>
+          <h3 class="font-bold">${escHtml(f.name)}</h3>
+          ${f.affiliation ? `<span class="text-xs text-gray-400">(${escHtml(f.affiliation)})</span>` : ''}
+        </div>
+        <div class="text-sm text-gray-400">${escHtml(f.role||'')}</div>
+        <div class="text-sm text-gray-300 mt-1">${escHtml(f.description||'')}</div>
+      </div>
+    `).join('');
+  }
+
+  // Events
+  const eventsDiv = document.getElementById('scan-events');
+  if (!events.length) {
+    eventsDiv.innerHTML = '<p class="text-gray-400 text-sm">尚無事件資料。</p>';
+  } else {
+    eventsDiv.innerHTML = events.map(e => `
+      <div class="bg-[#2b2d31] rounded-xl p-4">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-lg">📜</span>
+          <h3 class="font-bold">${escHtml(e.event||'')}</h3>
+          ${e.date ? `<span class="text-xs text-gray-400">${escHtml(e.date)}</span>` : ''}
+        </div>
+        ${e.participants && e.participants.length ? `<div class="text-xs text-gray-500 mb-1">參與者：${e.participants.map(escHtml).join('、')}</div>` : ''}
+        <div class="text-sm text-gray-300">${escHtml(e.description||'')}</div>
+        ${e.consequences ? `<div class="text-xs text-gray-400 mt-1 bg-[#1e1f22] rounded px-2 py-1">影響：${escHtml(e.consequences)}</div>` : ''}
+      </div>
+    `).join('');
+  }
+
+  // Show tabs if there's data
+  if (countries.length || rels.length || figures.length || events.length) {
+    document.getElementById('scan-tabs').classList.remove('hidden');
+  }
+}
+
+function showScanTab(tab) {
+  ['countries','relationships','figures','events'].forEach(t => {
+    document.getElementById('scan-' + t).classList.add('hidden');
+    document.getElementById('scan-tab-' + t).classList.remove('bg-[#5865f2]');
+    document.getElementById('scan-tab-' + t).classList.add('bg-[#4e5058]');
+  });
+  document.getElementById('scan-' + tab).classList.remove('hidden');
+  document.getElementById('scan-tab-' + tab).classList.add('bg-[#5865f2]');
+  document.getElementById('scan-tab-' + tab).classList.remove('bg-[#4e5058]');
 }
 
 init();
