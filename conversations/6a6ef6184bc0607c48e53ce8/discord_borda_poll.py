@@ -6711,14 +6711,6 @@ class SystemGroup(app_commands.Group):
         )
 
 
-# ──────────────────────────────────────────────
-# AI 聊天指令
-# ──────────────────────────────────────────────
-
-class ChatGroup(app_commands.Group):
-    def __init__(self):
-        super().__init__(name="chat", description="AI 聊天設定")
-
     # ── 入盟申請系統指令 ──
     @app_commands.command(name="application_toggle", description="開啟/關閉入盟申請自動回覆系統（機器人擁有者限定）")
     async def application_toggle(self, interaction: discord.Interaction):
@@ -6803,6 +6795,16 @@ class ChatGroup(app_commands.Group):
         lines.append(f"已收錄申請總數：{len(_applications.get('entries', []))} 筆")
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+# ──────────────────────────────────────────────
+# AI 聊天指令
+# ──────────────────────────────────────────────
+
+class ChatGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="chat", description="AI 聊天設定")
+
 
 
     @app_commands.command(name="toggle", description="開啟/關閉 AI 聊天功能（機器人擁有者限定）")
