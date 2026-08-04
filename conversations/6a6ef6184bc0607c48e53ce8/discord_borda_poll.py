@@ -1503,6 +1503,10 @@ chat_ai_settings = {
     "forum_index_interval": 900,    # 論壇索引更新間隔（秒）
     "channel_index_interval": 1800,  # 頻道索引更新間隔（秒）
     "drive_sync_interval": 60,       # Drive 同步間隔（秒）
+    "fallback_enabled": False,      # 是否啟用備援 API
+    "fallback_api_url": "",         # 備援 API 端點 URL
+    "fallback_api_key": "",         # 備援 API Key
+    "fallback_model": "",          # 備援模型名稱
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -2285,6 +2289,55 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             print(f"⚠️ AI 回應為空（finish_reason=stop 但沒有實際內容），重試一次（剩餘 {_remaining():.1f}s）...")
             continue
         return msg
+    # ── Fallback API ──
+    # If the primary API returned a provider-side error (503, 502, 500,
+    # 504, timeout) and a fallback API is configured, retry the entire
+    # call against the fallback endpoint instead of giving up.
+    _primary_error = None
+    if msg is not None and not msg.get("content") and not msg.get("tool_calls") and msg.get("error"):
+        _primary_error = msg.get("error", "")
+    elif last_exc is not None:
+        _primary_error = str(last_exc)
+    if _primary_error and settings.get("fallback_enabled"):
+        _is_provider_error = any(
+            code in _primary_error
+            for code in ["503", "502", "500", "504", "Service Unavailable",
+                        "Bad Gateway", "Internal Server Error",
+                        "Gateway Timeout", "timeout", "Timeout",
+                        "逾時", "Connection", "connection"]
+        )
+        if _is_provider_error:
+            _fb_url = settings.get("fallback_api_url", "").strip()
+            _fb_key = settings.get("fallback_api_key", "").strip()
+            _fb_model = settings.get("fallback_model", "").strip()
+            if _fb_url and _fb_key:
+                print(f"🔄 主要 API 錯誤（{_primary_error[:120]}），切換至備援 API（{_fb_model or _fb_url}）...")
+                _fb_settings = {
+                    **settings,
+                    "api_url": _fb_url,
+                    "api_key": _fb_key,
+                    "model": _fb_model or settings.get("model", "gpt-4o-mini"),
+                    "fallback_enabled": False,  # prevent infinite recursion
+                }
+                _fb_budget = max(5, int(_remaining()))
+                try:
+                    _fb_msg = await call_chat_api(
+                        messages, _fb_settings, tools=tools,
+                        max_tokens=max_tokens,
+                        timeout_total=_fb_budget,
+                        timeout_read=max(3, _fb_budget - 2),
+                        is_background=is_background,
+                    )
+                    if _fb_msg.get("content") or _fb_msg.get("tool_calls"):
+                        print(f"✅ 備援 API 成功！({_fb_msg.get('content', '')[:60]}...)")
+                        return _fb_msg
+                    else:
+                        print(f"⚠️ 備援 API 也失敗：{_fb_msg.get('error', 'unknown')}")
+                except Exception as _fb_exc:
+                    print(f"⚠️ 備援 API 例外：{_fb_exc}")
+            else:
+                print(f"⚠️ 備援 API 已啟用但未設定 URL/Key，跳過")
+
     # Ran out of retry budget without an exception (e.g. broke out of the
     # loop above) — return whatever we have, or a clean timeout error.
     if msg is not None:
@@ -5311,6 +5364,10 @@ async def api_get_chat_ai_settings(request):
         "forum_index_interval": chat_ai_settings.get("forum_index_interval", 900),
         "channel_index_interval": chat_ai_settings.get("channel_index_interval", 1800),
         "drive_sync_interval": chat_ai_settings.get("drive_sync_interval", 60),
+        "fallback_enabled": chat_ai_settings.get("fallback_enabled", False),
+        "fallback_api_url": chat_ai_settings.get("fallback_api_url", ""),
+        "fallback_api_key_masked": (lambda k: k[:6]+"..."+k[-4:] if len(k)>10 else ("***" if k else ""))(chat_ai_settings.get("fallback_api_key", "")),
+        "fallback_model": chat_ai_settings.get("fallback_model", ""),
     })
 
 
@@ -5365,6 +5422,14 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["channel_index_interval"] = int(body["channel_index_interval"])
     if "drive_sync_interval" in body:
         chat_ai_settings["drive_sync_interval"] = int(body["drive_sync_interval"])
+    if "fallback_enabled" in body:
+        chat_ai_settings["fallback_enabled"] = body["fallback_enabled"]
+    if "fallback_api_url" in body:
+        chat_ai_settings["fallback_api_url"] = body["fallback_api_url"]
+    if "fallback_api_key" in body and body["fallback_api_key"]:
+        chat_ai_settings["fallback_api_key"] = body["fallback_api_key"]
+    if "fallback_model" in body:
+        chat_ai_settings["fallback_model"] = body["fallback_model"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 

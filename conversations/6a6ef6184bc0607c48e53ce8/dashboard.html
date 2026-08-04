@@ -262,6 +262,28 @@
           </div>
         </div>
       </div>
+      <!-- Fallback API -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">🔁 備援 API</h3>
+        <p class="text-xs text-gray-400 mb-4">當主要 API 回報 503/502/500 等供應商錯誤時，自動切換到備援 API</p>
+        <div class="space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <p class="text-sm">啟用備援 API</p>
+              <p class="text-xs text-gray-400">關閉時即使主要 API 故障也不會使用備援</p>
+            </div>
+            <label class="toggle"><input type="checkbox" id="ai-fallback-enabled"><span class="toggle-slider"></span></label>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">備援 API 端點 URL</label>
+            <input id="ai-fallback-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/chat/completions">
+            <label class="block text-sm text-gray-400 mb-1">備援 API Key</label>
+            <input id="ai-fallback-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入備援 API Key">
+            <label class="block text-sm text-gray-400 mb-1">備援模型名稱</label>
+            <input id="ai-fallback-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+          </div>
+        </div>
+      </div>
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
     </div>
   </div>
@@ -661,6 +683,11 @@ async function showChatAIPanel() {
   document.getElementById('ai-forum-interval').value = s.forum_index_interval ?? 900;
   document.getElementById('ai-channel-interval').value = s.channel_index_interval ?? 1800;
   document.getElementById('ai-drive-interval').value = s.drive_sync_interval ?? 60;
+  // Fallback API
+  document.getElementById('ai-fallback-enabled').checked = s.fallback_enabled || false;
+  document.getElementById('ai-fallback-url').value = s.fallback_api_url || '';
+  document.getElementById('ai-fallback-key').placeholder = s.fallback_api_key_masked ? `已設定（${s.fallback_api_key_masked}）輸入新值可覆蓋` : '輸入備援 API Key';
+  document.getElementById('ai-fallback-model').value = s.fallback_model || '';
 }
 
 async function saveChatAISettings() {
@@ -687,7 +714,13 @@ async function saveChatAISettings() {
     forum_index_interval: parseInt(document.getElementById('ai-forum-interval').value) || 900,
     channel_index_interval: parseInt(document.getElementById('ai-channel-interval').value) || 1800,
     drive_sync_interval: parseInt(document.getElementById('ai-drive-interval').value) || 60,
+    // Fallback API
+    fallback_enabled: document.getElementById('ai-fallback-enabled').checked,
+    fallback_api_url: document.getElementById('ai-fallback-url').value.trim(),
+    fallback_model: document.getElementById('ai-fallback-model').value.trim(),
   };
+  const fallbackKey = document.getElementById('ai-fallback-key').value.trim();
+  if (fallbackKey) data.fallback_api_key = fallbackKey;
   const apiKey = document.getElementById('ai-api-key').value.trim();
   if (apiKey) data.api_key = apiKey;
   const r = await api('/api/chat-ai-settings', 'PUT', data);
