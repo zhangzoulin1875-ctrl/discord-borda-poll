@@ -4722,28 +4722,23 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
-    # ── 20s is a SOFT TARGET, not a hard system-imposed ceiling ──
-    # Plain on_message replies (not slash-command interactions) have NO
-    # Discord-side deadline — there's no ack/token to expire — so cutting the
-    # AI off at exactly 20s was a self-imposed UX goal, not a technical
-    # requirement. When the underlying API is just genuinely slow (not dead),
-    # killing the request at 20s only guarantees the user gets the canned
-    # "let me think" filler instead of a real answer. So: aim for 20s, but
-    # give the call real room (up to a much larger hard ceiling) to actually
-    # finish before giving up.
-    _AI_SOFT_TARGET = 20     # what we're aiming for — logged for visibility
-    _AI_HARD_CEILING = 60    # the ACTUAL cutoff — generous, but still bounded
+    # ── 20s is a HARD requirement per user specification ──
+    # The entire pipeline (pre-processing + AI calls + tools) must complete
+    # within 20 seconds. If the API is genuinely too slow to finish in 20s,
+    # the canned fallback message kicks in — but the user requires 20s as
+    # a hard ceiling, not a soft target.
+    _AI_HARD_CEILING = 20    # 硬上限 20 秒 — 使用者要求，不可放寬
+    _AI_SOFT_TARGET = 16     # 目標在 16 秒內完成，留 4 秒安全邊際
     _pipeline_elapsed = _time.time() - _t_pre
     _ai_budget = max(10, _AI_HARD_CEILING - _pipeline_elapsed)
     print(f"⏱️ 預處理已花 {_pipeline_elapsed:.1f}s，AI 剩餘預算 {_ai_budget:.1f}s"
-          f"（目標 {_AI_SOFT_TARGET}s 內完成，但硬上限放寬到 {_AI_HARD_CEILING}s，"
-          f"避免 API 只是比較慢就被腰斬）")
+          f"（硬上限 {_AI_HARD_CEILING}s，目標 {_AI_SOFT_TARGET}s 內完成）")
 
     # If the remaining budget is tight (<20s — not enough for a safe 2-round
     # tool loop), skip tools entirely so at least a single AI round can use
     # most of what's left. With the larger hard ceiling this rarely triggers
     # in practice, only when pre-AI context gathering itself ran unusually long.
-    if _ai_budget < 20 and tools:
+    if _ai_budget < 12 and tools:
         print(f"⚡ 時間預算緊迫（{_ai_budget:.1f}s），關閉工具以確保單輪回答能完成")
         tools = None
 
