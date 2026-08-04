@@ -1880,7 +1880,19 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     proxies report an unsupported `tools` param with wildly different status
     codes (400, 422, 500, or even a 200 with an error payload instead of
     `choices`), so we don't try to guess which one and instead just retry
-    plain whenever a tools-enabled call doesn't come back clean."""
+    plain whenever a tools-enabled call doesn't come back clean.
+
+    Circuit breaker: if the API returns 403 "anomalous behavior" twice in
+    a row, ALL subsequent calls are short-circuited for a cooldown period
+    (default 120s) instead of hammering a blocked endpoint on every Discord
+    message — which only makes the provider's abuse detector more certain
+    the traffic is bot spam."""
+    # Circuit breaker check — if tripped, fail fast without hitting the network
+    if not _ai_circuit_check():
+        remaining = _ai_circuit_breaker["cooldown_seconds"] - (_time.time() - _ai_circuit_breaker["trip_time"])
+        print(f"🚫 AI 熔斷器開啟中，跳過請求（剩餘冷卻 {remaining:.0f}s）")
+        return {"content": "", "error": AI_CIRCUIT_COOLDOWN_MSG, "circuit_open": True}
+
     headers = {
         "Authorization": f"Bearer {settings['api_key']}",
         "Content-Type": "application/json",
@@ -1916,6 +1928,9 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         if resp.status != 200:
             error_text = await resp.text()
             print(f"⚠️ API returned status {resp.status}: {error_text[:200]}")
+            # Trip the circuit breaker on 403 anomalous-behavior blocks
+            if resp.status == 403 and "anomalous" in error_text.lower():
+                _ai_circuit_trip()
             return resp.status, error_text
 
         content_parts = []
@@ -2128,6 +2143,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             raise Exception(f"Chat AI API returned {status}: {body_text[:300]}")
 
         _track_token_usage(data)
+        _ai_circuit_success()  # successful call — reset the 403 counter
         return data["choices"][0]["message"]
 
     # ── Retry once on a hollow result ──
@@ -2141,10 +2157,18 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     last_exc = None
     msg = None
     for _attempt_i in range(2):
+        # If the circuit breaker tripped during a previous attempt's 403,
+        # stop retrying — further attempts will just hit the same block.
+        if not _ai_circuit_check():
+            return {"content": "", "error": AI_CIRCUIT_COOLDOWN_MSG, "circuit_open": True}
         try:
             msg = await _attempt()
         except Exception as e:
             last_exc = e
+            # If the circuit breaker just tripped (403 anomalous), don't retry
+            if _ai_circuit_breaker["tripped"]:
+                print(f"🚫 AI 熔斷器因 403 觸發，停止重試")
+                return {"content": "", "error": AI_CIRCUIT_COOLDOWN_MSG, "circuit_open": True}
             if _attempt_i == 0:
                 print(f"⚠️ Chat AI 呼叫失敗（{e}），重試一次...")
                 continue
@@ -2590,6 +2614,45 @@ _MICROPEDIA_CACHE_TTL = 600  # 10 minutes
 # Persisted to disk — without this, EVERY hot restart re-pays the double
 # network round-trip (try-with-tools, fail, retry-without-tools) on the very
 # next message, which is a major source of the reply pipeline timing out.
+# ── AI API circuit breaker ──
+# When the API returns 403 "anomalous behavior" repeatedly, we stop sending
+# requests for a cooldown period instead of hammering a blocked endpoint
+# on every single Discord message (which only makes the block worse).
+_ai_circuit_breaker: dict = {
+    "tripped": False,           # is the breaker currently open (blocking calls)?
+    "trip_time": 0,             # when was it tripped? (time.monotonic)
+    "consecutive_403": 0,       # how many 403s in a row?
+    "cooldown_seconds": 120,   # how long to wait before trying again
+}
+
+AI_CIRCUIT_COOLDOWN_MSG = "🔌 AI API 目前被供應商暫時封鎖（anomalous behavior），已自動暫停請求，將在約 2 分鐘後重試。"
+
+def _ai_circuit_check() -> bool:
+    """Return True if calls are ALLOWED (breaker closed or cooldown expired).
+    If the breaker was tripped but the cooldown has elapsed, reset it."""
+    if not _ai_circuit_breaker["tripped"]:
+        return True
+    elapsed = _time.time() - _ai_circuit_breaker["trip_time"]
+    if elapsed >= _ai_circuit_breaker["cooldown_seconds"]:
+        print(f"🔄 AI 熔斷器冷卻結束（已等待 {elapsed:.0f}s），恢復請求")
+        _ai_circuit_breaker["tripped"] = False
+        _ai_circuit_breaker["consecutive_403"] = 0
+        return True
+    return False
+
+def _ai_circuit_trip():
+    """Trip the breaker — called when we get a 403 anomalous-behavior response."""
+    _ai_circuit_breaker["consecutive_403"] += 1
+    if _ai_circuit_breaker["consecutive_403"] >= 2 and not _ai_circuit_breaker["tripped"]:
+        _ai_circuit_breaker["tripped"] = True
+        _ai_circuit_breaker["trip_time"] = _time.time()
+        print(f"🚫 AI 熔斷器觸發：連續 {_ai_circuit_breaker['consecutive_403']} 次 403，"
+              f"暫停所有 AI 請求 {_ai_circuit_breaker['cooldown_seconds']}s")
+
+def _ai_circuit_success():
+    """Reset the consecutive-403 counter on a successful call."""
+    _ai_circuit_breaker["consecutive_403"] = 0
+
 _tools_unsupported_apis: set = set()
 _tools_supported_apis: set = set()
 _TOOLS_SUPPORTED_FILE = os.path.join(DATA_DIR, "tools_supported_apis.json")
@@ -5797,11 +5860,17 @@ async def on_message(message):
                 except Exception:
                     return
         else:
-            print(f"⚠️ AI 回覆為空，發送 fallback 訊息")
-            try:
-                await message.reply("🤔 讓我想想...", mention_author=False)
-            except Exception as e:
-                print(f"⚠️ fallback 回覆發送失敗: {e}")
+            # If the circuit breaker is open, the API is blocked — stay silent
+            # rather than spamming "讓我想想" on every message during the cooldown.
+            if _ai_circuit_breaker["tripped"]:
+                remaining = _ai_circuit_breaker["cooldown_seconds"] - (_time.time() - _ai_circuit_breaker["trip_time"])
+                print(f"🚫 AI 熔斷器開啟中（剩餘 {remaining:.0f}s），不發送 fallback 訊息")
+            else:
+                print(f"⚠️ AI 回覆為空，發送 fallback 訊息")
+                try:
+                    await message.reply("🤔 讓我想想...", mention_author=False)
+                except Exception as e:
+                    print(f"⚠️ fallback 回覆發送失敗: {e}")
         # ── Abuse detection: AI path (after AI call) ──
         if mod_action and chat_ai_settings.get("abuse_detection_enabled", False):
             duration = min(mod_action, 86400)
@@ -5820,10 +5889,14 @@ async def on_message(message):
             print(f"⚠️ AI 回覆後處理例外: {e}")
     except Exception as e:
         print(f"⚠️ Chat AI error: {e}")
-        try:
-            await message.reply("⚠️ 發生錯誤，請稍後再試。", mention_author=False)
-        except Exception as e:
-            print(f"⚠️ on_message finally 例外: {e}")
+        # If the circuit breaker is tripped, don't spam error messages in Discord
+        if _ai_circuit_breaker["tripped"]:
+            print(f"🚫 AI 熔斷器開啟中，不發送錯誤訊息到 Discord")
+        else:
+            try:
+                await message.reply("⚠️ 發生錯誤，請稍後再試。", mention_author=False)
+            except Exception as e:
+                print(f"⚠️ on_message finally 例外: {e}")
     finally:
         _user_generating.discard(uid_str)
 
