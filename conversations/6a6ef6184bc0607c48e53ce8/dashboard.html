@@ -198,6 +198,70 @@
           </div>
         </div>
       </div>
+      <!-- System Parameters -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">⚙️ 系統參數</h3>
+        <p class="text-xs text-gray-400 mb-4">進階設定 — 除非你知道在做什麼，否則不需要改動</p>
+        <div class="space-y-4">
+          <!-- AI Pipeline Timeouts -->
+          <div class="border-t border-[#3f4147] pt-4">
+            <h4 class="text-sm font-semibold text-gray-300 mb-3">AI 回覆管線</h4>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">硬上限（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">整個 AI 回覆流程的最大時間</p>
+                <input id="ai-hard-ceiling" type="number" min="10" max="120" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="20">
+              </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">目標時間（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">理想完成時間，留安全邊際</p>
+                <input id="ai-soft-target" type="number" min="5" max="100" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="16">
+              </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">最大 Token 數</label>
+                <p class="text-xs text-gray-500 mb-2">AI 回覆的最大 token 數</p>
+                <input id="ai-max-tokens" type="number" min="100" max="8000" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="2000">
+              </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">工具跳過門檻（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">時間預算低於此值時關閉工具</p>
+                <input id="ai-tool-skip" type="number" min="4" max="30" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="12">
+              </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">預處理逾時（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">百科/Discord/網路搜尋各自的上限</p>
+                <input id="ai-preprocess-timeout" type="number" min="2" max="30" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="6">
+              </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">熔斷器冷卻（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">403 錯誤後暫停請求的時間</p>
+                <input id="ai-cb-cooldown" type="number" min="30" max="600" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="120">
+              </div>
+            </div>
+          </div>
+          <!-- Background Task Intervals -->
+          <div class="border-t border-[#3f4147] pt-4">
+            <h4 class="text-sm font-semibold text-gray-300 mb-3">背景任務間隔</h4>
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">論壇索引更新（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">多久重新掃描一次論壇貼文</p>
+                <input id="ai-forum-interval" type="number" min="300" max="7200" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="900">
+              </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">頻道索引更新（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">多久重新掃描一次頻道訊息</p>
+                <input id="ai-channel-interval" type="number" min="600" max="14400" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="1800">
+              </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">Drive 同步間隔（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">多久同步一次資料到 Google Drive</p>
+                <input id="ai-drive-interval" type="number" min="10" max="600" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="60">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
     </div>
   </div>
@@ -587,6 +651,16 @@ async function showChatAIPanel() {
   document.getElementById('ai-abuse-enabled').checked = s.abuse_detection_enabled || false;
   document.getElementById('ai-abuse-level').value = s.abuse_detection_strictness || 'medium';
   document.getElementById('ai-abuse-admins').checked = s.abuse_mute_admins || false;
+  // System parameters
+  document.getElementById('ai-hard-ceiling').value = s.ai_hard_ceiling ?? 20;
+  document.getElementById('ai-soft-target').value = s.ai_soft_target ?? 16;
+  document.getElementById('ai-max-tokens').value = s.ai_max_tokens ?? 2000;
+  document.getElementById('ai-tool-skip').value = s.tool_skip_threshold ?? 12;
+  document.getElementById('ai-preprocess-timeout').value = s.preprocess_timeout ?? 6;
+  document.getElementById('ai-cb-cooldown').value = s.circuit_breaker_cooldown ?? 120;
+  document.getElementById('ai-forum-interval').value = s.forum_index_interval ?? 900;
+  document.getElementById('ai-channel-interval').value = s.channel_index_interval ?? 1800;
+  document.getElementById('ai-drive-interval').value = s.drive_sync_interval ?? 60;
 }
 
 async function saveChatAISettings() {
@@ -603,6 +677,16 @@ async function saveChatAISettings() {
     abuse_detection_enabled: document.getElementById('ai-abuse-enabled').checked,
     abuse_detection_strictness: document.getElementById('ai-abuse-level').value,
     abuse_mute_admins: document.getElementById('ai-abuse-admins').checked,
+    // System parameters
+    ai_hard_ceiling: parseInt(document.getElementById('ai-hard-ceiling').value) || 20,
+    ai_soft_target: parseInt(document.getElementById('ai-soft-target').value) || 16,
+    ai_max_tokens: parseInt(document.getElementById('ai-max-tokens').value) || 2000,
+    tool_skip_threshold: parseInt(document.getElementById('ai-tool-skip').value) || 12,
+    preprocess_timeout: parseInt(document.getElementById('ai-preprocess-timeout').value) || 6,
+    circuit_breaker_cooldown: parseInt(document.getElementById('ai-cb-cooldown').value) || 120,
+    forum_index_interval: parseInt(document.getElementById('ai-forum-interval').value) || 900,
+    channel_index_interval: parseInt(document.getElementById('ai-channel-interval').value) || 1800,
+    drive_sync_interval: parseInt(document.getElementById('ai-drive-interval').value) || 60,
   };
   const apiKey = document.getElementById('ai-api-key').value.trim();
   if (apiKey) data.api_key = apiKey;

@@ -1494,6 +1494,15 @@ chat_ai_settings = {
     "micropedia_max_results": 5,  # max articles to fetch per query
     "min_response_interval": 0,  # 全域最短回應間隔（秒），0=不限。防止機器人被防炸系統踢
     "vision_model": "",  # 視覺模型名稱（用於識圖，留空=停用識圖功能。使用同一個 API URL/Key，只是模型名不同）
+    "ai_hard_ceiling": 20,           # AI pipeline 硬上限（秒）
+    "ai_soft_target": 16,            # AI 軟目標（秒）
+    "ai_max_tokens": 2000,           # AI 回覆最大 token 數
+    "preprocess_timeout": 6,         # 預處理（百科/Discord/網路）各路逾時（秒）
+    "tool_skip_threshold": 12,       # 時間預算低於此值時關閉工具（秒）
+    "circuit_breaker_cooldown": 120, # 熔斷器冷卻時間（秒）
+    "forum_index_interval": 900,    # 論壇索引更新間隔（秒）
+    "channel_index_interval": 1800,  # 頻道索引更新間隔（秒）
+    "drive_sync_interval": 60,       # Drive 同步間隔（秒）
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -2446,7 +2455,7 @@ async def forum_index_refresh_loop():
                 await asyncio.sleep(1)  # stagger to avoid rate limits
         except Exception as e:
             print(f"⚠️ Forum 索引背景更新失敗：{e}")
-        await asyncio.sleep(_FORUM_INDEX_TTL)
+        await asyncio.sleep(chat_ai_settings.get("forum_index_interval", 900))
 
 
 async def channel_index_refresh_loop():
@@ -2463,7 +2472,7 @@ async def channel_index_refresh_loop():
                 await asyncio.sleep(2)  # stagger between guilds
         except Exception as e:
             print(f"⚠️ 頻道 Embed 索引背景更新失敗：{e}")
-        await asyncio.sleep(_CHANNEL_INDEX_TTL)
+        await asyncio.sleep(chat_ai_settings.get("channel_index_interval", 1800))
 
 
 # ──────────────────────────────────────────────
@@ -2734,7 +2743,7 @@ def _ai_circuit_check() -> bool:
     if not _ai_circuit_breaker["tripped"]:
         return True
     elapsed = _time.time() - _ai_circuit_breaker["trip_time"]
-    if elapsed >= _ai_circuit_breaker["cooldown_seconds"]:
+    if elapsed >= chat_ai_settings.get("circuit_breaker_cooldown", 120):
         print(f"🔄 AI 熔斷器冷卻結束（已等待 {elapsed:.0f}s），恢復請求")
         _ai_circuit_breaker["tripped"] = False
         _ai_circuit_breaker["consecutive_403"] = 0
@@ -2748,7 +2757,7 @@ def _ai_circuit_trip():
         _ai_circuit_breaker["tripped"] = True
         _ai_circuit_breaker["trip_time"] = _time.time()
         print(f"🚫 AI 熔斷器觸發：連續 {_ai_circuit_breaker['consecutive_403']} 次 403，"
-              f"暫停所有 AI 請求 {_ai_circuit_breaker['cooldown_seconds']}s")
+              f"暫停所有 AI 請求 {chat_ai_settings.get('circuit_breaker_cooldown', 120)}s")
 
 def _ai_circuit_success():
     """Reset the consecutive-403 counter on a successful call."""
@@ -4412,7 +4421,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             return ""
         try:
             return await asyncio.wait_for(
-                _micropedia_auto_context(clean_content, max_results), timeout=6
+                _micropedia_auto_context(clean_content, max_results), timeout=settings.get("preprocess_timeout", 6)
             )
         except asyncio.TimeoutError:
             print(f"📚 Micropedia: 自動比對逾時（>6s），跳過")
@@ -4426,7 +4435,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             return ""
         try:
             return await asyncio.wait_for(
-                _search_discord_history(message.guild, clean_content, limit=15), timeout=6
+                _search_discord_history(message.guild, clean_content, limit=15), timeout=settings.get("preprocess_timeout", 6)
             )
         except asyncio.TimeoutError:
             print("🔍 search_discord 自動比對逾時（>6s），跳過")
@@ -4443,7 +4452,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         if not _need_web:
             return ""
         try:
-            return await asyncio.wait_for(_web_search(clean_content[:200]), timeout=6)
+            return await asyncio.wait_for(_web_search(clean_content[:200]), timeout=settings.get("preprocess_timeout", 6))
         except asyncio.TimeoutError:
             print("🌐 web_search 自動搜尋逾時（>6s），跳過")
             return ""
@@ -4739,7 +4748,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             # Single-round quick path: give it nearly the ENTIRE remaining budget.
             _call_tt = max(6, _ai_budget - 1.5)
         _call_tr = max(4, _call_tt - 2)
-        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=2000, timeout_total=_call_tt, timeout_read=_call_tr, is_background=False)
+        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False)
         print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
@@ -4796,7 +4805,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # minus a small safety margin — not a hardcoded 8s.
         t2 = _time.time()
         _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
-        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=2000, timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False)
+        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False)
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
@@ -4805,8 +4814,8 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # within 20 seconds. If the API is genuinely too slow to finish in 20s,
     # the canned fallback message kicks in — but the user requires 20s as
     # a hard ceiling, not a soft target.
-    _AI_HARD_CEILING = 20    # 硬上限 20 秒 — 使用者要求，不可放寬
-    _AI_SOFT_TARGET = 16     # 目標在 16 秒內完成，留 4 秒安全邊際
+    _AI_HARD_CEILING = settings.get("ai_hard_ceiling", 20)
+    _AI_SOFT_TARGET = settings.get("ai_soft_target", 16)
     _pipeline_elapsed = _time.time() - _t_pre
     _ai_budget = max(10, _AI_HARD_CEILING - _pipeline_elapsed)
     print(f"⏱️ 預處理已花 {_pipeline_elapsed:.1f}s，AI 剩餘預算 {_ai_budget:.1f}s"
@@ -4816,7 +4825,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # tool loop), skip tools entirely so at least a single AI round can use
     # most of what's left. With the larger hard ceiling this rarely triggers
     # in practice, only when pre-AI context gathering itself ran unusually long.
-    if _ai_budget < 12 and tools:
+    if _ai_budget < settings.get("tool_skip_threshold", 12) and tools:
         print(f"⚡ 時間預算緊迫（{_ai_budget:.1f}s），關閉工具以確保單輪回答能完成")
         tools = None
 
@@ -4831,7 +4840,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # the whole chat feature down. Fall back to one plain, tool-free call.
         print(f"⚠️ 工具呼叫流程失敗，改用純文字模式重試：{e}")
         fallback_msg = await asyncio.wait_for(
-            call_chat_api(messages, settings, tools=None, max_tokens=2000, timeout_total=10, timeout_read=8, is_background=False), timeout=12
+            call_chat_api(messages, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=10, timeout_read=8, is_background=False), timeout=12
         )
         raw_reply = fallback_msg.get("content") or ""
 
@@ -5265,7 +5274,7 @@ async def drive_sync_loop():
     Since we now skip unchanged files, 60s is fine — a crash loses at most
     60s of state, but most cycles are no-ops anyway."""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(chat_ai_settings.get("drive_sync_interval", 60))
         await sync_to_drive()
         # Periodic cleanup of cooldown dicts to prevent unbounded growth
         _cleanup_cooldowns()
@@ -5293,6 +5302,15 @@ async def api_get_chat_ai_settings(request):
         "log_channel_id": chat_ai_settings.get("log_channel_id"),
         "micropedia_enabled": chat_ai_settings.get("micropedia_enabled", True),
         "micropedia_max_results": chat_ai_settings.get("micropedia_max_results", 5),
+        "ai_hard_ceiling": chat_ai_settings.get("ai_hard_ceiling", 20),
+        "ai_soft_target": chat_ai_settings.get("ai_soft_target", 16),
+        "ai_max_tokens": chat_ai_settings.get("ai_max_tokens", 2000),
+        "preprocess_timeout": chat_ai_settings.get("preprocess_timeout", 6),
+        "tool_skip_threshold": chat_ai_settings.get("tool_skip_threshold", 12),
+        "circuit_breaker_cooldown": chat_ai_settings.get("circuit_breaker_cooldown", 120),
+        "forum_index_interval": chat_ai_settings.get("forum_index_interval", 900),
+        "channel_index_interval": chat_ai_settings.get("channel_index_interval", 1800),
+        "drive_sync_interval": chat_ai_settings.get("drive_sync_interval", 60),
     })
 
 
@@ -5329,6 +5347,24 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["abuse_detection_strictness"] = body["abuse_detection_strictness"]
     if "abuse_mute_admins" in body:
         chat_ai_settings["abuse_mute_admins"] = body["abuse_mute_admins"]
+    if "ai_hard_ceiling" in body:
+        chat_ai_settings["ai_hard_ceiling"] = int(body["ai_hard_ceiling"])
+    if "ai_soft_target" in body:
+        chat_ai_settings["ai_soft_target"] = int(body["ai_soft_target"])
+    if "ai_max_tokens" in body:
+        chat_ai_settings["ai_max_tokens"] = int(body["ai_max_tokens"])
+    if "preprocess_timeout" in body:
+        chat_ai_settings["preprocess_timeout"] = int(body["preprocess_timeout"])
+    if "tool_skip_threshold" in body:
+        chat_ai_settings["tool_skip_threshold"] = int(body["tool_skip_threshold"])
+    if "circuit_breaker_cooldown" in body:
+        chat_ai_settings["circuit_breaker_cooldown"] = int(body["circuit_breaker_cooldown"])
+    if "forum_index_interval" in body:
+        chat_ai_settings["forum_index_interval"] = int(body["forum_index_interval"])
+    if "channel_index_interval" in body:
+        chat_ai_settings["channel_index_interval"] = int(body["channel_index_interval"])
+    if "drive_sync_interval" in body:
+        chat_ai_settings["drive_sync_interval"] = int(body["drive_sync_interval"])
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
