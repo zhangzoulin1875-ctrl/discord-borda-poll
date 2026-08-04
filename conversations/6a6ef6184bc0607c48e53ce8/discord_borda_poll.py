@@ -8332,7 +8332,7 @@ async def _generate_quiz_question() -> dict | None:
 
     try:
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings),
+            call_chat_api(messages, chat_ai_settings, max_tokens=600),
             timeout=30
         )
     except asyncio.TimeoutError:
@@ -10654,7 +10654,9 @@ async def _ai_refine_extract_from_discord(channel_snippets: str, existing_topics
             )
 
         try:
-            result = await asyncio.wait_for(call_chat_api(messages, chat_ai_settings), timeout=40)
+            result = await asyncio.wait_for(
+                call_chat_api(messages, chat_ai_settings, max_tokens=1500), timeout=40
+            )
         except Exception as e:
             print(f"🔍 AI精煉: {prompt_label}失敗: {e}")
             continue
@@ -10838,7 +10840,9 @@ async def _ai_refine_verify_and_reorganize(preliminary_entries: list, wiki_artic
         ]
 
         try:
-            result = await asyncio.wait_for(call_chat_api(messages, chat_ai_settings), timeout=40)
+            result = await asyncio.wait_for(
+                call_chat_api(messages, chat_ai_settings, max_tokens=800), timeout=40
+            )
         except Exception as e:
             print(f"🔍 AI精煉: 驗證「{entry['topic']}」失敗: {e}")
             continue
