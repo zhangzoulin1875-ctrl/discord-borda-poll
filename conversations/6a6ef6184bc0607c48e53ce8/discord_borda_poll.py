@@ -1900,7 +1900,7 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
     return True, clean
 
 
-async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120) -> dict:
+async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120, is_background: bool = True) -> dict:
     """Call the chat AI API (non-streaming, short replies).
     Returns the raw assistant message dict (content + possible tool_calls),
     so the caller can drive a tool-calling loop when `tools` is provided.
@@ -1970,10 +1970,19 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         _budget = _tt if _tt is not None else _remaining()
         _read_budget = _tr if _tr is not None else min(timeout_read, _budget)
         t = aiohttp.ClientTimeout(total=_budget, connect=min(10, _budget), sock_read=_read_budget)
-        # Always create a fresh session — no session-level timeout to interfere
-        async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
-                return await _read_stream(resp)
+        # Always create a fresh session — no session-level timeout to interfere.
+        # Background callers queue behind the shared throttle so they can't
+        # pile onto the provider alongside a live chat request; live chat
+        # (is_background=False) always goes straight through.
+        if is_background:
+            async with _AI_BG_SEMAPHORE:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
+                        return await _read_stream(resp)
+        else:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
+                    return await _read_stream(resp)
 
     async def _read_stream(resp):
         """Read an SSE stream and return (status, json_body) where json_body
@@ -2155,23 +2164,35 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                             payload_ns = dict(payload)
                             payload_ns.pop("stream", None)
                             t2 = aiohttp.ClientTimeout(total=_fb_budget, connect=min(10, _fb_budget), sock_read=_fb_budget)
-                            async with aiohttp.ClientSession() as sess:
-                                async with sess.post(api_url, json=payload_ns, headers=headers, timeout=t2) as resp2:
-                                    if resp2.status == 200:
-                                        body_text = await resp2.text()
-                                        data = json_module.loads(body_text)
-                                        if "choices" in data:
-                                            ok = True
-                                            if use_tools:
-                                                _tools_supported_apis.add(api_url)
-                                                save_tools_supported()
-                                            _fb_content = data["choices"][0].get("message", {}).get("content", "")
-                                            if _fb_content:
-                                                print(f"✅ 非串流回退成功，取得 {len(_fb_content)} chars")
-                                            else:
-                                                print(f"⚠️ 非串流回退回應仍是空的（確認是 API/模型本身沒答案，非串流解析問題）")
-                                    else:
-                                        print(f"⚠️ 非串流回退也失敗：status={resp2.status}")
+
+                            async def _do_fallback_post():
+                                async with aiohttp.ClientSession() as sess:
+                                    async with sess.post(api_url, json=payload_ns, headers=headers, timeout=t2) as resp2:
+                                        if resp2.status == 200:
+                                            body_text_ = await resp2.text()
+                                            data_ = json_module.loads(body_text_)
+                                            return resp2.status, body_text_, data_
+                                        return resp2.status, "", None
+
+                            if is_background:
+                                async with _AI_BG_SEMAPHORE:
+                                    _status2, _body2, _data2 = await _do_fallback_post()
+                            else:
+                                _status2, _body2, _data2 = await _do_fallback_post()
+
+                            if _status2 == 200 and _data2 and "choices" in _data2:
+                                data = _data2
+                                ok = True
+                                if use_tools:
+                                    _tools_supported_apis.add(api_url)
+                                    save_tools_supported()
+                                _fb_content = data["choices"][0].get("message", {}).get("content", "")
+                                if _fb_content:
+                                    print(f"✅ 非串流回退成功，取得 {len(_fb_content)} chars")
+                                else:
+                                    print(f"⚠️ 非串流回退回應仍是空的（確認是 API/模型本身沒答案，非串流解析問題）")
+                            else:
+                                print(f"⚠️ 非串流回退也失敗：status={_status2}")
                     else:
                         ok = True
                         if use_tools:
@@ -2723,6 +2744,25 @@ def _ai_circuit_success():
 
 _tools_unsupported_apis: set = set()
 _tools_supported_apis: set = set()
+
+# ── Global background-AI-call throttle ──
+# Root cause of "every single chat reply times out": multiple background
+# systems (ai_refine_loop, community_awareness_loop, global micropedia scan,
+# orphan rescue, quiz generation, daily summaries, /analyze user, name
+# rating, ...) all call the SAME (often free/rate-limited) AI API endpoint,
+# with NO concurrency cap between them — ai_refine_loop explicitly launches
+# a new cycle without waiting for the previous one to finish, so cycles can
+# pile up and fire many concurrent requests. When several of these fire at
+# once alongside a live user chat message, the provider gets hammered with
+# simultaneous connections and starts hanging on ALL of them (including the
+# live chat request), well past our internal per-call timeouts — this is
+# what "Timeout on reading data from socket" on every single message means.
+# Fix: every BACKGROUND AI call must acquire this semaphore before hitting
+# the network, capping how many background requests can be in flight at
+# once. Live, user-facing chat replies (generate_chat_reply) are exempt —
+# they pass is_background=False and always go straight through, so a flood
+# of background work never delays an actual Discord reply.
+_AI_BG_SEMAPHORE = asyncio.Semaphore(2)
 _TOOLS_SUPPORTED_FILE = os.path.join(DATA_DIR, "tools_supported_apis.json")
 
 
@@ -4614,7 +4654,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             # Single-round quick path: give it nearly the ENTIRE remaining budget.
             _call_tt = max(6, _ai_budget - 1.5)
         _call_tr = max(4, _call_tt - 2)
-        assistant_msg = await call_chat_api(msgs, settings, tools=tools, timeout_total=_call_tt, timeout_read=_call_tr)
+        assistant_msg = await call_chat_api(msgs, settings, tools=tools, timeout_total=_call_tt, timeout_read=_call_tr, is_background=False)
         print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
@@ -4671,7 +4711,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # minus a small safety margin — not a hardcoded 8s.
         t2 = _time.time()
         _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
-        final_msg = await call_chat_api(msgs, settings, tools=None, timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2))
+        final_msg = await call_chat_api(msgs, settings, tools=None, timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False)
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
         return final_msg.get("content") or ""
 
@@ -4703,7 +4743,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # the whole chat feature down. Fall back to one plain, tool-free call.
         print(f"⚠️ 工具呼叫流程失敗，改用純文字模式重試：{e}")
         fallback_msg = await asyncio.wait_for(
-            call_chat_api(messages, settings, tools=None, timeout_total=10, timeout_read=8), timeout=12
+            call_chat_api(messages, settings, tools=None, timeout_total=10, timeout_read=8, is_background=False), timeout=12
         )
         raw_reply = fallback_msg.get("content") or ""
 
