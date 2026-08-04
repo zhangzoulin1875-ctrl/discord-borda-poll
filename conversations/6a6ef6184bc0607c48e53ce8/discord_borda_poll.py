@@ -201,34 +201,44 @@ async def keep_alive_server():
 # ── Dashboard API: 會員國管理 ──
 
 async def api_list_nations(request):
-    user = await _get_session_user(request)
-    if not user:
-        return web.json_response({"error": "unauthorized"}, status=401)
-    gid = int(request.match_info["gid"])
-    guilds = await _fetch_guilds(user["access_token"])
-    ge = next((g for g in guilds if int(g["id"]) == gid), None)
-    if not ge or not _is_guild_admin(ge):
-        return web.json_response({"error": "forbidden"}, status=403)
-    entries = [e for e in _member_nations["entries"] if e.get("guild_id") == gid]
-    # Strip internal fields, return safe dict
-    out = []
-    for e in entries:
-        out.append({
-            "id": e["id"],
-            "name_zh": e["name_zh"],
-            "name_en": e["name_en"],
-            "iso_code": e["iso_code"],
-            "representatives": e.get("representatives", []),
-            "representative_names": e.get("representative_names", []),
-            "registered_by_name": e.get("registered_by_name", ""),
-            "registered_date": e.get("registered_date", ""),
-            "category": e.get("category", "member"),
-            "notes": e.get("notes", ""),
-        })
-    return web.json_response(out)
+    try:
+        user = await _get_session_user(request)
+        if not user:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        gid = int(request.match_info["gid"])
+        guilds = await _fetch_guilds(user["access_token"])
+        ge = next((g for g in guilds if int(g["id"]) == gid), None)
+        if not ge or not _is_guild_admin(ge):
+            return web.json_response({"error": "forbidden"}, status=403)
+        entries = [e for e in _member_nations["entries"] if int(e.get("guild_id", 0)) == gid]
+        # Strip internal fields, return safe dict. Use .get() everywhere —
+        # some entries may be partial/legacy (e.g. created before the
+        # category system existed, or from an interrupted write) and must
+        # never crash the whole listing.
+        out = []
+        for e in entries:
+            out.append({
+                "id": e.get("id", ""),
+                "name_zh": e.get("name_zh", ""),
+                "name_en": e.get("name_en", ""),
+                "iso_code": e.get("iso_code", ""),
+                "representatives": e.get("representatives", []) or [],
+                "representative_names": e.get("representative_names", []) or [],
+                "registered_by_name": e.get("registered_by_name", ""),
+                "registered_date": e.get("registered_date", ""),
+                "category": e.get("category") or e.get("status") or "member",
+                "notes": e.get("notes", ""),
+            })
+        return web.json_response(out)
+    except Exception as ex:
+        import traceback
+        print(f"❌ api_list_nations 例外：{ex}")
+        traceback.print_exc()
+        return web.json_response({"error": f"伺服器錯誤：{ex}"}, status=500)
 
 
 async def api_create_nation(request):
+  try:
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -282,9 +292,15 @@ async def api_create_nation(request):
     _member_nations["entries"].append(entry)
     save_member_nations()
     return web.json_response({"ok": True, "id": entry["id"]})
+  except Exception as ex:
+    import traceback
+    print(f"❌ api_create_nation 例外：{ex}")
+    traceback.print_exc()
+    return web.json_response({"error": f"伺服器錯誤：{ex}"}, status=500)
 
 
 async def api_update_nation(request):
+  try:
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -321,9 +337,15 @@ async def api_update_nation(request):
 
     save_member_nations()
     return web.json_response({"ok": True})
+  except Exception as ex:
+    import traceback
+    print(f"❌ api_update_nation 例外：{ex}")
+    traceback.print_exc()
+    return web.json_response({"error": f"伺服器錯誤：{ex}"}, status=500)
 
 
 async def api_delete_nation(request):
+  try:
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -344,6 +366,11 @@ async def api_delete_nation(request):
 
     save_member_nations()
     return web.json_response({"ok": True})
+  except Exception as ex:
+    import traceback
+    print(f"❌ api_delete_nation 例外：{ex}")
+    traceback.print_exc()
+    return web.json_response({"error": f"伺服器錯誤：{ex}"}, status=500)
 
 
 # ──────────────────────────────────────────────
