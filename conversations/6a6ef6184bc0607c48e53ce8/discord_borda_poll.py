@@ -18212,7 +18212,17 @@ def _detect_mode_from_text(op_text: str) -> str:
 
 
 # 純文字排序投票的填寫格式，例如「1.E」「2. F」「12.G」——數字 + 分隔符號 + 1~6 個英文字母代碼。
-_NUMBERED_VOTE_RE = re.compile(r'(\d{1,2})\s*[.、)：:]\s*([A-Za-z]{1,6})(?![A-Za-z0-9\u4e00-\u9fff])')
+# ── FIX：negative lookahead 原本排除「代碼後面緊接中文字」（\u4e00-\u9fff），
+# 目的是避免抓到英文單字的一部分，但這連帶誤殺了「代碼+國名黏在一起寫」這種
+# 完全合法、且很常見的投票格式（因為候選人清單本身就是「e厂万共和國」這種
+# 代碼緊接中文名稱、沒有空格的寫法，投票者很自然會模仿同樣格式投票，例如
+# 「1.e厂万共和國」）。這種票之前會整張被 regex 直接抓不到任何代碼，變成
+# 完全被當成閒聊濾掉（比誤判成廢票更嚴重——連廢票統計都看不到）。
+# 修正：只排除代碼後面緊接「英文字母/數字」（避免真的抓到英文單字的一部分，
+# 例如「1. buy milk」的 buy），不再排除中文字——中文字接在代碼後面反而是
+# 「這確實是候選人代碼」的強烈正訊號，不該排除。最終有沒有抓對還是要看
+# 抓到的代碼是否存在於 legend_keys 裡，這才是真正防止誤判的關卡。
+_NUMBERED_VOTE_RE = re.compile(r'(\d{1,2})\s*[.、)：:]\s*([A-Za-z]{1,6})(?![A-Za-z0-9])')
 
 
 def _extract_vote_tokens(content: str, legend_keys: set, token_type: str) -> list:
@@ -18398,6 +18408,14 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
     skipped_count = 0      # 完全沒有偵測到任何合法代碼（閒聊、純圖片等）
     disputed = []          # 有爭議的投票（單選卻填多個選項等）
     spoiled = []           # 排序投票但沒填完整/代碼有誤的廢票
+    excluded_announcements = []  # 明確排除的「開票/計票結果公告」訊息
+
+    # 主席/秘書處在投票結束後，通常會在同一個貼文串裡回覆公佈人工計票結果
+    # （例如列出每個候選人的總分/總票數，最後宣布誰當選）。這種訊息長得很像
+    # 選票（也會提到每個候選人），必須明確排除，絕對不能被誤當成一張選票
+    # 去計分或誤判為廢票灌水統計。用關鍵字直接抓出來排除，不只是靠格式不match
+    # 這種被動保護。
+    _ANNOUNCEMENT_KEYWORDS = ("當選", "開票結果", "計票結果", "投票結果", "人工計票", "公佈結果")
 
     async for msg in thread.history(limit=None, oldest_first=True):
         if starter is not None and msg.id == starter.id:
@@ -18405,6 +18423,12 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
         if msg.author.bot:
             continue
         content = msg.content or ""
+        if any(kw in content for kw in _ANNOUNCEMENT_KEYWORDS):
+            excluded_announcements.append({
+                "author": msg.author.display_name,
+                "content": content[:80],
+            })
+            continue
         found = _extract_vote_tokens(content, legend_keys, token_type)
         if not found:
             skipped_count += 1
@@ -18451,6 +18475,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
         "skipped_count": skipped_count,
         "disputed": disputed,
         "spoiled": spoiled,
+        "excluded_announcements": excluded_announcements,
         "thread_id": thread.id,
         "thread_name": thread.name,
     }
@@ -18488,12 +18513,15 @@ def _build_tally_embed(result: dict) -> discord.Embed:
         embed.add_field(name="計票結果", value="（沒有偵測到任何選項）", inline=False)
 
     spoiled = result.get("spoiled", [])
+    excluded_ann = result.get("excluded_announcements", [])
     stats_lines = [
         f"✅ 有效投票：{result['valid_vote_count']} 筆",
         f"🚫 已過濾閒聊/圖片/無效訊息：{result['skipped_count']} 筆",
     ]
     if spoiled:
         stats_lines.append(f"🗑️ 廢票（未完整排序/代碼有誤）：{len(spoiled)} 筆")
+    if excluded_ann:
+        stats_lines.append(f"📢 已排除的計票結果公告訊息：{len(excluded_ann)} 筆（確認未被誤計為選票）")
     if result["disputed"]:
         stats_lines.append(f"⚠️ 有爭議訊息：{len(result['disputed'])} 筆（需人工複核）")
     embed.add_field(name="統計", value="\n".join(stats_lines), inline=False)
