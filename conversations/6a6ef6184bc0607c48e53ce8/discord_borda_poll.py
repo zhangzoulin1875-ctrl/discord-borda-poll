@@ -125,6 +125,13 @@ from aiohttp import web
 # Render runs in UTC; we convert everything to Asia/Taipei for display.
 GMT8 = timezone(timedelta(hours=8))
 
+# ── This bot is dedicated to a single Discord server: ICEA (國際總會 |
+# International Cultural Exchange Alliance). The dashboard used to make
+# users pick from a list of every server they happen to manage on Discord
+# (confusing — most of those servers have nothing to do with this bot), so
+# it's now hardcoded to skip straight to this one guild.
+ICEA_GUILD_ID = "1425065927027720286"
+
 
 # ──────────────────────────────────────────────
 # Keep-Alive HTTP Server
@@ -187,6 +194,7 @@ async def keep_alive_server():
     app.router.add_post("/logout", dashboard_logout)
     app.router.add_get("/api/me", api_me)
     app.router.add_get("/api/guilds", api_guilds)
+    app.router.add_get("/api/default-guild", api_default_guild)
     app.router.add_get("/api/guilds/{gid}/polls", api_polls)
     app.router.add_get("/api/guilds/{gid}/polls/{pid}", api_poll_detail)
     app.router.add_post("/api/guilds/{gid}/polls", api_create_poll)
@@ -946,6 +954,34 @@ async def api_guilds(request):
                 out.append({"id": g["id"], "name": g["name"], "icon_url": ic, "nation_only": True})
                 seen_ids.add(str(g["id"]))
     return web.json_response(out)
+
+
+async def api_default_guild(request):
+    """This bot only serves ICEA — return that single guild directly instead
+    of making the user pick from a list of every Discord server they happen
+    to manage. Still verifies the logged-in user actually has admin rights
+    (or is nation-whitelisted/the bot owner) on ICEA before handing back
+    dashboard access, same check as the old guild list used per-guild."""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    uid_str = user.get("user_id", "")
+    guilds = await _fetch_guilds(user["access_token"])
+    icea = next((g for g in guilds if str(g["id"]) == ICEA_GUILD_ID), None)
+    if not icea:
+        return web.json_response({"error": "你不是 ICEA 伺服器的成員，無法使用此後台"}, status=403)
+
+    is_owner_or_whitelisted = _is_nation_admin(uid_str, None)
+    if not _is_guild_admin(icea) and not is_owner_or_whitelisted:
+        return web.json_response({"error": "forbidden：你在 ICEA 伺服器沒有管理權限"}, status=403)
+
+    ic = f"https://cdn.discordapp.com/icons/{icea['id']}/{icea['icon']}.png" if icea.get("icon") else None
+    return web.json_response({
+        "id": icea["id"],
+        "name": icea["name"],
+        "icon_url": ic,
+        "nation_only": (not _is_guild_admin(icea)) and is_owner_or_whitelisted,
+    })
 
 
 async def api_polls(request):

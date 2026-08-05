@@ -30,9 +30,9 @@
 <!-- Header -->
 <nav class="bg-[#2b2d31] border-b border-black/30 px-6 py-3 flex items-center justify-between sticky top-0 z-50">
   <div class="flex items-center gap-3">
-    <button onclick="navigate('guilds')" class="text-xl font-bold text-[#5865f2]">ICEA official</button>
+    <button onclick="goHome()" class="text-xl font-bold text-[#5865f2]">ICEA official</button>
     <div class="flex items-center gap-1 ml-4">
-      <div class="nav-tab active" data-tab="polls" onclick="navigate('guilds')">📋 投票</div>
+      <div class="nav-tab active" data-tab="polls" onclick="goHome()">📋 投票</div>
       <div class="nav-tab" data-tab="chat-ai" onclick="showChatAIPanel()">🤖 AI 聊天</div>
       <div class="nav-tab" data-tab="meeting-ai" onclick="showMeetingAIPanel()">📝 會議AI</div>
       <div class="nav-tab" data-tab="nations" onclick="showNationsPanel()">🌍 會員國</div>
@@ -74,17 +74,10 @@
 <!-- Main -->
 <div id="main-view" class="hidden max-w-5xl mx-auto px-4 py-6">
 
-  <!-- Guilds -->
-  <div id="guilds-view" class="hidden fade-in">
-    <h2 class="text-xl font-bold mb-4">選擇伺服器</h2>
-    <div id="guild-list" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4"></div>
-  </div>
-
   <!-- Polls -->
   <div id="polls-view" class="hidden fade-in">
     <div class="flex items-center justify-between mb-4">
       <div class="flex items-center gap-3">
-        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
         <h2 id="polls-title" class="text-xl font-bold"></h2>
       </div>
       <button onclick="showCreateModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">+ 建立投票</button>
@@ -103,7 +96,7 @@
   <!-- Chat AI Settings Panel -->
   <div id="chat-ai-view" class="hidden fade-in">
     <div class="flex items-center gap-3 mb-6">
-      <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+      <button onclick="goHome()" class="text-gray-400 hover:text-white text-sm">← 返回</button>
       <h2 class="text-xl font-bold">🤖 AI 聊天設定</h2>
     </div>
     <div class="space-y-4">
@@ -342,7 +335,7 @@
   <!-- Meeting AI Settings Panel -->
   <div id="meeting-ai-view" class="hidden fade-in">
     <div class="flex items-center gap-3 mb-6">
-      <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+      <button onclick="goHome()" class="text-gray-400 hover:text-white text-sm">← 返回</button>
       <h2 class="text-xl font-bold">📝 會議紀錄 AI 設定</h2>
     </div>
     <div class="bg-[#2b2d31] rounded-xl p-5 space-y-4">
@@ -371,7 +364,7 @@
   <div id="nations-view" class="hidden fade-in">
     <div class="flex items-center justify-between mb-4">
       <div class="flex items-center gap-3">
-        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+        <button onclick="goHome()" class="text-gray-400 hover:text-white text-sm">← 返回</button>
         <h2 class="text-xl font-bold">🌍 會員國管理</h2>
       </div>
       <button onclick="showNationModal()" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg text-sm font-semibold">+ 註冊會員國</button>
@@ -383,7 +376,7 @@
   <div id="scan-view" class="hidden fade-in">
     <div class="flex items-center justify-between mb-4">
       <div class="flex items-center gap-3">
-        <button onclick="navigate('guilds')" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+        <button onclick="goHome()" class="text-gray-400 hover:text-white text-sm">← 返回</button>
         <h2 class="text-xl font-bold">🌐 全局百科掃描 — 關係譜圖</h2>
       </div>
       <div class="flex gap-2">
@@ -578,7 +571,7 @@ async function init() {
     document.getElementById('nav-avatar').src = me.avatar_url;
     document.getElementById('nav-username').textContent = me.username;
     showOnly('main-view');
-    navigate('guilds');
+    loadDefaultGuild();
   } catch(e) {
     showError('無法連線到伺服器：' + e.message);
   }
@@ -589,37 +582,31 @@ function showLoading(msg) { document.getElementById('loading-msg').textContent =
 
 function navigate(view) {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   showOnly('main-view');
-  if (view === 'guilds') { document.getElementById('guilds-view').classList.remove('hidden'); loadGuilds(); setActiveTab('polls'); }
-  else if (view === 'polls') { document.getElementById('polls-view').classList.remove('hidden'); setActiveTab('polls'); }
+  if (view === 'polls') { document.getElementById('polls-view').classList.remove('hidden'); setActiveTab('polls'); }
   else if (view === 'detail') { document.getElementById('detail-view').classList.remove('hidden'); setActiveTab('polls'); }
 }
 
-async function loadGuilds() {
-  const data = await api('/api/guilds');
-  // api_guilds returns a plain array of {id, name, icon_url} — NOT {guilds:[...]}.
-  // (previous version read data.guilds, which was always undefined, so the
-  // list silently rendered empty — this is the actual "dashboard空了" bug.)
-  if (data.error) { if (data.status === 401) { showOnly('login-view'); return; } showError('載入伺服器失敗：' + data.error); return; }
-  const guilds = Array.isArray(data) ? data : (data.guilds || []);
-  const list = document.getElementById('guild-list');
-  if (!guilds.length) { list.innerHTML = '<p class="text-gray-400 text-sm col-span-full">找不到你有管理員權限的伺服器。</p>'; return; }
-  list.innerHTML = guilds.map(g => `
-    <div class="bg-[#2b2d31] rounded-xl p-4 cursor-pointer hover:bg-[#3a3c43] transition" onclick="selectGuild('${g.id}','${escAttr(g.name)}',${g.nation_only ? 'true' : 'false'})">
-      ${g.icon_url ? `<img src="${g.icon_url}" class="w-12 h-12 rounded-xl mb-2">` : `<div class="w-12 h-12 rounded-xl bg-[#5865f2] flex items-center justify-center text-xl font-bold mb-2">${g.name[0]}</div>`}
-      <h3 class="font-semibold text-sm">${escHtml(g.name)}${g.nation_only ? ' <span class=\'text-xs text-blue-400\'>🌍 僅會員國管理</span>' : ''}</h3>
-    </div>
-  `).join('');
-}
+// Home = the (only) ICEA guild's poll list. Replaces the old guild-picker
+// screen now that this dashboard is dedicated to a single server.
+function goHome() { navigate('polls'); loadPolls(); }
 
-function selectGuild(id, name, nationOnly) {
-  currentGuild = id; currentGuildName = name;
-  document.getElementById('polls-title').textContent = name;
-  // Nation-only (whitelist/owner without Discord admin perms) users don't have
-  // poll-management rights on this guild — jump straight to 會員國 instead of
-  // 'polls' to avoid landing on a dead-end forbidden error screen.
-  if (nationOnly) { showNationsPanel(); }
+// This bot is dedicated to a single server (ICEA) — no more guild picker.
+// Fetches that one guild directly and lands the user on its poll list (or,
+// for nation-only whitelisted users without Discord admin rights, straight
+// on 會員國 management instead of a dead-end forbidden screen).
+async function loadDefaultGuild() {
+  const g = await api('/api/default-guild');
+  if (g.error) {
+    if (g.status === 401) { showOnly('login-view'); return; }
+    showError('載入伺服器失敗：' + g.error);
+    return;
+  }
+  currentGuild = g.id;
+  currentGuildName = g.name;
+  document.getElementById('polls-title').textContent = g.name;
+  if (g.nation_only) { showOnly('main-view'); showNationsPanel(); }
   else { navigate('polls'); loadPolls(); }
 }
 
@@ -709,7 +696,7 @@ function escAttr(s) { return String(s||'').replace(/'/g,"\\'"); }
 
 // ── Chat AI Settings ──
 async function showChatAIPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('chat-ai-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('chat-ai');
@@ -872,7 +859,7 @@ async function testAdminFunctions() {
 
 // ── Meeting AI Settings ──
 async function showMeetingAIPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('meeting-ai-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('meeting-ai');
@@ -903,7 +890,7 @@ async function saveMeetingAISettings() {
 let editingNationId = null;
 
 async function showNationsPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('nations-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('nations');
@@ -911,7 +898,7 @@ async function showNationsPanel() {
 }
 
 async function loadNations() {
-  if (!currentGuild) { navigate('guilds'); return; }
+  if (!currentGuild) { loadDefaultGuild(); return; }
   const list = await api(`/api/guilds/${currentGuild}/nations`);
   if (list.error) { if (list.status === 401) { showOnly('login-view'); return; } alert('載入失敗：' + list.error); return; }
   const container = document.getElementById('nation-list');
@@ -968,7 +955,7 @@ function closeNationModal() {
 }
 
 async function saveNation() {
-  if (!currentGuild) { alert('請先在左側選擇一個伺服器'); navigate('guilds'); return; }
+  if (!currentGuild) { loadDefaultGuild(); return; }
   const nameZh = document.getElementById('nation-name-zh').value.trim();
   const nameEn = document.getElementById('nation-name-en').value.trim();
   const iso = document.getElementById('nation-iso').value.trim().toUpperCase();
@@ -1019,7 +1006,7 @@ function cleanWikitext(text) {
 }
 
 async function showScanPanel() {
-  ['guilds-view','polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('scan-view').classList.remove('hidden');
   showOnly('main-view');
   setActiveTab('scan');
@@ -1097,7 +1084,7 @@ function updateScanUI(phase, msg, progress, total) {
 }
 
 async function startGlobalScan() {
-  if (!currentGuild) { alert('\u8acb\u5148\u9078\u64c7\u4f3a\u670d\u5668'); navigate('guilds'); return; }
+  if (!currentGuild) { loadDefaultGuild(); return; }
   if (scanRunning) { alert('\u6383\u63cf\u6b63\u5728\u9032\u884c\u4e2d'); return; }
   if (!confirm('\u958b\u59cb\u5168\u5c40\u767e\u79d1\u6383\u63cf\uff1f\n\n\u700f\u89bd\u5668\u6703\u722c\u53d6 micropedia.site \u5168\u90e8\u689d\u76ee\uff0c\u5206\u6279\u9001\u7d66 AI \u5206\u6790\u3002\n\u8acb\u4fdd\u6301\u6b64\u5206\u9801\u958b\u555f\u76f4\u5230\u6383\u63cf\u5b8c\u6210\u3002\n\uff08\u5df2\u5927\u5e45\u63d0\u9ad8\u4e26\u767c\u6578\uff0c\u9810\u4f30\u53ef\u572820\u5206\u9418\u5167\u5b8c\u6210\uff09')) return;
 
