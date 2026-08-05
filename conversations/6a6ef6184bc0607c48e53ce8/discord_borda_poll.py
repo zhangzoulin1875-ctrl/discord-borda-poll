@@ -3172,6 +3172,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         status = None
         body_text = ""
         _t0 = _time.time()
+        _tools_already_stripped = False
         try:
             status, body_text = await _post(payload)
             print(f"⏱️ call_chat_api: _post 耗時 {_time.time()-_t0:.1f}s (status={status}, tools={'yes' if use_tools else 'no'})")
@@ -3185,9 +3186,26 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                 save_tools_unsupported()
                 payload.pop("tools", None)
                 payload.pop("tool_choice", None)
-                status, body_text = await _post(payload)
+                _tools_already_stripped = True
+                try:
+                    status, body_text = await _post(payload)
+                except (asyncio.TimeoutError, Exception) as e2:
+                    # 拿掉 tools 後還是逾時/失敗 —— 不要往外拋，讓下面的「模型降級鏈」
+                    # 邏輯有機會先在同一組 API 上試其他模型，而不是直接跳去備援 API。
+                    print(f"⚠️ 移除 tools 後仍逾時/錯誤（{type(e2).__name__}: {e2}），視為失敗狀態，改走模型降級鏈")
+                    status = -1  # sentinel：代表是連線例外，不是真的 HTTP 狀態碼
+                    body_text = f"{type(e2).__name__}: {e2}"
             else:
-                raise
+                # ── FIX：主要請求逾時（asyncio.TimeoutError／連線例外）時，
+                # 之前這裡會直接 raise，導致整個 model_fallback_chain（同一組
+                # API 上的其他模型）完全被跳過，逾時等同直接跳去備援 API。
+                # 現在改成把它當成一次「失敗」狀態，繼續往下走，讓下面的
+                # 「if not ok:」降級鏈邏輯有機會先在同一組 API 上試過整條
+                # model_fallback_chain，只有整條鏈都失敗才會真的往外拋、
+                # 交給更外層的備援 API 處理。
+                print(f"⚠️ 主要請求逾時/錯誤（{type(e).__name__}: {e}），視為失敗狀態，改走模型降級鏈")
+                status = -1  # sentinel：代表是連線例外，不是真的 HTTP 狀態碼
+                body_text = f"{type(e).__name__}: {e}"
 
         if status == 200:
             try:
@@ -3256,23 +3274,30 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             except Exception as e:
                 print(f"⚠️ 解析回應失敗：{e}")
 
-        if not ok and use_tools:
+        if not ok and use_tools and not _tools_already_stripped:
             # Endpoint returned a non-200 or malformed response WITH tools —
             # assume it doesn't support function calling and never try again.
+            # (若上面的例外處理已經先剝過 tools 重試過一次，這裡就不用重複做。)
             print(f"⚠️ Chat AI 端點帶 tools 參數呼叫失敗（status={status}），之後略過 tools：{body_text[:200]}")
             _tools_unsupported_apis.add(api_url)
             save_tools_unsupported()
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
-            status, body_text = await _post(payload)
-            if status == 200:
-                try:
-                    data = json_module.loads(body_text)
-                    ok = "choices" in data
-                except Exception:
-                    ok = False
+            try:
+                status, body_text = await _post(payload)
+                if status == 200:
+                    try:
+                        data = json_module.loads(body_text)
+                        ok = "choices" in data
+                    except Exception:
+                        ok = False
+            except (asyncio.TimeoutError, Exception) as e3:
+                print(f"⚠️ 移除 tools 後仍逾時/錯誤（{type(e3).__name__}: {e3}），視為失敗狀態，改走模型降級鏈")
+                status = -1
+                body_text = f"{type(e3).__name__}: {e3}"
 
         if not ok:
+            _status_label = "連線逾時/例外" if status == -1 else f"HTTP {status}"
             # ── Model fallback chain: try next model on ANY failure status ──
             # Started out only retrying on 401/403/503/502/504 (auth/overload),
             # but real-world proxies also throw model-specific 400s like
@@ -3298,8 +3323,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             _skip_model_chain = _skip_chain_for_admin or _skip_chain_for_owner
             if _skip_model_chain and len(_model_chain) > 1:
                 _why = "行政功能" if _skip_chain_for_admin else "擁有者跳過降級"
-                _diag.append(f"⏭️ 跳過降級鏈（{_why}），直接備援（HTTP {status}）")
-                print(f"⏭️ 跳過模型降級鏈（{_why}），直接交由備援 API 處理（HTTP {status}）")
+                _diag.append(f"⏭️ 跳過降級鏈（{_why}），直接備援（{_status_label}）")
+                print(f"⏭️ 跳過模型降級鏈（{_why}），直接交由備援 API 處理（{_status_label}）")
             _model_retryable = (not _skip_model_chain) and len(_model_chain) > 1
             if _model_retryable:
                 for _mi in range(1, len(_model_chain)):
@@ -3307,8 +3332,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         print(f"⏱️ 模型降級鏈：剩餘時間不足（已進入備援 API 保留時段），跳過 {_model_chain[_mi]}")
                         break
                     _alt_model = _model_chain[_mi]
-                    _diag.append(f"🔄 降級：{payload['model']} → {_alt_model}（HTTP {status}）")
-                    print(f"🔄 模型降級：{payload['model']} → {_alt_model}（HTTP {status}）")
+                    _diag.append(f"🔄 降級：{payload['model']} → {_alt_model}（{_status_label}）")
+                    print(f"🔄 模型降級：{payload['model']} → {_alt_model}（{_status_label}）")
                     payload["model"] = _alt_model
                     try:
                         status, body_text = await _post(payload)
