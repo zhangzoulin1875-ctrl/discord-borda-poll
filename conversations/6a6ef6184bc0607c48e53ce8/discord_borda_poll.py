@@ -1625,6 +1625,18 @@ chat_ai_settings = {
     "fallback_rate_limit_msg": "⚠️ 備援 API 請求過於頻繁，請稍等一下再試～",
     "entertainment_unavailable_msg": "🔧 AI 系統暫時維護中，娛樂功能暫時關閉，請稍後再試～",
     "circuit_cooldown_msg": "🔌 AI API 目前被供應商暫時封鎖（anomalous behavior），已自動暫停請求，將在約 2 分鐘後重試。",
+    # ── AI 網警（自動訊息審查）──
+    "ai_mod_enabled": False,            # 是否啟用 AI 網警
+    "ai_mod_model": "",                 # 審查用的模型名稱（留空=使用主模型）
+    "ai_mod_api_url": "",              # 審查用的 API URL（留空=使用主 API URL）
+    "ai_mod_api_key": "",              # 審查用的 API Key（留空=使用主 API Key）
+    "ai_mod_report_channel": None,     # 通報頻道 ID
+    "ai_mod_custom_rules": "",          # 額外伺服器規則（自由文字，注入到審查 prompt）
+    "ai_mod_confidence": "medium",     # 靈敏度：low / medium / high（影響通報門檻）
+    "ai_mod_cooldown": 30,             # 同一使用者兩次通報之間的最短間隔（秒）
+    "ai_mod_max_tokens": 150,          # 審查回覆最大 token 數（輕量級）
+    "ai_mod_timeout": 10,              # 審查 API 逾時（秒）
+    "ai_mod_exempt_roles": [],          # 豁免角色 ID 列表（管理員等）
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -7045,6 +7057,18 @@ async def api_get_chat_ai_settings(request):
         "ai_room_max_rooms": ai_chat_rooms.get("max_rooms", 50),
         "ai_room_max_history": ai_chat_rooms.get("max_history_messages", 50),
         "ai_room_count": len(ai_chat_rooms.get("rooms", {})),
+        # AI 網警
+        "ai_mod_enabled": chat_ai_settings.get("ai_mod_enabled", False),
+        "ai_mod_model": chat_ai_settings.get("ai_mod_model", ""),
+        "ai_mod_api_url": chat_ai_settings.get("ai_mod_api_url", ""),
+        "ai_mod_api_key_masked": (lambda k: k[:6]+"..."+k[-4:] if len(k)>10 else ("***" if k else ""))(chat_ai_settings.get("ai_mod_api_key", "")),
+        "ai_mod_report_channel": chat_ai_settings.get("ai_mod_report_channel"),
+        "ai_mod_custom_rules": chat_ai_settings.get("ai_mod_custom_rules", ""),
+        "ai_mod_confidence": chat_ai_settings.get("ai_mod_confidence", "medium"),
+        "ai_mod_cooldown": chat_ai_settings.get("ai_mod_cooldown", 30),
+        "ai_mod_max_tokens": chat_ai_settings.get("ai_mod_max_tokens", 150),
+        "ai_mod_timeout": chat_ai_settings.get("ai_mod_timeout", 10),
+        "ai_mod_exempt_roles": chat_ai_settings.get("ai_mod_exempt_roles", []),
     })
 
 
@@ -7137,6 +7161,29 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["circuit_cooldown_msg"] = body["circuit_cooldown_msg"]
     if "vision_fallback_chain" in body:
         chat_ai_settings["vision_fallback_chain"] = body["vision_fallback_chain"]
+    # AI 網警設定
+    if "ai_mod_enabled" in body:
+        chat_ai_settings["ai_mod_enabled"] = bool(body["ai_mod_enabled"])
+    if "ai_mod_model" in body:
+        chat_ai_settings["ai_mod_model"] = body["ai_mod_model"]
+    if "ai_mod_api_url" in body:
+        chat_ai_settings["ai_mod_api_url"] = body["ai_mod_api_url"]
+    if "ai_mod_api_key" in body and body["ai_mod_api_key"]:
+        chat_ai_settings["ai_mod_api_key"] = body["ai_mod_api_key"]
+    if "ai_mod_report_channel" in body:
+        chat_ai_settings["ai_mod_report_channel"] = body["ai_mod_report_channel"]
+    if "ai_mod_custom_rules" in body:
+        chat_ai_settings["ai_mod_custom_rules"] = body["ai_mod_custom_rules"]
+    if "ai_mod_confidence" in body:
+        chat_ai_settings["ai_mod_confidence"] = body["ai_mod_confidence"]
+    if "ai_mod_cooldown" in body:
+        chat_ai_settings["ai_mod_cooldown"] = int(body["ai_mod_cooldown"])
+    if "ai_mod_max_tokens" in body:
+        chat_ai_settings["ai_mod_max_tokens"] = int(body["ai_mod_max_tokens"])
+    if "ai_mod_timeout" in body:
+        chat_ai_settings["ai_mod_timeout"] = int(body["ai_mod_timeout"])
+    if "ai_mod_exempt_roles" in body:
+        chat_ai_settings["ai_mod_exempt_roles"] = body["ai_mod_exempt_roles"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -8292,6 +8339,221 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
         print(f"⚠️ 入盟申請編輯處理錯誤：{e}")
 
 
+# ── AI 網警：狀態追蹤 ──
+_ai_mod_last_report: dict = {}  # user_id -> timestamp of last report
+_ai_mod_semaphore = asyncio.Semaphore(3)  # max 3 concurrent moderation checks
+
+
+async def _ai_moderate_message(message):
+    """AI 網警：用輕量級 AI 檢查每一則訊息是否違規。
+    非阻塞式 — fire-and-forget，不影響正常訊息流程。
+    偵測到疑似違規就通報到指定頻道。"""
+    settings = chat_ai_settings
+
+    # 基本條件檢查
+    if not settings.get("ai_mod_enabled"):
+        return
+    if not settings.get("ai_mod_report_channel"):
+        return
+    if not message.guild:
+        return
+    if message.author.bot:
+        return
+
+    # 取得 API 設定（可獨立或沿用主 API）
+    api_url = settings.get("ai_mod_api_url") or settings.get("api_url", "")
+    api_key = settings.get("ai_mod_api_key") or settings.get("api_key", "")
+    model = settings.get("ai_mod_model") or settings.get("model", "gpt-4o-mini")
+    if not api_url or not api_key:
+        return
+
+    # 豁免角色檢查
+    exempt_roles = settings.get("ai_mod_exempt_roles", [])
+    if exempt_roles and message.author.roles:
+        for role in message.author.roles:
+            if str(role.id) in [str(r) for r in exempt_roles]:
+                return
+        # 也豁免伺服器管理員
+        if message.author.guild_permissions.manage_guild or message.author.guild_permissions.administrator:
+            return
+
+    # 冷卻檢查（同一使用者）
+    uid = str(message.author.id)
+    now = _time.time()
+    cooldown = settings.get("ai_mod_cooldown", 30)
+    last = _ai_mod_last_report.get(uid, 0)
+    if now - last < cooldown:
+        return
+
+    # 跳過太短的訊息（省 API 用量）
+    content = (message.content or "").strip()
+    if len(content) < 3:
+        return
+
+    # 靈敏度設定
+    confidence = settings.get("ai_mod_confidence", "medium")
+    threshold_map = {"low": "high", "medium": "medium", "high": "low"}
+    threshold_desc = threshold_map.get(confidence, "medium")
+
+    # 建構審查 system prompt
+    mod_prompt = (
+        "你是一個 Discord 伺服器的 AI 網警系統，負責自動審查每則訊息是否違規。"
+        "你的判斷依據是以下社群準則和伺服器自訂規則。\n\n"
+        "【社群準則】\n"
+        "1. 禁止人身攻擊、侮辱、歧視性言論（針對種族、性別、宗教、性傾向等）\n"
+        "2. 禁止騷擾、恐嚇、跟蹤行為\n"
+        "3. 禁止散布仇恨言論或煽動對立\n"
+        "4. 禁止垃圾訊息、廣告宣傳（除非在指定頻道）\n"
+        "5. 禁止 NSFW 內容（色情、暴力、血腥）\n"
+        "6. 禁止冒充他人身份\n"
+        "7. 禁止惡意刷屏或干擾正常討論\n"
+    )
+
+    custom_rules = settings.get("ai_mod_custom_rules", "").strip()
+    if custom_rules:
+        mod_prompt += "\n【伺服器自訂規則】\n" + custom_rules + "\n"
+
+    _nl = "\n"
+    mod_prompt += (
+        _nl + "【審查規則】" + _nl
+        + "判斷標準：" + threshold_desc + "（low=只通報嚴重違規，medium=中等，high=敏感）" + _nl
+        + "如果訊息是正常聊天、玩笑、討論，即使語氣不太好也不算違規。" + _nl
+        + "只有真正違反上述規則的訊息才需要通報。" + _nl + _nl
+        + "請以 JSON 格式回覆，格式如下：" + _nl
+        + '{"violation": true/false, "severity": "low/medium/high", '
+        + '"rule": "違反的規則簡述", "reason": "判斷理由"}' + _nl
+        + '如果沒有違規，回覆 {"violation": false}。' + _nl
+        + "只回覆 JSON，不要加其他文字。"
+    )
+
+    # 建構 API 請求
+    user_content = "[頻道: #" + message.channel.name + "] [使用者: " + message.author.display_name + "]\n" + content[:500]
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    url = api_url.strip()
+    if not url.endswith("/chat/completions"):
+        if url.endswith("/v1"):
+            url += "/chat/completions"
+        else:
+            url += "/v1/chat/completions"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": mod_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "max_tokens": settings.get("ai_mod_max_tokens", 150),
+        "stream": False,
+        "temperature": 0.1,
+    }
+
+    timeout_sec = settings.get("ai_mod_timeout", 10)
+
+    try:
+        async with _ai_mod_semaphore:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout_sec)
+                ) as resp:
+                    if resp.status != 200:
+                        return
+                    data = await resp.json()
+    except asyncio.TimeoutError:
+        return
+    except Exception as e:
+        print(f"⚠️ AI 網警請求失敗：{e}")
+        return
+
+    # 解析 AI 回覆
+    try:
+        reply_text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if not reply_text:
+            return
+
+        # 嘗試解析 JSON
+        import json as _json
+        # 去掉可能的 markdown code block 標記
+        reply_text = reply_text.replace("```json", "").replace("```", "").strip()
+        result = _json.loads(reply_text)
+
+        if not result.get("violation", False):
+            return
+
+        severity = result.get("severity", "low")
+        rule = result.get("rule", "未知")
+        reason = result.get("reason", "未提供")
+
+    except (_json.JSONDecodeError, IndexError, KeyError) as e:
+        print(f"⚠️ AI 網警回覆解析失敗：{e} | 原始回覆：{reply_text[:200]}")
+        return
+
+    # 偵測到違規，通報到指定頻道
+    _ai_mod_last_report[uid] = now
+
+    severity_colors = {
+        "low": discord.Color.yellow(),
+        "medium": discord.Color.orange(),
+        "high": discord.Color.red(),
+    }
+    severity_emojis = {"low": "⚠️", "medium": "🟠", "high": "🔴"}
+
+    embed = discord.Embed(
+        title=f"{severity_emojis.get(severity, '⚠️')} AI 網警偵測到疑似違規",
+        color=severity_colors.get(severity, discord.Color.yellow()),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(
+        name="👤 使用者",
+        value=f"{message.author.display_name} ({message.author.mention})\nID: `{message.author.id}`",
+        inline=False,
+    )
+    embed.add_field(
+        name="📍 頻道",
+        value=f"#{message.channel.name} ({message.channel.mention})",
+        inline=False,
+    )
+    embed.add_field(
+        name="💬 訊息內容",
+        value=f"> {content[:500]}{'...' if len(content) > 500 else ''}",
+        inline=False,
+    )
+    embed.add_field(name="📋 違反規則", value=rule, inline=True)
+    embed.add_field(name="⚠️ 嚴重度", value=severity, inline=True)
+    embed.add_field(name="🔍 判斷理由", value=reason[:500], inline=False)
+
+    # 訊息連結
+    try:
+        msg_url = message.jump_url
+        embed.add_field(name="🔗 原始訊息", value=f"[點擊查看]({msg_url})", inline=False)
+    except Exception:
+        pass
+
+    embed.set_footer(text=f"AI 網警 | 模型: {model} | 靈敏度: {confidence} | 自動偵測，非最終判定")
+
+    # 發送通報
+    try:
+        report_ch_id = settings.get("ai_mod_report_channel")
+        report_ch = message.guild.get_channel(int(report_ch_id))
+        if report_ch is None:
+            # 嘗試跨伺服器搜尋
+            for g in bot.guilds:
+                ch = g.get_channel(int(report_ch_id))
+                if ch:
+                    report_ch = ch
+                    break
+        if report_ch:
+            await report_ch.send(embed=embed)
+            print(f"🚨 AI 網警通報：{message.author.display_name} 在 #{message.channel.name} | {rule} | {severity}")
+        else:
+            print(f"⚠️ AI 網警：找不到通報頻道 ID={report_ch_id}")
+    except discord.Forbidden:
+        print(f"⚠️ AI 網警：無權限在通報頻道發送訊息")
+    except Exception as e:
+        print(f"⚠️ AI 網警通報發送失敗：{e}")
+
+
 @bot.event
 async def on_message(message):
     global _last_global_reply
@@ -8470,6 +8732,12 @@ async def on_message(message):
     # Ignore slash commands (but allow messages starting with "!" which could be normal text)
     if message.content.startswith("/"):
         return
+
+    # ── AI 網警：非阻塞式自動審查 ──
+    # Fire-and-forget — 不等待結果，不影響正常訊息流程。
+    # 只有啟用時才建立 task，否則零開銷。
+    if chat_ai_settings.get("ai_mod_enabled") and message.guild:
+        asyncio.create_task(_ai_moderate_message(message))
 
     # Debug: log all human messages
     content_preview = message.content[:80].replace("\n", " ") if message.content else "(empty)"

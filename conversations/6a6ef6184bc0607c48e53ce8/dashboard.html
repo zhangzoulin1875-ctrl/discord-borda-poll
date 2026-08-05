@@ -37,6 +37,7 @@
       <div class="nav-tab" data-tab="meeting-ai" onclick="showMeetingAIPanel()">📝 會議AI</div>
       <div class="nav-tab" data-tab="nations" onclick="showNationsPanel()">🌍 會員國</div>
       <div class="nav-tab" data-tab="scan" onclick="showScanPanel()">🌐 關係譜圖</div>
+      <div class="nav-tab" data-tab="ai-mod" onclick="showChatAIPanel(); setTimeout(() => { const el = document.getElementById('ai-mod-section'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 300);">🚨 AI 網警</div>
     </div>
   </div>
   <div id="nav-user" class="hidden flex items-center gap-3">
@@ -312,6 +313,63 @@
           </div>
         </div>
       </div>
+      <!-- AI 網警 -->
+      <div id="ai-mod-section" class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">🚨 AI 網警</h3>
+        <p class="text-xs text-gray-400 mb-4">用輕量級 AI 自動偵測每一則訊息是否違規，偵測到疑似違規就通報到指定頻道。不影響正常訊息流程（非阻塞式）。</p>
+        <div class="flex items-center justify-between mb-4">
+          <label class="text-sm font-medium">啟用 AI 網警</label>
+          <label class="toggle"><input type="checkbox" id="ai-mod-enabled"><span class="toggle-slider"></span></label>
+        </div>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">審查模型（留空=用主模型）</label>
+            <input type="text" id="ai-mod-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">靈敏度</label>
+            <select id="ai-mod-confidence" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+              <option value="low">低（只通報嚴重違規）</option>
+              <option value="medium">中（預設）</option>
+              <option value="high">高（敏感偵測）</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">獨立 API URL（留空=用主 API）</label>
+            <input type="text" id="ai-mod-api-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">獨立 API Key（留空=用主 API）</label>
+            <input type="password" id="ai-mod-api-key" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入可覆蓋">
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">通報頻道 ID</label>
+            <input type="text" id="ai-mod-report-channel" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="123456789012345678">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">同一使用者冷卻（秒）</label>
+            <input type="number" id="ai-mod-cooldown" min="0" value="30" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">最大 Token 數</label>
+            <input type="number" id="ai-mod-max-tokens" min="50" value="150" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">API 逾時（秒）</label>
+            <input type="number" id="ai-mod-timeout" min="3" value="10" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+          </div>
+        </div>
+        <label class="block text-sm text-gray-400 mb-1">額外伺服器規則（注入到審查 AI 的 prompt）</label>
+        <textarea id="ai-mod-custom-rules" rows="4" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm resize-none" placeholder="範例：&#10;8. 禁止在非提案頻道討論政治話題&#10;9. 禁止使用特定敏感詞彙&#10;10. 所有發言必須使用繁體中文"></textarea>
+        <p class="text-xs text-gray-400">伺服器管理員（有管理伺服器權限）自動豁免。API Key 留空則沿用主 API。模型可設為更便宜/快速的模型以節省用量。</p>
+      </div>
+
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
 
       <!-- API 連接測試 -->
@@ -751,6 +809,20 @@ async function showChatAIPanel() {
   document.getElementById('ai-fallback-rate-limit-msg').value = s.fallback_rate_limit_msg || '';
   document.getElementById('ai-entertainment-unavailable-msg').value = s.entertainment_unavailable_msg || '';
   document.getElementById('ai-circuit-cooldown-msg').value = s.circuit_cooldown_msg || '';
+  // AI 網警
+  document.getElementById('ai-mod-enabled').checked = s.ai_mod_enabled || false;
+  document.getElementById('ai-mod-model').value = s.ai_mod_model || '';
+  document.getElementById('ai-mod-api-url').value = s.ai_mod_api_url || '';
+  const _modKey = document.getElementById('ai-mod-api-key');
+  _modKey.placeholder = s.ai_mod_api_key_masked ? `已設定（${s.ai_mod_api_key_masked}）輸入新值可覆蓋` : '輸入可覆蓋';
+  _modKey.value = '';
+  setTimeout(() => { _modKey.value = ''; }, 300);
+  document.getElementById('ai-mod-report-channel').value = s.ai_mod_report_channel || '';
+  document.getElementById('ai-mod-custom-rules').value = s.ai_mod_custom_rules || '';
+  document.getElementById('ai-mod-confidence').value = s.ai_mod_confidence || 'medium';
+  document.getElementById('ai-mod-cooldown').value = s.ai_mod_cooldown ?? 30;
+  document.getElementById('ai-mod-max-tokens').value = s.ai_mod_max_tokens ?? 150;
+  document.getElementById('ai-mod-timeout').value = s.ai_mod_timeout ?? 10;
 }
 
 async function saveChatAISettings() {
@@ -793,6 +865,18 @@ async function saveChatAISettings() {
     entertainment_unavailable_msg: document.getElementById('ai-entertainment-unavailable-msg').value.trim(),
     circuit_cooldown_msg: document.getElementById('ai-circuit-cooldown-msg').value.trim(),
   };
+  // AI 網警
+  data.ai_mod_enabled = document.getElementById('ai-mod-enabled').checked;
+  data.ai_mod_model = document.getElementById('ai-mod-model').value.trim();
+  data.ai_mod_api_url = document.getElementById('ai-mod-api-url').value.trim();
+  data.ai_mod_report_channel = document.getElementById('ai-mod-report-channel').value.trim() || null;
+  data.ai_mod_custom_rules = document.getElementById('ai-mod-custom-rules').value;
+  data.ai_mod_confidence = document.getElementById('ai-mod-confidence').value;
+  data.ai_mod_cooldown = parseInt(document.getElementById('ai-mod-cooldown').value) || 30;
+  data.ai_mod_max_tokens = parseInt(document.getElementById('ai-mod-max-tokens').value) || 150;
+  data.ai_mod_timeout = parseInt(document.getElementById('ai-mod-timeout').value) || 10;
+  const modKey = document.getElementById('ai-mod-api-key').value.trim();
+  if (modKey) data.ai_mod_api_key = modKey;
   const fallbackKey = document.getElementById('ai-fallback-key').value.trim();
   if (fallbackKey) data.fallback_api_key = fallbackKey;
   const apiKey = document.getElementById('ai-api-key').value.trim();
