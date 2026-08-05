@@ -19191,7 +19191,7 @@ async def _generate_turtle_soup_hint(truth: str, qa_history: list) -> str:
 # ── Discord UI: 提示按鈕面板 ──
 class TurtleSoupHintView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
 
     async def _give_hint(self, interaction: discord.Interaction, want_hint: bool):
         global _turtle_soup_state
@@ -19226,7 +19226,7 @@ class TurtleSoupHintView(discord.ui.View):
 # ── Discord UI: 加時按鈕面板 ──
 class TurtleSoupExtraTimeView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
 
     @discord.ui.button(label="➕ 加時 +5 次", style=discord.ButtonStyle.success, custom_id="turtle_soup_extra_yes")
     async def extra_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
