@@ -178,6 +178,7 @@ async def keep_alive_server():
     # Chat AI settings API
     app.router.add_get("/api/chat-ai-settings", api_get_chat_ai_settings)
     app.router.add_put("/api/chat-ai-settings", api_set_chat_ai_settings)
+    app.router.add_post("/api/test-ai-connection", api_test_ai_connection)
     # Dashboard routes
     app.router.add_get("/dashboard", dashboard_index)
     app.router.add_get("/login", dashboard_login)
@@ -5876,6 +5877,77 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["circuit_cooldown_msg"] = body["circuit_cooldown_msg"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
+
+
+async def api_test_ai_connection(request):
+    """Test primary and/or fallback API connection with a minimal request.
+    POST body: {"target": "primary" | "fallback" | "both"}
+    Returns per-target: status (ok/error/timeout), latency_ms, model, response_snippet, error."""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await request.json()
+    target = body.get("target", "both")
+
+    async def _test_one(api_url, api_key, model, label):
+        import time as _time
+        if not api_url or not api_key:
+            return {"label": label, "status": "error", "error": "API URL 或 Key 未設定"}
+        url = api_url.strip()
+        if not url.endswith("/chat/completions"):
+            if url.endswith("/v1"):
+                url += "/chat/completions"
+            else:
+                url += "/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": model or "gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": "請回覆「連線正常」四個字。"}
+            ],
+            "max_tokens": 20,
+            "stream": False,
+        }
+        t0 = _time.monotonic()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15, sock_read=10)) as sess:
+                async with sess.post(url, json=payload, headers=headers) as resp:
+                    elapsed = int((_time.monotonic() - t0) * 1000)
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        return {"label": label, "status": "error", "http_status": resp.status,
+                                "latency_ms": elapsed, "error": f"HTTP {resp.status}: {err_text[:200]}"}
+                    data = await resp.json()
+                    content = ""
+                    choices = data.get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "").strip()
+                    return {"label": label, "status": "ok", "latency_ms": elapsed,
+                            "model": model or "gpt-4o-mini",
+                            "response_snippet": content[:100]}
+        except asyncio.TimeoutError:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "status": "timeout", "latency_ms": elapsed,
+                    "error": "請求逾時（15 秒）"}
+        except Exception as e:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "status": "error", "latency_ms": elapsed,
+                    "error": str(e)[:300]}
+
+    results = []
+    if target in ("primary", "both"):
+        results.append(await _test_one(
+            chat_ai_settings.get("api_url", ""),
+            chat_ai_settings.get("api_key", ""),
+            chat_ai_settings.get("model", ""),
+            "主 API"))
+    if target in ("fallback", "both"):
+        results.append(await _test_one(
+            chat_ai_settings.get("fallback_api_url", ""),
+            chat_ai_settings.get("fallback_api_key", ""),
+            chat_ai_settings.get("fallback_model", ""),
+            "備援 API"))
+    return web.json_response({"results": results})
 
 
 ai_settings = {

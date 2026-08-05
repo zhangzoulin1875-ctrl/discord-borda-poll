@@ -304,6 +304,18 @@
         </div>
       </div>
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
+
+      <!-- API 連接測試 -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">🔌 API 連接測試</h3>
+        <p class="text-xs text-gray-400 mb-4">發送一個最小請求來測試主 API 和備援 API 是否正常連線，不需要實際對話</p>
+        <div class="flex gap-2 mb-4">
+          <button onclick="testAIConnection('both')" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg font-semibold text-sm flex-1">🔍 測試全部</button>
+          <button onclick="testAIConnection('primary')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">主 API</button>
+          <button onclick="testAIConnection('fallback')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">備援 API</button>
+        </div>
+        <div id="ai-test-results" class="space-y-3"></div>
+      </div>
     </div>
   </div>
 
@@ -763,6 +775,32 @@ async function saveChatAISettings() {
   const r = await api('/api/chat-ai-settings', 'PUT', data);
   if (r.error) { alert('儲存失敗：' + r.error); return; }
   showToast('✅ AI 聊天設定已儲存！');
+}
+
+// ── API 連接測試 ──
+async function testAIConnection(target) {
+  const resultsDiv = document.getElementById('ai-test-results');
+  resultsDiv.innerHTML = '<p class="text-sm text-gray-400">⏳ 測試中...</p>';
+  try {
+    const data = await api('/api/test-ai-connection', 'POST', { target });
+    if (data.error) { resultsDiv.innerHTML = '<p class="text-sm text-red-400">❌ ' + escHtml(data.error) + '</p>'; return; }
+    resultsDiv.innerHTML = (data.results || []).map(r => {
+      const statusIcon = r.status === 'ok' ? '✅' : r.status === 'timeout' ? '⏱️' : '❌';
+      const statusColor = r.status === 'ok' ? 'text-green-400' : 'text-red-400';
+      let html = '<div class="bg-[#1e1f22] rounded-lg p-4">';
+      html += '<div class="flex items-center justify-between mb-2">';
+      html += '<span class="font-semibold text-sm">' + statusIcon + ' ' + r.label + '</span>';
+      html += '<span class="' + statusColor + ' text-sm font-medium">' + r.status.toUpperCase() + (r.latency_ms ? ' · ' + r.latency_ms + 'ms' : '') + '</span>';
+      html += '</div>';
+      if (r.response_snippet) html += '<p class="text-sm text-gray-300 mb-1">回覆：' + escHtml(r.response_snippet) + '</p>';
+      if (r.model) html += '<p class="text-xs text-gray-500">模型：' + escHtml(r.model) + '</p>';
+      if (r.error) html += '<p class="text-xs text-red-400 mt-1 break-all">' + escHtml(r.error) + '</p>';
+      html += '</div>';
+      return html;
+    }).join('');
+  } catch (e) {
+    resultsDiv.innerHTML = '<p class="text-sm text-red-400">❌ 請求失敗：' + escHtml(String(e)) + '</p>';
+  }
 }
 
 // ── Meeting AI Settings ──
