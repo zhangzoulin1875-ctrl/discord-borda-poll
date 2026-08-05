@@ -4532,6 +4532,72 @@ async def _describe_image(image_url: str, settings: dict) -> str:
         return ""
 
 
+_NATION_CATEGORY_LABELS = {"member": "成員國", "council": "理事國", "observer": "觀察國", "removed": "已除籍"}
+
+# Keywords that signal the user is asking about the bot's OWN nation/member
+# registry — this data lives ONLY in _member_nations (registered via
+# /nation register + the dashboard), never in the wiki (micropedia) and
+# never in Discord message history, so neither of those auto-context
+# searches can ever surface it. Without this dedicated injector the AI
+# would correctly (but uselessly) say "查不到" forever, no matter how much
+# the wiki/message-search pipelines improve — the data source itself
+# was simply never wired in.
+_NATION_REGISTRY_MARKERS = (
+    "理事國", "會員國", "成員國", "觀察國", "除籍", "會員名單", "國家名單",
+    "代表國", "ISO", "iso", "哪些國家", "有幾個國家", "全部國家", "國家一覽",
+)
+
+
+def _format_nation_registry_context(guild_id: int, query: str) -> str:
+    """Format the bot's own member-nation registry (_member_nations) into
+    plain text for AI context — filtered to a specific category (成員國/
+    理事國/觀察國/已除籍) if the query names one, otherwise all categories
+    grouped. This is authoritative, structured data the bot itself owns
+    (via /nation register + dashboard), so it's injected as ground truth,
+    not as something the AI needs to search for."""
+    try:
+        entries = [e for e in _member_nations.get("entries", []) if int(e.get("guild_id", 0)) == int(guild_id)]
+    except Exception:
+        entries = []
+    if not entries:
+        return ""
+
+    # Narrow to a specific category if the query clearly names one
+    cat_filter = None
+    if "理事國" in query:
+        cat_filter = "council"
+    elif "觀察國" in query:
+        cat_filter = "observer"
+    elif "除籍" in query:
+        cat_filter = "removed"
+    elif "成員國" in query or "會員國" in query:
+        cat_filter = "member"
+
+    if cat_filter:
+        entries = [e for e in entries if e.get("category", "member") == cat_filter]
+        if not entries:
+            label = _NATION_CATEGORY_LABELS.get(cat_filter, cat_filter)
+            return f"目前登記為「{label}」的國家：無（尚未有國家被登記在這個類別）"
+
+    cat_order = {"member": 0, "council": 1, "observer": 2, "removed": 3}
+    entries = sorted(entries, key=lambda e: cat_order.get(e.get("category", "member"), 99))
+
+    lines = []
+    current_cat = None
+    for e in entries:
+        cat = e.get("category", "member")
+        if cat != current_cat:
+            current_cat = cat
+            lines.append(f"【{_NATION_CATEGORY_LABELS.get(cat, cat)}】")
+        reps = e.get("representative_names") or []
+        rep_str = "、".join(reps) if reps else "未指定代表"
+        lines.append(
+            f"- {e.get('name_zh', '?')}（{e.get('name_en', '?')}，ISO：{e.get('iso_code', '?')}）"
+            f"代表：{rep_str}"
+        )
+    return "\n".join(lines)
+
+
 async def generate_chat_reply(message, settings: dict) -> tuple:
     """Generate a reply for a chat message with brief context, server awareness, and per-user memory.
     Returns (reply_text, new_facts_or_None, mod_action_or_None)."""
@@ -4764,6 +4830,12 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     )
     _need_micropedia = bool(micropedia_enabled and len(clean_content) >= 4)
 
+    # Bot's own nation registry (成員國/理事國/觀察國/已除籍) — in-memory,
+    # zero I/O, so no need for the async/timeout machinery used below.
+    _nation_registry_auto = ""
+    if message.guild and any(m in clean_content for m in _NATION_REGISTRY_MARKERS):
+        _nation_registry_auto = _format_nation_registry_context(message.guild.id, clean_content)
+
     # Run both searches concurrently with a tight 6s budget each
     async def _do_micropedia():
         if not _need_micropedia:
@@ -4834,6 +4906,21 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"你自己拼湊出來的答案。\n{auto_context}"
         )
         print(f"📚 Micropedia: 已自動注入 {len(auto_context)} chars 到 AI 上下文")
+
+    # Inject bot's own nation registry (成員國/理事國/觀察國/已除籍) — this is
+    # data the bot itself owns via /nation register + the dashboard, NOT
+    # something that exists in the wiki or in Discord message history, so
+    # it needs its own dedicated injector rather than relying on the
+    # micropedia/search_discord auto-context to somehow stumble onto it.
+    if _nation_registry_auto:
+        system_prompt += (
+            f"\n\n─── 本伺服器會員國登記資料（機器人自己的資料庫，非百科）───\n"
+            f"以下是機器人資料庫裡登記的國家名單，依照使用者問題自動篩選類別。"
+            f"這是官方登記資料，請直接引用回答，不要說「查不到」或「沒有明確列出」。"
+            f"如果下面顯示某類別「無」，代表目前確實沒有國家登記在該類別，"
+            f"直接誠實告知使用者即可，不要含糊其辭。\n{_nation_registry_auto}"
+        )
+        print(f"🌍 會員國登記資料：已自動注入 {len(_nation_registry_auto)} chars 到 AI 上下文")
 
     # Inject AI refined knowledge (in-memory, instant)
     if ai_refined_knowledge:
@@ -4957,7 +5044,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # tools entirely → single AI round (saves a full 7-15s round-trip on slow
     # free APIs). Only offer tools when auto-context came up thin, meaning
     # the AI genuinely needs to search to answer well.
-    _context_rich = bool(auto_context and len(auto_context) > 400) or bool(_discord_auto and len(_discord_auto) > 400) or bool(_web_auto and len(_web_auto) > 200)
+    _context_rich = bool(auto_context and len(auto_context) > 400) or bool(_discord_auto and len(_discord_auto) > 400) or bool(_web_auto and len(_web_auto) > 200) or bool(_nation_registry_auto and len(_nation_registry_auto) > 30)
     if _context_rich:
         print(f"⚡ 快速路徑：自動注入已找到豐富資料（百科 {len(auto_context)} + Discord {len(_discord_auto)} chars），跳過工具呼叫，單輪 AI 回答")
 
