@@ -2964,8 +2964,9 @@ async def _resolve_log_channel(guild):
         return None, f"取得頻道失敗：{e}"
 
 
-async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name: str = ""):
-    """Send a conversation log to the designated log channel."""
+async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name: str = "", model_info: dict = None):
+    """Send a conversation log to the designated log channel.
+    model_info: {"model": str, "fallback": bool} — which model/API answered, for API status monitoring."""
     if not chat_ai_settings.get("log_channel_id"):
         return  # not configured, nothing to do
     if not message.guild:
@@ -2991,9 +2992,17 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
         if len(ai_reply) > 1000:
             ai_text += "..."
 
+        # Build model/API status label for the embed
+        _model_name = "?"
+        _api_label = "主 API"
+        if model_info:
+            _model_name = model_info.get("model") or "?"
+            if model_info.get("fallback"):
+                _api_label = "🔄 備援 API"
+
         embed = discord.Embed(
             title="💬 AI 對話紀錄",
-            color=discord.Color.blue(),
+            color=discord.Color.blue() if not (model_info and model_info.get("fallback")) else discord.Color.orange(),
             timestamp=discord.utils.utcnow(),
         )
         embed.add_field(
@@ -3007,9 +3016,9 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
             inline=False
         )
         ch_name = channel_name or (message.channel.name if hasattr(message.channel, "name") else "?")
-        embed.set_footer(text=f"#{ch_name} | User ID: {author.id}")
+        embed.set_footer(text=f"#{ch_name} | {_api_label} | 模型: {_model_name} | User ID: {author.id}")
         await log_ch.send(embed=embed)
-        print(f"📝 對話紀錄已發送到 #{log_ch.name}")
+        print(f"📝 對話紀錄已發送到 #{log_ch.name}（模型={_model_name}, {_api_label}）")
     except discord.Forbidden:
         print(f"⚠️ 對話紀錄發送失敗：Bot 沒有在 #{getattr(log_ch, 'name', '?')} 發送訊息/嵌入的權限")
     except Exception as e:
@@ -5388,6 +5397,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     ]
 
     async def _run_tool_loop():
+        nonlocal _reply_model, _reply_fallback
         """Drive the tool-calling round-trip — capped at EXACTLY 2 LLM calls
         total, no matter what. Round 0 gets tools (the model can request
         several tool_calls at once in a single response — this still lets it
@@ -5477,7 +5487,6 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         t2 = _time.time()
         _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
         final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
-        nonlocal _reply_model, _reply_fallback
         _reply_model = final_msg.get("_used_model")
         _reply_fallback = final_msg.get("_used_fallback", False)
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s，模型={_reply_model}")
@@ -7484,7 +7493,7 @@ async def on_message(message):
         sem = _chat_semaphore or asyncio.Semaphore(5)
         async with sem:
             async with message.channel.typing():
-                reply, new_facts, mod_action = await generate_chat_reply(message, chat_ai_settings)
+                reply, new_facts, mod_action, model_info = await generate_chat_reply(message, chat_ai_settings)
         # Save user memory if AI extracted facts (regardless of reply success)
         if new_facts:
             _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
@@ -7494,7 +7503,7 @@ async def on_message(message):
         log_cfg = chat_ai_settings.get("log_channel_id")
         if log_cfg:
             try:
-                await _send_chat_log(message, clean or message.content, reply or "(空回覆)")
+                await _send_chat_log(message, clean or message.content, reply or "(空回覆)", model_info=model_info)
             except Exception as log_exc:
                 print(f"   ⚠️ _send_chat_log 拋出例外（不影響回覆）：{log_exc}")
 
@@ -11060,7 +11069,7 @@ class ChatGroup(app_commands.Group):
             fake.author = interaction.user
             fake.content = message
             fake.guild = interaction.guild  # needed by generate_chat_reply's server-awareness lookup
-            reply, new_facts, mod_action = await generate_chat_reply(fake, chat_ai_settings)
+            reply, new_facts, mod_action, _ = await generate_chat_reply(fake, chat_ai_settings)
             # Strip [MEMORY:] from test reply
             if "[MEMORY:" in reply:
                 reply = reply.rsplit("[MEMORY:", 1)[0].strip()
