@@ -2362,14 +2362,17 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                     ok = False
 
         if not ok:
-            # ── Model fallback chain: try next model on 401/503/502/504 ──
-            # These statuses mean the SPECIFIC MODEL is unavailable (not the
-            # API endpoint itself), so retrying with a different model on
-            # the same endpoint+key often works. Other errors (400 bad
-            # request, 429 rate limit, etc.) are less likely to be model-
-            # specific, so we don't waste time retrying those.
-            _model_retryable = status in (401, 403, 503, 502, 504)
-            if _model_retryable and len(_model_chain) > 1:
+            # ── Model fallback chain: try next model on ANY failure status ──
+            # Started out only retrying on 401/403/503/502/504 (auth/overload),
+            # but real-world proxies also throw model-specific 400s like
+            # "模型 X 不支援參數: stream" — a per-model quirk, not a real bad
+            # request. Since we've already committed to hunting for a working
+            # model once the primary one failed, there's no upside to being
+            # picky about the status code: any non-200 just means "this
+            # particular model didn't work", so always try the rest of the
+            # chain (bounded by the remaining time-budget check below anyway).
+            _model_retryable = len(_model_chain) > 1
+            if _model_retryable:
                 for _mi in range(1, len(_model_chain)):
                     if _remaining() < 2:
                         print(f"⏱️ 模型降級鏈：剩餘時間不足，跳過 {_model_chain[_mi]}")
