@@ -2105,7 +2105,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     if not _ai_circuit_check():
         remaining = _ai_circuit_breaker["cooldown_seconds"] - (_time.time() - _ai_circuit_breaker["trip_time"])
         print(f"🚫 AI 熔斷器開啟中，跳過請求（剩餘冷卻 {remaining:.0f}s）")
-        return {"content": "", "error": _get_circuit_cooldown_msg(), "circuit_open": True}
+        return {"content": "", "error": _get_circuit_cooldown_msg(), "circuit_open": True, "_diag": ["🔌 熔斷器開啟：API 被供應商暫時封鎖，略過請求"]}
 
     headers = {
         "Authorization": f"Bearer {settings['api_key']}",
@@ -2167,6 +2167,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     _max_single_attempt = max(5, (timeout_total - _fallback_reserve) * 0.6)
     _used_model = None        # which model actually answered (for logging)
     _used_fallback = False    # whether the backup API was used
+    _diag = []                # diagnostic events for AI log embed
 
     async def _post(payload, _tt=None, _tr=None):
         """Streaming-aware POST: always uses stream=True to keep the
@@ -2477,6 +2478,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             _skip_model_chain = _skip_chain_for_admin or _skip_chain_for_owner
             if _skip_model_chain and len(_model_chain) > 1:
                 _why = "行政功能" if _skip_chain_for_admin else "擁有者跳過降級"
+                _diag.append(f"⏭️ 跳過降級鏈（{_why}），直接備援（HTTP {status}）")
                 print(f"⏭️ 跳過模型降級鏈（{_why}），直接交由備援 API 處理（HTTP {status}）")
             _model_retryable = (not _skip_model_chain) and len(_model_chain) > 1
             if _model_retryable:
@@ -2485,6 +2487,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         print(f"⏱️ 模型降級鏈：剩餘時間不足（已進入備援 API 保留時段），跳過 {_model_chain[_mi]}")
                         break
                     _alt_model = _model_chain[_mi]
+                    _diag.append(f"🔄 降級：{payload['model']} → {_alt_model}（HTTP {status}）")
                     print(f"🔄 模型降級：{payload['model']} → {_alt_model}（HTTP {status}）")
                     payload["model"] = _alt_model
                     try:
@@ -2498,6 +2501,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                                     if _msg.get("content") or _msg.get("tool_calls"):
                                         ok = True
                                         _used_model = _alt_model
+                                        _diag.append(f"✅ 降級成功：{_alt_model}")
                                         print(f"✅ 模型降級成功：{_alt_model}")
                                         break
                                     # Empty content but 200 — try non-streaming
@@ -2517,11 +2521,13 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                                                             if "choices" in data and data["choices"][0].get("message", {}).get("content"):
                                                                 ok = True
                                                                 _used_model = _alt_model
+                                                                _diag.append(f"✅ 降級成功（非串流）：{_alt_model}")
                                                                 print(f"✅ 模型降級 {_alt_model} 非串流成功")
                                                                 break
                             except Exception:
                                 pass
                     except Exception as _me:
+                        _diag.append(f"⚠️ 降級 {_alt_model} 失敗：{str(_me)[:80]}")
                         print(f"⚠️ 模型降級 {_alt_model} 也失敗：{_me}")
                         continue
             if not ok:
@@ -2530,7 +2536,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         _track_token_usage(data)
         _ai_circuit_success()  # successful call — reset the 403 counter
         _used_model = payload.get("model", settings.get("model", "?"))
-        return {**data["choices"][0]["message"], "_used_model": _used_model, "_used_fallback": False}
+        return {**data["choices"][0]["message"], "_used_model": _used_model, "_used_fallback": False, "_diag": _diag}
 
     # ── Retry once on a hollow result ──
     # Two real failure modes show up in production with free/weak API
@@ -2576,6 +2582,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             if "_used_model" not in msg:
                 msg["_used_model"] = _used_model or settings.get("model", "?")
                 msg["_used_fallback"] = _used_fallback
+            if "_diag" not in msg:
+                msg["_diag"] = _diag
             return msg
         # Empty result without exception — let fallback handle it
         break
@@ -2609,6 +2617,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             _fb_rate_limit = settings.get("fallback_rate_per_min", 6)
             if not _owner_exempt and fallback_mode == "rate_limited" and not _check_fallback_chat_rate(_fb_rate_limit):
                 _fb_rate_msg = settings.get("fallback_rate_limit_msg", "⚠️ 備援 API 請求過於頻繁，請稍等一下再試～")
+                _diag.append(f"⚠️ 備援速率限制（{_fb_rate_limit}/min）被拒")
                 print(f"⚠️ 備援 API 速率限制（{_fb_rate_limit}/min），聊天備援請求被拒絕")
                 return {"content": _fb_rate_msg, "error": "rate_limit_exceeded"}
 
@@ -2616,6 +2625,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             if not _owner_exempt and _fb_gate_ok and fallback_mode == "rate_limited" and fallback_user_id:
                 _daily_limit = settings.get("fallback_daily_limit", 10)
                 if not _check_fallback_daily_limit(fallback_user_id, _daily_limit):
+                    _diag.append(f"⚠️ 備援每日上限已達（{_daily_limit}/天）")
                     print(f"⚠️ 備援 API 每日上限已達（用戶 {fallback_user_id}，上限 {_daily_limit}/天）")
                     _fb_daily_msg = settings.get("fallback_daily_limit_msg", FALLBACK_DAILY_LIMIT_MSG)
                     return {"content": _fb_daily_msg, "error": "daily_limit_exceeded"}
@@ -2629,6 +2639,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                 _fb_key = settings.get("fallback_api_key", "").strip()
                 _fb_model = settings.get("fallback_model", "").strip()
                 if _fb_url and _fb_key:
+                    _diag.append(f"🔄 主 API 錯誤：{_primary_error[:100]}")
+                    _diag.append(f"🔄 切換備援 API：{_fb_model or _fb_url}")
                     print(f"🔄 主要 API 錯誤（{_primary_error[:120]}），切換至備援 API（{_fb_model or _fb_url}）...")
                     _fb_settings = {
                         **settings,
@@ -2650,6 +2662,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                     # handle it, rather than starting a doomed request.
                     _fb_budget = int(_remaining())
                     if _fb_budget < 3:
+                        _diag.append(f"⏱️ 時間不足放棄備援（剩 {_remaining():.1f}s）")
                         print(f"⏱️ 剩餘時間不足（{_remaining():.1f}s），放棄備援 API，避免發出注定被取消的請求")
                     else:
                         try:
@@ -2664,11 +2677,14 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                             if _fb_msg.get("content") or _fb_msg.get("tool_calls"):
                                 _fb_msg["_used_model"] = _fb_model or settings.get("model", "?")
                                 _fb_msg["_used_fallback"] = True
+                                _fb_msg["_diag"] = _diag + [f"✅ 備援 API 成功：{_fb_model or _fb_url}"]
                                 print(f"✅ 備援 API 成功！({_fb_msg.get('content', '')[:60]}...)")
                                 return _fb_msg
                             else:
+                                _diag.append(f"⚠️ 備援 API 也失敗：{_fb_msg.get('error', 'unknown')[:80]}")
                                 print(f"⚠️ 備援 API 也失敗：{_fb_msg.get('error', 'unknown')}")
                         except Exception as _fb_exc:
+                            _diag.append(f"⚠️ 備援 API 例外：{str(_fb_exc)[:80]}")
                             print(f"⚠️ 備援 API 例外：{_fb_exc}")
                 else:
                     print(f"⚠️ 備援 API 已啟用但未設定 URL/Key，跳過")
@@ -2679,10 +2695,13 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         if "_used_model" not in msg:
             msg["_used_model"] = _used_model or settings.get("model", "?")
             msg["_used_fallback"] = _used_fallback
+        if "_diag" not in msg:
+            msg["_diag"] = _diag
         return msg
+    _diag.append(f"❌ 最終失敗：{str(last_exc)[:100] if last_exc else '逾時'}")
     if last_exc:
-        return {"content": "", "error": f"AI 回應逾時或失敗：{last_exc}", "_used_model": _used_model or settings.get("model", "?"), "_used_fallback": _used_fallback}
-    return {"content": "", "error": "AI 回應逾時", "_used_model": _used_model or settings.get("model", "?"), "_used_fallback": _used_fallback}
+        return {"content": "", "error": f"AI 回應逾時或失敗：{last_exc}", "_used_model": _used_model or settings.get("model", "?"), "_used_fallback": _used_fallback, "_diag": _diag}
+    return {"content": "", "error": "AI 回應逾時", "_used_model": _used_model or settings.get("model", "?"), "_used_fallback": _used_fallback, "_diag": _diag}
 
 
 # ──────────────────────────────────────────────
@@ -2966,7 +2985,8 @@ async def _resolve_log_channel(guild):
 
 async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name: str = "", model_info: dict = None):
     """Send a conversation log to the designated log channel.
-    model_info: {"model": str, "fallback": bool} — which model/API answered, for API status monitoring."""
+    model_info: {"model": str, "fallback": bool, "diag": list} — which model/API answered
+    and the full degradation/error diagnostic trail, for API status monitoring."""
     if not chat_ai_settings.get("log_channel_id"):
         return  # not configured, nothing to do
     if not message.guild:
@@ -2995,14 +3015,23 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
         # Build model/API status label for the embed
         _model_name = "?"
         _api_label = "主 API"
+        _diag_lines = []
         if model_info:
             _model_name = model_info.get("model") or "?"
             if model_info.get("fallback"):
                 _api_label = "🔄 備援 API"
+            _diag_lines = model_info.get("diag", [])
+
+        # Determine embed color: blue=normal, orange=backup, red=error
+        _embed_color = discord.Color.blue()
+        if model_info and model_info.get("fallback"):
+            _embed_color = discord.Color.orange()
+        if _diag_lines and any("❌" in d or "⚠️" in d for d in _diag_lines):
+            _embed_color = discord.Color.orange()
 
         embed = discord.Embed(
             title="💬 AI 對話紀錄",
-            color=discord.Color.blue() if not (model_info and model_info.get("fallback")) else discord.Color.orange(),
+            color=_embed_color,
             timestamp=discord.utils.utcnow(),
         )
         embed.add_field(
@@ -3015,10 +3044,25 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
             value=f"> {ai_text}",
             inline=False
         )
+
+        # ── API 診斷日誌 field ──
+        # Show the full degradation/error trail in the same embed:
+        # model downgrades, fallback switches, timeouts, circuit breaker, etc.
+        if _diag_lines:
+            # Join all diag lines, truncate to Discord's 1024-char field value limit
+            _diag_text = "\n".join(_diag_lines)
+            if len(_diag_text) > 1020:
+                _diag_text = _diag_text[:1020] + "..."
+            embed.add_field(
+                name="📋 API 診斷",
+                value="```\n" + _diag_text + "\n```",
+                inline=False
+            )
+
         ch_name = channel_name or (message.channel.name if hasattr(message.channel, "name") else "?")
         embed.set_footer(text=f"#{ch_name} | {_api_label} | 模型: {_model_name} | User ID: {author.id}")
         await log_ch.send(embed=embed)
-        print(f"📝 對話紀錄已發送到 #{log_ch.name}（模型={_model_name}, {_api_label}）")
+        print(f"📝 對話紀錄已發送到 #{log_ch.name}（模型={_model_name}, {_api_label}, 診斷={len(_diag_lines)}筆）")
     except discord.Forbidden:
         print(f"⚠️ 對話紀錄發送失敗：Bot 沒有在 #{getattr(log_ch, 'name', '?')} 發送訊息/嵌入的權限")
     except Exception as e:
@@ -4850,6 +4894,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     user_name = message.author.display_name
     _reply_model = None      # which model actually answered (for AI log)
     _reply_fallback = False  # whether the backup API was used
+    _reply_diag = []         # diagnostic events for AI log embed
 
     # Load user memory
     mem = user_memories.get(user_id, {})
@@ -5397,7 +5442,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     ]
 
     async def _run_tool_loop():
-        nonlocal _reply_model, _reply_fallback
+        nonlocal _reply_model, _reply_fallback, _reply_diag
         """Drive the tool-calling round-trip — capped at EXACTLY 2 LLM calls
         total, no matter what. Round 0 gets tools (the model can request
         several tool_calls at once in a single response — this still lets it
@@ -5430,6 +5475,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
         _reply_model = assistant_msg.get("_used_model")
         _reply_fallback = assistant_msg.get("_used_fallback", False)
+        _reply_diag = assistant_msg.get("_diag", [])
         print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s，模型={_reply_model}")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
@@ -5489,6 +5535,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
         _reply_model = final_msg.get("_used_model")
         _reply_fallback = final_msg.get("_used_fallback", False)
+        _reply_diag = final_msg.get("_diag", [])
         print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s，模型={_reply_model}")
         return final_msg.get("content") or ""
 
@@ -5527,6 +5574,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         )
         _reply_model = fallback_msg.get("_used_model")
         _reply_fallback = fallback_msg.get("_used_fallback", False)
+        _reply_diag = fallback_msg.get("_diag", [])
         raw_reply = fallback_msg.get("content") or ""
 
     # Safety net: strip raw tool-output dumps that a weak model sometimes
@@ -5590,7 +5638,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     if not actual_reply:
         actual_reply = None
 
-    return actual_reply, new_facts, mod_action, {"model": _reply_model, "fallback": _reply_fallback}
+    return actual_reply, new_facts, mod_action, {"model": _reply_model, "fallback": _reply_fallback, "diag": _reply_diag}
 
 
 # ──────────────────────────────────────────────
