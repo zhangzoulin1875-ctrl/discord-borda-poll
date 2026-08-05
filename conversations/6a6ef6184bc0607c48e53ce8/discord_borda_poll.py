@@ -255,8 +255,8 @@ async def api_list_nations(request):
         gid = int(gid_raw)
         guilds = await _fetch_guilds(user["access_token"])
         ge = next((g for g in guilds if int(g["id"]) == gid), None)
-        if not ge or not _is_guild_admin(ge):
-            return web.json_response({"error": "forbidden"}, status=403)
+        if not ge or not _is_nation_admin(user.get("user_id", ""), ge):
+            return web.json_response({"error": "forbidden：您沒有管理會員國的權限（需 Discord 管理員、白名單或機器人擁有者）"}, status=403)
         entries = [e for e in _member_nations["entries"] if int(e.get("guild_id", 0)) == gid]
         # Strip internal fields, return safe dict. Use .get() everywhere —
         # some entries may be partial/legacy (e.g. created before the
@@ -295,8 +295,8 @@ async def api_create_nation(request):
     gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
-    if not ge or not _is_guild_admin(ge):
-        return web.json_response({"error": "forbidden：僅管理員可註冊會員國"}, status=403)
+    if not ge or not _is_nation_admin(user.get("user_id", ""), ge):
+        return web.json_response({"error": "forbidden：您沒有註冊會員國的權限（需 Discord 管理員、白名單或機器人擁有者）"}, status=403)
     data = await request.json()
 
     name_zh = (data.get("name_zh") or "").strip()
@@ -369,8 +369,8 @@ async def api_update_nation(request):
     gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
-    if not ge or not _is_guild_admin(ge):
-        return web.json_response({"error": "forbidden：僅管理員可編輯會員國"}, status=403)
+    if not ge or not _is_nation_admin(user.get("user_id", ""), ge):
+        return web.json_response({"error": "forbidden：您沒有編輯會員國的權限（需 Discord 管理員、白名單或機器人擁有者）"}, status=403)
     nid = request.match_info["nid"]
     data = await request.json()
 
@@ -417,8 +417,8 @@ async def api_delete_nation(request):
     gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
-    if not ge or not _is_guild_admin(ge):
-        return web.json_response({"error": "forbidden：僅管理員可刪除會員國"}, status=403)
+    if not ge or not _is_nation_admin(user.get("user_id", ""), ge):
+        return web.json_response({"error": "forbidden：您沒有刪除會員國的權限（需 Discord 管理員、白名單或機器人擁有者）"}, status=403)
     nid = request.match_info["nid"]
 
     before = len(_member_nations["entries"])
@@ -701,6 +701,23 @@ async def _get_session_user(request):
 def _is_guild_admin(guild_entry):
     perms = int(guild_entry.get("permissions", 0))
     return bool(perms & 0x8) or bool(perms & 0x20)
+
+
+def _is_nation_admin(user_id_str: str, guild_entry: dict = None) -> bool:
+    """Check if a user is allowed to manage nations (register/edit/delete).
+    Allowed if: (a) Discord guild admin/manage_server, OR (b) on the
+    nation_admin_whitelist, OR (c) is the bot owner."""
+    # Bot owner always has access
+    if str(user_id_str) == str(BOT_OWNER_ID):
+        return True
+    # Whitelist check
+    whitelist = application_settings.get("nation_admin_whitelist", [])
+    if str(user_id_str) in [str(w) for w in whitelist]:
+        return True
+    # Discord guild admin check
+    if guild_entry and _is_guild_admin(guild_entry):
+        return True
+    return False
 
 
 def _poll_to_dict(poll):
@@ -8570,6 +8587,71 @@ class SystemGroup(app_commands.Group):
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
+    # ── 會員國管理白名單指令 ──
+
+    @app_commands.command(name="nation_whitelist", description="管理會員國操作白名單（機器人擁有者限定）")
+    @app_commands.describe(
+        action="add 新增 / remove 移除 / list 列出",
+        user="要放行或移除的使用者（@提及）",
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="新增", value="add"),
+        app_commands.Choice(name="移除", value="remove"),
+        app_commands.Choice(name="列表", value="list"),
+    ])
+    async def nation_whitelist(self, interaction: discord.Interaction,
+                               action: app_commands.Choice[str],
+                               user: discord.Member = None):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+
+        wl = application_settings.get("nation_admin_whitelist", [])
+        act = action.value
+
+        if act == "list":
+            if not wl:
+                await interaction.response.send_message("📋 會員國操作白名單目前為空。", ephemeral=True)
+            else:
+                names = []
+                for uid in wl:
+                    try:
+                        member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+                        names.append(f"• <@{uid}> (`{uid}`)" + (f" — {member.display_name}" if member else ""))
+                    except (ValueError, TypeError):
+                        names.append(f"• `{uid}`")
+                await interaction.response.send_message(
+                    f"📋 **會員國操作白名單**（{len(wl)} 人）：\n" + "\n".join(names), ephemeral=True
+                )
+            return
+
+        if act in ("add", "remove"):
+            if not user:
+                await interaction.response.send_message("❌ 請指定使用者（@提及）。", ephemeral=True)
+                return
+            uid_str = str(user.id)
+            if act == "add":
+                if uid_str in wl:
+                    await interaction.response.send_message(f"⚠️ {user.display_name} 已在白名單中。", ephemeral=True)
+                    return
+                wl.append(uid_str)
+                application_settings["nation_admin_whitelist"] = wl
+                save_application_settings()
+                await interaction.response.send_message(
+                    f"✅ 已將 {user.display_name}（`{uid_str}`）加入會員國操作白名單。\n"
+                    f"此使用者現在可以在 Dashboard 及 /nation 指令中管理會員國。", ephemeral=True
+                )
+            elif act == "remove":
+                if uid_str not in wl:
+                    await interaction.response.send_message(f"⚠️ {user.display_name} 不在白名單中。", ephemeral=True)
+                    return
+                wl = [w for w in wl if str(w) != uid_str]
+                application_settings["nation_admin_whitelist"] = wl
+                save_application_settings()
+                await interaction.response.send_message(
+                    f"✅ 已將 {user.display_name}（`{uid_str}`）從會員國操作白名單移除。", ephemeral=True
+                )
+
     # ── AI 精煉系統指令 ──
 
     @app_commands.command(name="refine_toggle", description="開啟/關閉 AI 精煉系統（機器人擁有者限定）")
@@ -11864,6 +11946,7 @@ application_settings = {
     "secretariat_channel": None,   # 秘書處 notification target
     "council_channels": [],        # 理事國入盟申請區 channels to monitor (separate)
     "council_channel": None,       # 理事國 notification target
+    "nation_admin_whitelist": [],  # Discord user IDs allowed to manage nations
     "ai_settings": {               # optional: separate AI config
         "api_url": "",
         "api_key": "",
@@ -15374,9 +15457,12 @@ class MemberNationGroup(app_commands.Group):
     ):
         # Registration is restricted to Administrator permission (or bot owner) —
         # manage_guild alone is no longer sufficient.
+        # Permission: bot owner, Discord admin, or nation_admin_whitelist
         if not is_owner(interaction):
-            if not interaction.user.guild_permissions.administrator:
-                await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            uid_str = str(interaction.user.id)
+            wl = application_settings.get("nation_admin_whitelist", [])
+            if not interaction.user.guild_permissions.administrator and uid_str not in [str(w) for w in wl]:
+                await interaction.response.send_message("❌ 此指令僅限管理員或白名單使用者使用。", ephemeral=True)
                 return
 
         name_zh = name_zh.strip()
@@ -15557,10 +15643,12 @@ class MemberNationGroup(app_commands.Group):
         app_commands.Choice(name="已除籍", value="removed"),
     ])
     async def recategorize(self, interaction: discord.Interaction, iso_code: str, category: app_commands.Choice[str]):
-        # Restricted to Administrator permission (or bot owner)
+        # Permission: bot owner, Discord admin, or nation_admin_whitelist
         if not is_owner(interaction):
-            if not interaction.user.guild_permissions.administrator:
-                await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            uid_str = str(interaction.user.id)
+            wl = application_settings.get("nation_admin_whitelist", [])
+            if not interaction.user.guild_permissions.administrator and uid_str not in [str(w) for w in wl]:
+                await interaction.response.send_message("❌ 此指令僅限管理員或白名單使用者使用。", ephemeral=True)
                 return
 
         iso_code = iso_code.strip().upper()
