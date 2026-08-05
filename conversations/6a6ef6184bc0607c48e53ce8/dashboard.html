@@ -368,7 +368,11 @@
         </div>
         <label class="block text-sm text-gray-400 mb-1">額外伺服器規則（注入到審查 AI 的 prompt）</label>
         <textarea id="ai-mod-custom-rules" rows="4" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm resize-none" placeholder="範例：&#10;8. 禁止在非提案頻道討論政治話題&#10;9. 禁止使用特定敏感詞彙&#10;10. 所有發言必須使用繁體中文"></textarea>
-        <p class="text-xs text-gray-400">伺服器管理員（有管理伺服器權限）自動豁免。API Key 留空則沿用主 API。模型可設為更便宜/快速的模型以節省用量。</p>
+        <div class="mb-3">
+          <label class="block text-sm text-gray-400 mb-1">豁免角色 ID（逗號分隔，留空=不自訂豁免）</label>
+          <input type="text" id="ai-mod-exempt-roles" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="123456789,987654321">
+          <p class="text-xs text-gray-400 mt-1">伺服器管理員（有管理伺服器權限）自動豁免。API Key 留空則沿用主 API。模型可設為更便宜/快速的模型以節省用量。</p>
+        </div>
 
         <!-- 嚴重違規自動處置 -->
         <div class="border-t border-[#3a3c43] mt-4 pt-4">
@@ -943,6 +947,7 @@ async function showChatAIPanel() {
   document.getElementById('ai-mod-timeout').value = s.ai_mod_timeout ?? 10;
   // 嚴重違規
   document.getElementById('ai-mod-severe-enabled').checked = s.ai_mod_severe_enabled || false;
+  document.getElementById('ai-mod-exempt-roles').value = (s.ai_mod_exempt_roles || []).join(',');
   document.getElementById('ai-mod-severe-rules').value = s.ai_mod_severe_rules || '';
 }
 
@@ -998,6 +1003,7 @@ async function saveChatAISettings() {
   data.ai_mod_timeout = parseInt(document.getElementById('ai-mod-timeout').value) || 10;
   data.ai_mod_severe_enabled = document.getElementById('ai-mod-severe-enabled').checked;
   data.ai_mod_severe_rules = document.getElementById('ai-mod-severe-rules').value.trim();
+  data.ai_mod_exempt_roles = document.getElementById('ai-mod-exempt-roles').value.split(',').map(x => x.trim()).filter(x => x);
   const modKey = document.getElementById('ai-mod-api-key').value.trim();
   if (modKey) data.ai_mod_api_key = modKey;
   const fallbackKey = document.getElementById('ai-fallback-key').value.trim();
