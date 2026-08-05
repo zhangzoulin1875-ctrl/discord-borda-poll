@@ -18120,7 +18120,9 @@ async def _ai_detect_vote_legend(op_text: str, emoji_tokens: list) -> dict:
 
 
 def _parse_manual_legend(legend_str: str) -> dict:
-    """解析手動指定的 legend 字串，格式：'emoji1=名稱1,emoji2=名稱2'。"""
+    """解析手動指定的 legend 字串，格式：'代碼1=名稱1,代碼2=名稱2'。
+    代碼可以是 Emoji，也可以是純英數文字代碼（例如 a、RHV）——純英數代碼
+    會自動轉大寫，確保跟投票內文比對時不受大小寫影響。"""
     mapping = {}
     if not legend_str:
         return mapping
@@ -18128,29 +18130,195 @@ def _parse_manual_legend(legend_str: str) -> dict:
         pair = pair.strip()
         if "=" not in pair:
             continue
-        emoji_part, label_part = pair.split("=", 1)
-        emoji_part = emoji_part.strip()
+        code_part, label_part = pair.split("=", 1)
+        code_part = code_part.strip()
         label_part = label_part.strip()
-        if emoji_part and label_part:
-            mapping[emoji_part] = label_part
+        if not code_part or not label_part:
+            continue
+        if re.fullmatch(r'[A-Za-z0-9]{1,6}', code_part):
+            code_part = code_part.upper()
+        mapping[code_part] = label_part
     return mapping
 
 
+def _guess_token_type_from_legend(legend: dict) -> str:
+    """判斷 legend 裡的代碼是 Emoji 還是純文字代碼。只要有一個 key 不是純英數，就當作 emoji 模式。"""
+    if not legend:
+        return "emoji"
+    for k in legend.keys():
+        if not re.fullmatch(r'[A-Za-z0-9]{1,6}', k):
+            return "emoji"
+    return "text_code"
+
+
+# 候選人代碼清單行，例如「a大斯皇帝國」「e厂万共和國」——1~3 個英文字母緊接著中文名稱，
+# 中間沒有空格。這是本組織實際選舉貼文最常見的候選人代碼列表寫法（無 Emoji）。
+_CANDIDATE_LEGEND_LINE_RE = re.compile(r'^([A-Za-z]{1,3})([\u4e00-\u9fff].{0,40})$')
+
+
+def _extract_text_code_legend(op_text: str) -> dict:
+    """從原po文字中，依「代碼+中文候選人名稱」的行格式，抓出候選人代碼對照表（不靠 AI）。"""
+    legend = {}
+    for line in op_text.split("\n"):
+        line = line.strip()
+        if not line or "http" in line.lower():
+            continue
+        m = _CANDIDATE_LEGEND_LINE_RE.match(line)
+        if m:
+            code = m.group(1).upper()
+            label = m.group(2).strip()
+            if label:
+                legend[code] = label
+    return legend
+
+
+def _detect_mode_from_text(op_text: str) -> str:
+    """依貼文文字中的關鍵字，判斷是排序（波達計數法）還是單選投票。找不到明確訊號則回傳空字串。"""
+    if not op_text:
+        return ""
+    t_lower = op_text.lower()
+    if "波達計數法" in op_text or "波达计数法" in op_text or "borda" in t_lower:
+        return "ranked"
+    if any(k in op_text for k in ("排序偏好", "依序填入", "依偏好排序", "偏好順序")):
+        return "ranked"
+    if " 或 " in op_text or "或\n" in op_text:
+        return "single"
+    return ""
+
+
+# 純文字排序投票的填寫格式，例如「1.E」「2. F」「12.G」——數字 + 分隔符號 + 1~6 個英文字母代碼。
+_NUMBERED_VOTE_RE = re.compile(r'(\d{1,2})\s*[.、)：:]\s*([A-Za-z]{1,6})(?![A-Za-z0-9\u4e00-\u9fff])')
+
+
+def _extract_vote_tokens(content: str, legend_keys: set, token_type: str) -> list:
+    """從一則回覆訊息中，依 token_type 抓出屬於 legend 的候選代碼，並依票面上出現/標示的順序回傳。"""
+    if token_type == "emoji":
+        return _dedup_preserve_order([tok for tok in _extract_emoji_tokens(content) if tok in legend_keys])
+
+    # text_code 模式：抓「數字.代碼」格式，依數字大小排序還原出投票人標示的偏好順序
+    matches = _NUMBERED_VOTE_RE.findall(content)
+    parsed = []
+    for rank_str, code_str in matches:
+        code_up = code_str.upper()
+        if code_up in legend_keys:
+            try:
+                rank_num = int(rank_str)
+            except ValueError:
+                rank_num = 999
+            parsed.append((rank_num, code_up))
+    parsed.sort(key=lambda x: x[0])
+    return _dedup_preserve_order([c for _, c in parsed])
+
+
+async def _ai_detect_text_legend(op_text: str) -> dict:
+    """最後手段：貼文既沒有 Emoji，也沒有符合「代碼+中文名稱」規律格式的候選人清單時，
+    改用 AI 直接從原文判讀候選人代碼對照表與計票方式。"""
+    fallback = {
+        "mode": "single",
+        "legend": {},
+        "notes": "AI 無法使用，且找不到可辨識的候選人代碼格式，無法自動計票，請用 legend 參數手動指定。",
+    }
+    ps_ai = proposal_settings.get("ai_settings", {})
+    settings = {
+        "api_url": ps_ai.get("api_url") or chat_ai_settings.get("api_url", ""),
+        "api_key": ps_ai.get("api_key") or chat_ai_settings.get("api_key", ""),
+        "model": ps_ai.get("model") or chat_ai_settings.get("model", "gpt-4o-mini"),
+        "system_prompt": "你是投票制度分析助手，負責判讀 Discord 論壇投票貼文的計票規則。",
+    }
+    if not settings["api_url"] or not settings["api_key"]:
+        return fallback
+
+    prompt = (
+        "以下是一篇 Discord 論壇投票貼文的原文內容：\n\n"
+        f"「{op_text[:2000]}」\n\n"
+        "這篇貼文說明了一個投票，但投票時使用的並非 Emoji，而是文字/英文字母代碼"
+        "（例如候選人清單「a大斯皇帝國」代表代碼 a 對應候選人「大斯皇帝國」，"
+        "投票者會回覆「1.a 2.b 3.c」這種格式來投票）。\n\n"
+        "請從文字中判斷：\n"
+        "1. mode：single（每人選一個）或 ranked（依偏好排序多個，即波達計數法）。\n"
+        "2. legend：把貼文中列出的每個代碼對應到候選人/選項名稱，"
+        '格式為 {"代碼": "候選人名稱"}。'
+        "如果貼文裡完全沒有清楚列出代碼對應表，legend 請回傳空物件 {}，不要亂猜。\n\n"
+        "請直接回覆 JSON（不要加 markdown code block），格式：\n"
+        '{"mode": "single", "legend": {"a": "候選人A", "b": "候選人B"}, "notes": "簡短說明"}\n'
+        "只回覆 JSON，不要加其他文字。"
+    )
+
+    try:
+        result = await call_ai_api(prompt, settings)
+        result = result.strip()
+        if result.startswith("```"):
+            result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = json_module.loads(result)
+        mode = parsed.get("mode", "single")
+        if mode not in ("single", "ranked"):
+            mode = "single"
+        legend_raw = parsed.get("legend", {}) or {}
+        legend = {}
+        for k, v in legend_raw.items():
+            k = str(k)
+            if re.fullmatch(r'[A-Za-z0-9]{1,6}', k):
+                k = k.upper()
+            legend[k] = str(v)
+        return {"mode": mode, "legend": legend, "notes": str(parsed.get("notes", ""))[:200]}
+    except Exception as e:
+        print(f"⚠️ 計票 AI 文字判讀失敗，改用保底規則：{e}")
+        return fallback
+
+
+async def _detect_thread_vote_scheme(op_text: str) -> dict:
+    """自動判斷整個貼文的投票制度：
+    1. 若原po文字含 Emoji → 走 Emoji 對照模式（沿用既有 AI 判讀）。
+    2. 若沒有 Emoji，但有「代碼+候選人名稱」的清單格式（例如 a大斯皇帝國）→ 直接用規則解析，
+       不需要 AI，最準確也最省 token（本組織實際選舉貼文最常見的格式）。
+    3. 兩者都偵測不到時，才用 AI 直接從原文判讀（最後手段，格式太特殊時使用）。
+    計票方式（單選/排序）優先看貼文有沒有「波達計數法」等明確關鍵字，沒有才交給 AI／規則猜測。
+    回傳：{"token_type": "emoji"|"text_code", "legend": {...}, "mode": "single"|"ranked", "notes": str}
+    """
+    op_emoji_tokens = _dedup_preserve_order(_extract_emoji_tokens(op_text))
+    keyword_mode = _detect_mode_from_text(op_text)
+
+    if op_emoji_tokens:
+        ai_result = await _ai_detect_vote_legend(op_text, op_emoji_tokens)
+        return {
+            "token_type": "emoji",
+            "legend": ai_result["legend"],
+            "mode": keyword_mode or ai_result["mode"],
+            "notes": ai_result.get("notes", ""),
+        }
+
+    text_legend = _extract_text_code_legend(op_text)
+    if len(text_legend) >= 2:
+        mode = keyword_mode or ("ranked" if len(text_legend) > 2 else "single")
+        notes = "貼文沒有使用 Emoji，已依候選人代碼清單（例如「a候選人名」）自動比對文字代碼進行計票。"
+        if keyword_mode == "ranked":
+            notes += "偵測到「波達計數法」關鍵字，確認為排序偏好投票。"
+        return {"token_type": "text_code", "legend": text_legend, "mode": mode, "notes": notes}
+
+    ai_result = await _ai_detect_text_legend(op_text)
+    return {
+        "token_type": "text_code",
+        "legend": ai_result["legend"],
+        "mode": keyword_mode or ai_result["mode"],
+        "notes": ai_result.get("notes", ""),
+    }
+
+
 def _compute_tally(ballots: dict, legend: dict, mode: str) -> dict:
-    """ballots: voter_key -> ordered list of distinct legend-emoji tokens they cast.
-    legend: emoji_token -> candidate label.
+    """ballots: voter_key -> ordered list of distinct legend tokens they cast（Emoji 或文字代碼皆可）.
+    legend: token -> candidate label.
     回傳每個候選人 label 的分數/票數。"""
     n = len(legend)
     scores = {label: 0 for label in legend.values()}
-    for ordered_emojis in ballots.values():
+    for ordered_tokens in ballots.values():
         if mode == "ranked":
-            for rank_pos, tok in enumerate(ordered_emojis):
+            for rank_pos, tok in enumerate(ordered_tokens):
                 label = legend.get(tok)
                 if label is not None and rank_pos < n:
                     scores[label] = scores.get(label, 0) + max(0, n - 1 - rank_pos)
         else:
-            if ordered_emojis:
-                label = legend.get(ordered_emojis[0])
+            if ordered_tokens:
+                label = legend.get(ordered_tokens[0])
                 if label is not None:
                     scores[label] = scores.get(label, 0) + 1
     return scores
@@ -18167,28 +18335,30 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
             starter = None
 
     op_text = _gather_thread_text(starter)
-    op_emoji_tokens = _dedup_preserve_order(_extract_emoji_tokens(op_text))
 
     manual_legend = _parse_manual_legend(manual_legend_str)
     if manual_legend:
         # 手動指定：只信任手動給的對照表，並補上原po偵測到但未手動指定的 Emoji（用 Emoji 本身當名稱）
+        op_emoji_tokens = _dedup_preserve_order(_extract_emoji_tokens(op_text))
         legend = dict(manual_legend)
         for tok in op_emoji_tokens:
             if tok not in legend:
                 legend[tok] = tok
-        detected_mode = "single"
+        token_type = _guess_token_type_from_legend(legend)
+        detected_mode = _detect_mode_from_text(op_text) or "single"
         ai_notes = "使用手動指定的選項對照表。"
     else:
-        ai_result = await _ai_detect_vote_legend(op_text, op_emoji_tokens)
-        legend = ai_result["legend"]
-        detected_mode = ai_result["mode"]
-        ai_notes = ai_result.get("notes", "")
+        scheme = await _detect_thread_vote_scheme(op_text)
+        legend = scheme["legend"]
+        token_type = scheme["token_type"]
+        detected_mode = scheme["mode"] or "single"
+        ai_notes = scheme.get("notes", "")
 
     final_mode = detected_mode if mode_override == "auto" else mode_override
-    legend_emoji_set = set(legend.keys())
+    legend_keys = set(legend.keys())
 
     # 2. 掃描回覆訊息，蒐集每位使用者的最後一筆有效投票
-    ballots = {}          # author_id -> ordered emoji list
+    ballots = {}          # author_id -> ordered token list
     voter_labels = {}      # author_id -> (display_name, raw_country_text)
     voter_last_time = {}   # author_id -> created_at（用於「取最後一筆」判斷)
     skipped_count = 0
@@ -18200,9 +18370,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
         if msg.author.bot:
             continue
         content = msg.content or ""
-        found = _dedup_preserve_order(
-            [tok for tok in _extract_emoji_tokens(content) if tok in legend_emoji_set]
-        )
+        found = _extract_vote_tokens(content, legend_keys, token_type)
         if not found:
             skipped_count += 1
             continue
@@ -18211,7 +18379,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
             disputed.append({
                 "author": msg.author.display_name,
                 "content": content[:80],
-                "reason": f"單選投票卻偵測到 {len(found)} 個選項 Emoji",
+                "reason": f"單選投票卻偵測到 {len(found)} 個選項",
             })
             continue
 
@@ -18221,11 +18389,8 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
             continue  # 已有更新的投票，忽略這筆較舊的（理論上 oldest_first 不會發生，保險起見）
 
         ballots[aid] = found
-        # 嘗試抓出 Emoji 前面的文字當作「國家代號+國名」顯示用
-        first_tok = found[0]
-        idx = content.find(first_tok)
-        raw_label = content[:idx].strip() if idx > 0 else content.strip()
-        voter_labels[aid] = (msg.author.display_name, raw_label[:60] or msg.author.display_name)
+        first_line = next((ln.strip() for ln in content.split("\n") if ln.strip()), content.strip())
+        voter_labels[aid] = (msg.author.display_name, first_line[:60] or msg.author.display_name)
         voter_last_time[aid] = msg.created_at
 
     scores = _compute_tally(ballots, legend, final_mode)
@@ -18234,6 +18399,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
         "op_text": op_text,
         "legend": legend,
         "mode": final_mode,
+        "token_type": token_type,
         "ai_notes": ai_notes,
         "scores": scores,
         "ballots": ballots,
@@ -18247,6 +18413,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
 
 
 def _build_tally_embed(result: dict) -> discord.Embed:
+
     mode = result["mode"]
     mode_label = "🔢 排序偏好（波達計數法）" if mode == "ranked" else "☑️ 單選"
     unit = "分" if mode == "ranked" else "票"
@@ -18259,7 +18426,8 @@ def _build_tally_embed(result: dict) -> discord.Embed:
         color=discord.Color.blurple(),
         timestamp=discord.utils.utcnow(),
     )
-    embed.add_field(name="偵測到的計票方式", value=mode_label, inline=False)
+    token_type_label = "文字/字母代碼（無 Emoji）" if result.get("token_type") == "text_code" else "Emoji"
+    embed.add_field(name="偵測到的計票方式", value=f"{mode_label}\n選項代碼類型：{token_type_label}", inline=False)
 
     legend_lines = [f"{tok} → {label}" for tok, label in result["legend"].items()]
     if legend_lines:
@@ -18339,7 +18507,7 @@ class TallyGroup(app_commands.Group):
     @app_commands.command(name="count", description="AI 自動判斷投票格式並計票（管理員限定）")
     @app_commands.describe(
         thread="要計票的論壇貼文（留空則使用目前所在的貼文）",
-        legend="手動指定選項對照，格式：Emoji1=候選人1,Emoji2=候選人2（留空則由 AI 自動判斷）",
+        legend="手動指定選項對照，格式：代碼1=候選人1,代碼2=候選人2（代碼可為 Emoji 或文字/字母代碼，留空則自動判斷）",
         mode="計票方式（留空則由 AI 自動判斷）",
     )
     @app_commands.choices(mode=[
