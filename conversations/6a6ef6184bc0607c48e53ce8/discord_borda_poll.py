@@ -255,7 +255,7 @@ async def api_list_nations(request):
         gid = int(gid_raw)
         guilds = await _fetch_guilds(user["access_token"])
         ge = next((g for g in guilds if int(g["id"]) == gid), None)
-        if not ge or not _is_nation_admin(user.get("user_id", ""), ge):
+        if not _is_nation_admin(user.get("user_id", ""), ge):
             return web.json_response({"error": "forbidden：您沒有管理會員國的權限（需 Discord 管理員、白名單或機器人擁有者）"}, status=403)
         entries = [e for e in _member_nations["entries"] if int(e.get("guild_id", 0)) == gid]
         # Strip internal fields, return safe dict. Use .get() everywhere —
@@ -295,7 +295,7 @@ async def api_create_nation(request):
     gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
-    if not ge or not _is_nation_admin(user.get("user_id", ""), ge):
+    if not _is_nation_admin(user.get("user_id", ""), ge):
         return web.json_response({"error": "forbidden：您沒有註冊會員國的權限（需 Discord 管理員、白名單或機器人擁有者）"}, status=403)
     data = await request.json()
 
@@ -369,7 +369,7 @@ async def api_update_nation(request):
     gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
-    if not ge or not _is_nation_admin(user.get("user_id", ""), ge):
+    if not _is_nation_admin(user.get("user_id", ""), ge):
         return web.json_response({"error": "forbidden：您沒有編輯會員國的權限（需 Discord 管理員、白名單或機器人擁有者）"}, status=403)
     nid = request.match_info["nid"]
     data = await request.json()
@@ -417,7 +417,7 @@ async def api_delete_nation(request):
     gid = int(gid_raw)
     guilds = await _fetch_guilds(user["access_token"])
     ge = next((g for g in guilds if int(g["id"]) == gid), None)
-    if not ge or not _is_nation_admin(user.get("user_id", ""), ge):
+    if not _is_nation_admin(user.get("user_id", ""), ge):
         return web.json_response({"error": "forbidden：您沒有刪除會員國的權限（需 Discord 管理員、白名單或機器人擁有者）"}, status=403)
     nid = request.match_info["nid"]
 
@@ -923,12 +923,26 @@ async def api_guilds(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
+    uid_str = user.get("user_id", "")
     guilds = await _fetch_guilds(user["access_token"])
     out = []
+    seen_ids = set()
     for g in guilds:
         if _is_guild_admin(g):
             ic = f"https://cdn.discordapp.com/icons/{g['id']}/{g['icon']}.png" if g.get("icon") else None
-            out.append({"id": g["id"], "name": g["name"], "icon_url": ic})
+            out.append({"id": g["id"], "name": g["name"], "icon_url": ic, "nation_only": False})
+            seen_ids.add(str(g["id"]))
+    # Also surface guilds for nation-whitelisted users / bot owner, even if
+    # Discord's OAuth guild list doesn't carry admin/manage_server permission
+    # bits for them (or the guild lookup fails for any other reason) — they
+    # still need to be able to click into the server to reach 會員國 management.
+    is_owner_or_whitelisted = _is_nation_admin(uid_str, None)
+    if is_owner_or_whitelisted:
+        for g in guilds:
+            if str(g["id"]) not in seen_ids:
+                ic = f"https://cdn.discordapp.com/icons/{g['id']}/{g['icon']}.png" if g.get("icon") else None
+                out.append({"id": g["id"], "name": g["name"], "icon_url": ic, "nation_only": True})
+                seen_ids.add(str(g["id"]))
     return web.json_response(out)
 
 

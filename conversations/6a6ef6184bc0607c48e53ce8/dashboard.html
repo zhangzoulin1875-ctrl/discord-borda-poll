@@ -574,17 +574,21 @@ async function loadGuilds() {
   const list = document.getElementById('guild-list');
   if (!guilds.length) { list.innerHTML = '<p class="text-gray-400 text-sm col-span-full">找不到你有管理員權限的伺服器。</p>'; return; }
   list.innerHTML = guilds.map(g => `
-    <div class="bg-[#2b2d31] rounded-xl p-4 cursor-pointer hover:bg-[#3a3c43] transition" onclick="selectGuild('${g.id}','${escAttr(g.name)}')">
+    <div class="bg-[#2b2d31] rounded-xl p-4 cursor-pointer hover:bg-[#3a3c43] transition" onclick="selectGuild('${g.id}','${escAttr(g.name)}',${g.nation_only ? 'true' : 'false'})">
       ${g.icon_url ? `<img src="${g.icon_url}" class="w-12 h-12 rounded-xl mb-2">` : `<div class="w-12 h-12 rounded-xl bg-[#5865f2] flex items-center justify-center text-xl font-bold mb-2">${g.name[0]}</div>`}
-      <h3 class="font-semibold text-sm">${escHtml(g.name)}</h3>
+      <h3 class="font-semibold text-sm">${escHtml(g.name)}${g.nation_only ? ' <span class=\'text-xs text-blue-400\'>🌍 僅會員國管理</span>' : ''}</h3>
     </div>
   `).join('');
 }
 
-function selectGuild(id, name) {
+function selectGuild(id, name, nationOnly) {
   currentGuild = id; currentGuildName = name;
   document.getElementById('polls-title').textContent = name;
-  navigate('polls'); loadPolls();
+  // Nation-only (whitelist/owner without Discord admin perms) users don't have
+  // poll-management rights on this guild — jump straight to 會員國 instead of
+  // 'polls' to avoid landing on a dead-end forbidden error screen.
+  if (nationOnly) { showNationsPanel(); }
+  else { navigate('polls'); loadPolls(); }
 }
 
 async function loadPolls() {
