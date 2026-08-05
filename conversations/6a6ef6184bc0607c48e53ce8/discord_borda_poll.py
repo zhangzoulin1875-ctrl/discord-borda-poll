@@ -14442,6 +14442,93 @@ async def _ai_summarize_for_schedule(entries: list) -> list:
     return [{"type": e.get("proposal_type", "?"), "text": e.get("summary", "")[:40], "proposer_name": e.get("proposer_name", "?")} for e in entries]
 
 
+def _draw_gradient_bar(draw, xy, color1, color2, direction="horizontal"):
+    """Draw a smooth gradient bar. xy = (x0, y0, x1, y1)."""
+    x0, y0, x1, y1 = xy
+    if direction == "horizontal":
+        steps = x1 - x0
+        for i in range(steps):
+            t = i / max(steps, 1)
+            r = int(color1[0] + (color2[0] - color1[0]) * t)
+            g = int(color1[1] + (color2[1] - color1[1]) * t)
+            b = int(color1[2] + (color2[2] - color1[2]) * t)
+            draw.line([(x0 + i, y0), (x0 + i, y1)], fill=(r, g, b))
+    else:
+        steps = y1 - y0
+        for i in range(steps):
+            t = i / max(steps, 1)
+            r = int(color1[0] + (color2[0] - color1[0]) * t)
+            g = int(color1[1] + (color2[1] - color1[1]) * t)
+            b = int(color1[2] + (color2[2] - color1[2]) * t)
+            draw.line([(x0, y0 + i), (x1, y0 + i)], fill=(r, g, b))
+
+
+def _draw_rounded_card(img, xy, radius=12, fill=(54, 57, 63), border=None, border_width=1, shadow=False, shadow_offset=(0, 3), shadow_blur=6):
+    """Draw a rounded card with optional border and shadow."""
+    x0, y0, x1, y1 = xy
+    draw = ImageDraw.Draw(img)
+    if shadow:
+        sx, sy = shadow_offset
+        # Simple shadow: draw a slightly darker, offset rounded rect
+        shadow_color = (0, 0, 0)
+        draw.rounded_rectangle([x0 + sx, y0 + sy, x1 + sx, y1 + sy], radius=radius, fill=(20, 21, 23))
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill, outline=border, width=border_width if border else 0)
+    return draw
+
+
+def _draw_badge(draw, xy, text, font, bg_color, text_color=(255, 255, 255), padding_x=6, padding_y=2):
+    """Draw a small rounded badge with text. xy = (x, y) = top-left corner.
+    Returns (x_end, y_end) = bottom-right corner of the badge."""
+    x, y = xy
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        # textbbox can have negative top offset, normalize
+        y_off = max(0, -bbox[1])
+    except Exception:
+        tw, th, y_off = len(text) * 6, 12, 0
+
+    bw = tw + padding_x * 2
+    bh = th + padding_y * 2
+
+    draw.rounded_rectangle([x, y, x + bw, y + bh], radius=min(bh // 2, 6), fill=bg_color)
+    draw.text((x + padding_x, y + padding_y + y_off), text, fill=text_color, font=font)
+    return (x + bw, y + bh)
+
+
+def _text_with_wrap(draw, xy, text, font, max_width, fill, line_height=22):
+    """Draw text with word/character wrapping. Returns the y position after the last line."""
+    x, y = xy
+    if not text:
+        return y
+
+    # Character-by-character wrapping for CJK
+    current = ""
+    current_w = 0
+    for ch in text:
+        try:
+            bbox = draw.textbbox((0, 0), ch, font=font)
+            ch_w = bbox[2] - bbox[0]
+        except Exception:
+            ch_w = font.size
+
+        if current_w + ch_w > max_width and current:
+            draw.text((x, y), current, fill=fill, font=font)
+            y += line_height
+            current = ch
+            current_w = ch_w
+        else:
+            current += ch
+            current_w += ch_w
+
+    if current:
+        draw.text((x, y), current, fill=fill, font=font)
+        y += line_height
+
+    return y
+
+
 def _render_schedule_image(
     meeting_type: str,
     meeting_no: int,
@@ -14450,177 +14537,359 @@ def _render_schedule_image(
 ) -> bytes:
     """Render the meeting schedule notification image using Pillow.
     
-    meeting_type: "例行會議" or "簡務會議"
-    meeting_no: meeting number
-    proposals: list of {type, text, proposer_name}
-    settings: schedule_settings dict
+    Redesigned version with:
+    - Gradient header bar
+    - Rounded card containers for sections
+    - Color-coded type badges for proposals
+    - Visual timeline for meeting schedule
+    - Better typography hierarchy and spacing
+    - Decorative footer
     
     Returns PNG bytes.
     """
     if not _PIL_AVAILABLE:
         raise RuntimeError("Pillow 未安裝，無法渲染排程圖")
-    
+
     # ── Layout constants ──
     IMG_W = 800
-    # Colors (matching the dark Discord theme from the reference images)
-    BG_COLOR = (43, 45, 49)        # #2b2d31
-    CARD_COLOR = (54, 57, 63)      # #36393f
-    HEADER_COLOR = (88, 101, 242)  # #5865f2
+    MARGIN = 24
+
+    # ── Color palette (Discord dark theme) ──
+    BG_COLOR = (35, 36, 40)          # #232328 — slightly darker for contrast
+    CARD_COLOR = (49, 51, 56)         # #313338 — card background
+    CARD_ALT = (43, 45, 49)          # #2b2d31 — alt card / row stripe
+    HEADER_GRADIENT_START = (88, 101, 242)   # #5865f2
+    HEADER_GRADIENT_END = (118, 75, 185)      # #764bb9 — purple gradient
     TEXT_PRIMARY = (255, 255, 255)
     TEXT_SECONDARY = (185, 187, 190)
     TEXT_MUTED = (120, 124, 130)
-    ACCENT_GOLD = (250, 168, 50)
-    ACCENT_GREEN = (87, 181, 96)
     DIVIDER_COLOR = (65, 68, 73)
-    
+
+    # Type badge colors
+    BADGE_COLORS = {
+        "升格案": (87, 181, 96),       # green
+        "選舉案": (88, 101, 242),      # blurple
+        "政策提案": (250, 168, 50),    # gold/orange
+        "入盟案": (235, 69, 158),      # pink
+        "罷免案": (237, 66, 69),       # red
+        "修憲案": (155, 89, 182),      # purple
+        "其他": (100, 100, 110),      # gray
+    }
+
+    # Timeline colors
+    TIMELINE_COLORS = [
+        (87, 181, 96),    # 簽到 — green
+        (250, 168, 50),   # 提案審理 — gold
+        (88, 101, 242),   # 臨時動議 — blurple
+        (235, 69, 158),   # 投票結算 — pink
+        (237, 66, 69),    # 散會 — red
+    ]
+
     today = datetime.now(GMT8)
     date_str = today.strftime("%Y年%m月%d日")
     weekdays = ["一", "二", "三", "四", "五", "六", "日"]
     weekday_str = f"星期{weekdays[today.weekday()]}"
-    
+
     # ── Fonts ──
-    font_title = _load_font(28, bold=True)
-    font_subtitle = _load_font(16)
-    font_section = _load_font(18, bold=True)
+    font_huge = _load_font(30, bold=True)
+    font_title = _load_font(22, bold=True)
+    font_subtitle = _load_font(15)
+    font_section = _load_font(17, bold=True)
     font_body = _load_font(14)
+    font_body_bold = _load_font(14, bold=True)
     font_small = _load_font(12)
-    font_time = _load_font(15, bold=True)
-    
-    # ── Calculate height dynamically ──
-    # Header: 90px
-    # Date row: 30px
-    # Each section header: 35px
-    # Each proposal line: 28px (estimated, may wrap)
-    # Footer: 40px
-    
-    # Pre-calculate proposal section height (account for text wrapping)
-    proposal_lines = []
-    for p in proposals:
-        text = f"[{p.get('type', '?')}] {p.get('text', '')}"
-        # Estimate wrapping: ~35 chars per line at font_body size
-        max_chars = 38
-        lines = []
-        temp = text
-        while len(temp) > max_chars:
-            lines.append(temp[:max_chars])
-            temp = temp[max_chars:]
-        lines.append(temp)
-        proposal_lines.extend(lines)
-    
-    # Schedule sections
-    sections = [
-        ("📋 提案審理", proposals),
-        ("🗳️ 投票與決議", []),  # placeholder
-    ]
-    
-    total_proposal_height = max(len(proposal_lines) * 22, 30) if proposal_lines else 30
-    # Fixed sections: checkin, review time, motion, vote, adjourn
-    fixed_sections_height = 6 * 30  # 6 time-schedule rows
-    
-    img_h = 90 + 35 + 35 + total_proposal_height + 20 + fixed_sections_height + 20 + 40
-    img_h = max(img_h, 350)
-    
-    # ── Draw ──
-    img = Image.new("RGB", (IMG_W, img_h), BG_COLOR)
-    draw = ImageDraw.Draw(img)
-    
-    y = 0
-    
-    # ── Header bar ──
-    draw.rectangle([0, 0, IMG_W, 70], fill=HEADER_COLOR)
-    title_text = f"📢 {meeting_type}第{meeting_no}次"
-    # Center title
-    try:
-        bbox = draw.textbbox((0, 0), title_text, font=font_title)
-        tw = bbox[2] - bbox[0]
-    except Exception:
-        tw = 400
-    draw.text(((IMG_W - tw) / 2, 18), title_text, fill=TEXT_PRIMARY, font=font_title)
-    
-    y = 80
-    
-    # ── Date / weekday ──
-    date_text = f"📅 {date_str} {weekday_str}"
-    draw.text((30, y), date_text, fill=TEXT_SECONDARY, font=font_subtitle)
-    y += 30
-    
-    # ── Divider ──
-    draw.line([(30, y), (IMG_W - 30, y)], fill=DIVIDER_COLOR, width=1)
-    y += 12
-    
-    # ── Time schedule block ──
+    font_badge = _load_font(11, bold=True)
+    font_time = _load_font(14, bold=True)
+    font_time_label = _load_font(13)
+    font_footer = _load_font(11)
+
+    # ── Pre-calculate layout ──
     checkin_start = settings.get("checkin_start", "13:00")
     checkin_end = settings.get("checkin_end", "21:00")
     review_time = settings.get("review_time", "15:00")
     motion_time = settings.get("motion_time", "20:00")
     vote_time = settings.get("vote_time", "21:00")
-    
+
     schedule_items = [
-        (f"🕐 {checkin_start} — {checkin_end}", "簽到時間", ACCENT_GREEN),
-        (f"🔍 {review_time}", "提案審理", ACCENT_GOLD),
-        (f"📝 {motion_time}", "臨時動議", ACCENT_GOLD),
-        (f"🗳️ {vote_time}", "投票結算", ACCENT_GOLD),
-        (f"📢 {vote_time}", "散會公告", ACCENT_GREEN),
+        ("簽到時間", f"{checkin_start} — {checkin_end}", TIMELINE_COLORS[0]),
+        ("提案審理", f"{review_time}", TIMELINE_COLORS[1]),
+        ("臨時動議", f"{motion_time}", TIMELINE_COLORS[2]),
+        ("投票結算", f"{vote_time}", TIMELINE_COLORS[3]),
+        ("散會公告", f"{vote_time}", TIMELINE_COLORS[4]),
     ]
-    
-    # Section: 時間表
-    draw.text((30, y), "⏰ 會議時間表", fill=TEXT_PRIMARY, font=font_section)
-    y += 28
-    
-    for time_text, label, color in schedule_items:
-        # Time
-        draw.text((50, y), time_text, fill=color, font=font_time)
-        # Label
-        draw.text((280, y), label, fill=TEXT_SECONDARY, font=font_body)
-        y += 26
-    
-    y += 8
-    draw.line([(30, y), (IMG_W - 30, y)], fill=DIVIDER_COLOR, width=1)
-    y += 12
-    
-    # ── Proposals section ──
-    draw.text((30, y), "📋 本次議案清單", fill=TEXT_PRIMARY, font=font_section)
-    y += 28
-    
-    if proposal_lines:
-        for i, line in enumerate(proposal_lines):
-            # Number badge
-            draw.text((50, y), f"{i+1}.", fill=TEXT_MUTED, font=font_body)
-            draw.text((75, y), line, fill=TEXT_PRIMARY, font=font_body)
-            y += 22
-    else:
-        draw.text((50, y), "本次無待審議案", fill=TEXT_MUTED, font=font_body)
-        y += 22
-    
-    y += 8
-    draw.line([(30, y), (IMG_W - 30, y)], fill=DIVIDER_COLOR, width=1)
-    y += 12
-    
-    # ── Notes section ──
-    draw.text((30, y), "📌 注意事項", fill=TEXT_PRIMARY, font=font_section)
-    y += 28
-    
-    notes = [
-        "• 請各會員國代表準時簽到並參與表決",
-        "• 提案審理期間歡迎各國代表發表意見",
-        "• 投票將使用 Borda 計票制進行",
-    ]
-    for note in notes:
-        draw.text((50, y), note, fill=TEXT_SECONDARY, font=font_body)
-        y += 22
-    
-    # ── Footer ──
-    y += 8
-    draw.line([(30, y), (IMG_W - 30, y)], fill=DIVIDER_COLOR, width=1)
-    y += 10
-    footer = f"ICEA 微國家聯合組織 | {date_str}"
+
+    # ── Calculate proposal section height ──
+    # We need a temp image to measure text
+    temp_img = Image.new("RGB", (1, 1))
+    temp_draw = ImageDraw.Draw(temp_img)
+
+    proposal_cards = []
+    for p in proposals:
+        ptype = p.get("type", "其他")
+        ptext = p.get("text", "")
+        proposer = p.get("proposer_name", "")
+        badge_color = BADGE_COLORS.get(ptype, BADGE_COLORS["其他"])
+
+        # Measure badge width
+        badge_text = ptype
+        try:
+            bb = temp_draw.textbbox((0, 0), badge_text, font=font_badge)
+            badge_w = bb[2] - bb[0] + 12  # 6px padding each side
+        except Exception:
+            badge_w = 60
+
+        # Measure text wrapping
+        max_text_w = IMG_W - MARGIN * 2 - 24 - 10  # card padding + badge area
+        lines = []
+        current_line = ""
+        for ch in ptext:
+            try:
+                test = current_line + ch
+                bb = temp_draw.textbbox((0, 0), test, font=font_body)
+                if bb[2] - bb[0] > max_text_w and current_line:
+                    lines.append(current_line)
+                    current_line = ch
+                else:
+                    current_line = test
+            except Exception:
+                current_line += ch
+        if current_line:
+            lines.append(current_line)
+
+        card_h = max(50, len(lines) * 20 + 30 + (16 if proposer else 0))
+        proposal_cards.append({
+            "type": ptype,
+            "text_lines": lines,
+            "proposer": proposer,
+            "badge_color": badge_color,
+            "badge_w": badge_w,
+            "card_h": card_h,
+        })
+
+    # ── Calculate total image height ──
+    HEADER_H = 72
+    DATE_H = 36
+    SECTION_TITLE_H = 30
+    SECTION_GAP = 10
+    CARD_PADDING = 14
+
+    # Timeline section
+    timeline_h = 5 * 36 + 20  # 5 rows + padding
+
+    # Proposals section
+    proposals_h = sum(c["card_h"] + 8 for c in proposal_cards) if proposal_cards else 40
+
+    # Notes section
+    notes_h = 3 * 22 + 12
+
+    # Footer
+    FOOTER_H = 36
+
+    img_h = (
+        HEADER_H
+        + 16  # gap after header
+        + DATE_H
+        + SECTION_GAP
+        + SECTION_TITLE_H + timeline_h + 8  # timeline card
+        + SECTION_GAP
+        + SECTION_TITLE_H + proposals_h + 8  # proposals card
+        + SECTION_GAP
+        + SECTION_TITLE_H + notes_h + 8       # notes card
+        + 8
+        + FOOTER_H
+        + 16  # bottom padding
+    )
+    img_h = max(img_h, 400)
+
+    # ── Create image ──
+    img = Image.new("RGB", (IMG_W, img_h), BG_COLOR)
+    draw = ImageDraw.Draw(img)
+
+    y = 0
+
+    # ═══════════════════════════════════════════════
+    # HEADER — gradient bar with centered title
+    # ═══════════════════════════════════════════════
+    _draw_gradient_bar(draw, (0, 0, IMG_W, HEADER_H),
+                       HEADER_GRADIENT_START, HEADER_GRADIENT_END, "horizontal")
+
+    title_text = f"{meeting_type}第{meeting_no}次"
+    # Draw title centered
     try:
-        bbox = draw.textbbox((0, 0), footer, font=font_small)
+        bbox = draw.textbbox((0, 0), title_text, font=font_huge)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        y_off = max(0, -bbox[1])
+    except Exception:
+        tw, th, y_off = 300, 30, 0
+    draw.text(((IMG_W - tw) / 2, 18 + y_off), title_text, fill=TEXT_PRIMARY, font=font_huge)
+
+    # Subtitle below title
+    subtitle = "會議排程通知"
+    try:
+        bbox2 = draw.textbbox((0, 0), subtitle, font=font_subtitle)
+        sw = bbox2[2] - bbox2[0]
+    except Exception:
+        sw = 100
+    draw.text(((IMG_W - sw) / 2, 48), subtitle, fill=(201, 205, 251), font=font_subtitle)
+
+    y = HEADER_H + 16
+
+    # ═══════════════════════════════════════════════
+    # DATE ROW — date pill
+    # ═══════════════════════════════════════════════
+    date_text = f"📅  {date_str}  {weekday_str}"
+    try:
+        bbox = draw.textbbox((0, 0), date_text, font=font_subtitle)
+        dw = bbox[2] - bbox[0]
+        dh = bbox[3] - bbox[1]
+        dy_off = max(0, -bbox[1])
+    except Exception:
+        dw, dh, dy_off = 200, 15, 0
+    # Date pill background
+    pill_w = dw + 24
+    pill_x = (IMG_W - pill_w) / 2
+    draw.rounded_rectangle([pill_x, y, pill_x + pill_w, y + dh + 10],
+                           radius=8, fill=CARD_ALT)
+    draw.text((pill_x + 12, y + 5 + dy_off), date_text, fill=TEXT_SECONDARY, font=font_subtitle)
+    y += dh + 16
+
+    # ═══════════════════════════════════════════════
+    # SECTION: 會議時間表 (Visual Timeline)
+    # ═══════════════════════════════════════════════
+    y += SECTION_GAP
+
+    # Section title with accent bar
+    draw.rounded_rectangle([MARGIN, y, MARGIN + 4, y + 20], radius=2, fill=HEADER_GRADIENT_START)
+    draw.text((MARGIN + 12, y), "⏰ 會議時間表", fill=TEXT_PRIMARY, font=font_section)
+    y += SECTION_TITLE_H
+
+    # Timeline card
+    card_y0 = y
+    card_y1 = y + timeline_h
+    _draw_rounded_card(img, (MARGIN, card_y0, IMG_W - MARGIN, card_y1),
+                       radius=12, fill=CARD_COLOR, border=DIVIDER_COLOR, border_width=1)
+    inner_x = MARGIN + 20
+    inner_w = IMG_W - MARGIN * 2 - 40
+
+    ty = card_y0 + 12
+    for i, (label, time_val, color) in enumerate(schedule_items):
+        # Color dot
+        dot_x = inner_x + 10
+        dot_y = ty + 8
+        draw.ellipse([dot_x - 5, dot_y - 5, dot_x + 5, dot_y + 5], fill=color)
+
+        # Connector line
+        if i < len(schedule_items) - 1:
+            draw.line([(dot_x, dot_y + 6), (dot_x, dot_y + 30)],
+                      fill=DIVIDER_COLOR, width=2)
+
+        # Time label (left)
+        draw.text((dot_x + 18, ty), time_val, fill=color, font=font_time)
+        # Label (right)
+        draw.text((dot_x + 18 + 120, ty + 1), label, fill=TEXT_SECONDARY, font=font_time_label)
+
+        ty += 36
+
+    y = card_y1 + SECTION_GAP
+
+    # ═══════════════════════════════════════════════
+    # SECTION: 本次議案清單
+    # ═══════════════════════════════════════════════
+    draw.rounded_rectangle([MARGIN, y, MARGIN + 4, y + 20], radius=2, fill=HEADER_GRADIENT_START)
+    draw.text((MARGIN + 12, y), "📋 本次議案清單", fill=TEXT_PRIMARY, font=font_section)
+    y += SECTION_TITLE_H
+
+    # Proposals card
+    if proposal_cards:
+        total_prop_h = sum(c["card_h"] + 6 for c in proposal_cards)
+        card_y0 = y
+        card_y1 = y + total_prop_h + 12
+        _draw_rounded_card(img, (MARGIN, card_y0, IMG_W - MARGIN, card_y1),
+                           radius=12, fill=CARD_COLOR, border=DIVIDER_COLOR, border_width=1)
+
+        py = card_y0 + 10
+        for idx, pc in enumerate(proposal_cards):
+            # Row background (alternating)
+            row_y0 = py
+            row_y1 = py + pc["card_h"]
+
+            # Badge
+            badge_y = py + 4
+            _draw_badge(draw, (MARGIN + 20, badge_y), pc["type"], font_badge,
+                        pc["badge_color"], (255, 255, 255), 5, 2)
+
+            # Proposal text (wrapped, indented below badge)
+            text_y = badge_y + 20
+            for line in pc["text_lines"]:
+                draw.text((MARGIN + 20, text_y), line, fill=TEXT_PRIMARY, font=font_body)
+                text_y += 20
+
+            # Proposer
+            if pc["proposer"]:
+                draw.text((MARGIN + 20, text_y),
+                          f"提案人：{pc['proposer']}",
+                          fill=TEXT_MUTED, font=font_small)
+                text_y += 16
+
+            py = text_y + 8
+
+            # Divider between proposals (except last)
+            if idx < len(proposal_cards) - 1:
+                draw.line([(MARGIN + 20, py), (IMG_W - MARGIN - 20, py)],
+                          fill=DIVIDER_COLOR, width=1)
+                py += 6
+
+        y = card_y1 + SECTION_GAP
+    else:
+        card_y0 = y
+        card_y1 = y + 50
+        _draw_rounded_card(img, (MARGIN, card_y0, IMG_W - MARGIN, card_y1),
+                           radius=12, fill=CARD_COLOR, border=DIVIDER_COLOR, border_width=1)
+        draw.text((MARGIN + 20, y + 18), "本次無待審議案", fill=TEXT_MUTED, font=font_body)
+        y = card_y1 + SECTION_GAP
+
+    # ═══════════════════════════════════════════════
+    # SECTION: 注意事項
+    # ═══════════════════════════════════════════════
+    draw.rounded_rectangle([MARGIN, y, MARGIN + 4, y + 20], radius=2, fill=HEADER_GRADIENT_END)
+    draw.text((MARGIN + 12, y), "📌 注意事項", fill=TEXT_PRIMARY, font=font_section)
+    y += SECTION_TITLE_H
+
+    notes = [
+        ("•", "請各會員國代表準時簽到並參與表決", (87, 181, 96)),
+        ("•", "提案審理期間歡迎各國代表發表意見", (250, 168, 50)),
+        ("•", "投票將使用 Borda 計票制進行", (88, 101, 242)),
+    ]
+
+    notes_card_h = len(notes) * 22 + 16
+    card_y0 = y
+    card_y1 = y + notes_card_h
+    _draw_rounded_card(img, (MARGIN, card_y0, IMG_W - MARGIN, card_y1),
+                       radius=12, fill=CARD_COLOR, border=DIVIDER_COLOR, border_width=1)
+
+    ny = card_y0 + 10
+    for bullet, note_text, bullet_color in notes:
+        draw.text((MARGIN + 20, ny), bullet, fill=bullet_color, font=font_body_bold)
+        draw.text((MARGIN + 36, ny), note_text, fill=TEXT_SECONDARY, font=font_body)
+        ny += 22
+
+    y = card_y1 + 12
+
+    # ═══════════════════════════════════════════════
+    # FOOTER
+    # ═══════════════════════════════════════════════
+    draw.line([(MARGIN, y), (IMG_W - MARGIN, y)], fill=DIVIDER_COLOR, width=1)
+    y += 10
+
+    footer_text = f"ICEA 微國家聯合組織  |  {date_str}"
+    try:
+        bbox = draw.textbbox((0, 0), footer_text, font=font_footer)
         fw = bbox[2] - bbox[0]
     except Exception:
-        fw = 300
-    draw.text(((IMG_W - fw) / 2, y), footer, fill=TEXT_MUTED, font=font_small)
-    
+        fw = 250
+    draw.text(((IMG_W - fw) / 2, y), footer_text, fill=TEXT_MUTED, font=font_footer)
+
     # ── Save to bytes ──
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
