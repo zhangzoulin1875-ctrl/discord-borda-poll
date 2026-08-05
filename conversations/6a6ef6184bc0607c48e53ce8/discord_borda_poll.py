@@ -14524,6 +14524,7 @@ def _render_schedule_image(
     meeting_no: int,
     proposals: list,
     settings: dict,
+    meeting_date: str = "",
 ) -> bytes:
     """Render the meeting schedule notification image using Pillow.
 
@@ -14574,10 +14575,14 @@ def _render_schedule_image(
         (237, 66, 69),
     ]
 
-    today = datetime.now(GMT8)
-    date_str = today.strftime("%Y年%m月%d日")
-    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
-    weekday_str = f"星期{weekdays[today.weekday()]}"
+    if meeting_date:
+        date_str = meeting_date
+        weekday_str = ""
+    else:
+        today = datetime.now(GMT8)
+        date_str = today.strftime("%Y年%m月%d日")
+        weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+        weekday_str = f"星期{weekdays[today.weekday()]}"
 
     # ── Fonts (sized up ~1.5x vs the previous 800px-wide version for sharper rendering) ──
     font_huge = _load_font(44, bold=True)
@@ -14716,7 +14721,7 @@ def _render_schedule_image(
     # ═══════════════════════════════════════════════
     # DATE ROW — date pill (plain text, no emoji — avoids missing-glyph tofu boxes)
     # ═══════════════════════════════════════════════
-    date_text = f"{date_str}　{weekday_str}"
+    date_text = f"{date_str}　{weekday_str}" if weekday_str else date_str
     dw, dh, _ = _text_size(draw, date_text, font_subtitle)
     pill_w = dw + 36
     pill_h = dh + 22
@@ -14882,10 +14887,12 @@ class ScheduleSendView(discord.ui.View):
         if mention_role_id:
             content = f"<@&{mention_role_id}>"
         
+        _meeting_date = sched.get("meeting_date", "")
+        _date_display = _meeting_date if _meeting_date else datetime.now(GMT8).strftime("%Y年%m月%d日")
         embed = discord.Embed(
             title=f"📢 {sched.get('meeting_type', '會議')}第{sched.get('meeting_no', '?')}次 — 會議排程通知",
             description=(
-                f"📅 **{datetime.now(GMT8).strftime('%Y年%m月%d日')}**\n"
+                f"📅 **{_date_display}**\n"
                 f"請各會員國代表留意會議時間表及待審議案，準時出席。"
             ),
             color=discord.Color.blue(),
@@ -14907,19 +14914,8 @@ class ScheduleSendView(discord.ui.View):
             await interaction.response.send_message(f"❌ 發送失敗：{e}", ephemeral=True)
             return
         
-        # ── After successful send: remove accepted proposals that were included ──
-        proposal_ids = sched.get("proposal_ids", [])
-        if proposal_ids:
-            removed = 0
-            for pid in proposal_ids:
-                for p in _proposals.get("entries", []):
-                    if p.get("id") == pid:
-                        p["status"] = "scheduled"
-                        p["schedule_date"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M")
-                        removed += 1
-                        break
-            save_proposals()
-            print(f"📅 排程通知已發送，{removed} 筆提案標記為已排程")
+        # ── Proposals are NOT auto-removed after send ──
+        # Use /schedule clear_proposals to manually mark proposals as scheduled.
         
         # ── Increment meeting number ──
         if sched.get("meeting_type") == "例行會議":
@@ -14934,7 +14930,7 @@ class ScheduleSendView(discord.ui.View):
         # Update the confirmation message
         try:
             await interaction.response.edit_message(
-                content=f"✅ 排程通知已成功發送至 #{target_ch.name}" + (f" 並 @ 了身分組" if mention_role_id else ""),
+                content=f"✅ 排程通知已成功發送至 #{target_ch.name}" + (f" 並 @ 了身分組" if mention_role_id else "") + "\n💡 提案存檔已保留。確認無誤後可用 `/schedule clear_proposals` 清除。",
                 embed=None,
                 view=None,
                 attachments=[],
@@ -14958,6 +14954,137 @@ class ScheduleSendView(discord.ui.View):
 
         await interaction.response.send_modal(ScheduleEditModal(self.schedule_id, sched, interaction.message))
 
+    @discord.ui.button(label="📋 增刪議案", style=discord.ButtonStyle.secondary, custom_id="schedule_proposals")
+    async def proposals_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+            return
+
+        sched = _pending_schedules.get(self.schedule_id)
+        if not sched:
+            await interaction.response.send_message("❌ 找不到排程資料（可能已過期，請重新 /schedule generate）。", ephemeral=True)
+            return
+
+        all_accepted = [p for p in _proposals.get("entries", []) if p.get("status") == "accepted"]
+        if not all_accepted:
+            await interaction.response.send_message("ℹ️ 目前沒有可選擇的已受理提案。", ephemeral=True)
+            return
+
+        current_ids = set(sched.get("proposal_ids", []))
+        options = []
+        for p in all_accepted:
+            pid = p.get("id", "")
+            ptype = p.get("proposal_type", "?")
+            summary = p.get("summary", "")[:40]
+            label = f"[{ptype}] {summary}"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            included = pid in current_ids
+            desc_text = f"提案人：{p.get('proposer_name', '?')}" + (" | ✓ 目前已選" if included else "")
+            options.append(discord.SelectOption(label=label, value=pid, description=desc_text[:100]))
+
+        view = ScheduleProposalSelectView(self.schedule_id, options)
+        await interaction.response.send_message(
+            "請選擇要納入排程圖的提案（已選取的會保留，未選取的會移除）：",
+            view=view,
+            ephemeral=True,
+        )
+
+
+class ScheduleProposalSelectView(discord.ui.View):
+    """Select-menu view for adding/removing proposals from the schedule."""
+
+    def __init__(self, schedule_id: str, options: list):
+        super().__init__(timeout=120)
+        self.schedule_id = schedule_id
+        select = discord.ui.Select(
+            placeholder="選擇要納入排程的提案...",
+            options=options[:25],
+            min_values=0,
+            max_values=len(options[:25]),
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        sched = _pending_schedules.get(self.schedule_id)
+        if not sched:
+            await interaction.response.edit_message(content="❌ 排程資料已過期，請重新 /schedule generate。", view=None)
+            return
+
+        selected_ids = set(interaction.data.get("values", []))
+        if not selected_ids:
+            await interaction.response.edit_message(content="ℹ️ 未選擇任何提案，排程圖保持不變。", view=None)
+            return
+
+        await interaction.response.edit_message(content="⏳ 正在重新整理提案並渲染排程圖...", view=None)
+
+        all_accepted = [p for p in _proposals.get("entries", []) if p.get("status") == "accepted"]
+        selected_entries = [p for p in all_accepted if p.get("id") in selected_ids]
+
+        if not selected_entries:
+            await interaction.followup.send("❌ 找不到對應的提案資料。", ephemeral=True)
+            return
+
+        try:
+            summarized = await _ai_summarize_for_schedule(selected_entries)
+        except Exception:
+            summarized = [{"type": p.get("proposal_type", "?"), "text": p.get("summary", "")[:40], "proposer_name": p.get("proposer_name", "?")} for p in selected_entries]
+
+        meeting_type = sched.get("meeting_type", "例行會議")
+        meeting_no = sched.get("meeting_no", 1)
+        meeting_date = sched.get("meeting_date", "")
+
+        try:
+            new_png = _render_schedule_image(meeting_type, meeting_no, summarized, schedule_settings, meeting_date=meeting_date)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 重新渲染失敗：{e}", ephemeral=True)
+            return
+
+        sched["png"] = new_png
+        sched["proposal_ids"] = [p.get("id") for p in selected_entries]
+        sched["summarized_proposals"] = summarized
+
+        # Update the original preview message
+        target_ch_id = sched.get("target_channel_id")
+        mention_role_id = sched.get("mention_role_id")
+        date_display = f" | 日期：{meeting_date}" if meeting_date else ""
+
+        new_embed = discord.Embed(
+            title=f"📅 {meeting_type}第{meeting_no}次 — 排程通知預覽",
+            description=(
+                f"共 {len(selected_entries)} 件提案{date_display}\n"
+                f"目標頻道：{'<#' + str(target_ch_id) + '>' if target_ch_id else '⚠️ 未設定'}\n"
+                f"提及身分組：{'<@&' + str(mention_role_id) + '>' if mention_role_id else '無'}\n\n"
+                f"可使用下方按鈕編輯場次資訊、增刪議案、或直接發送。"
+            ),
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        new_embed.set_image(url="attachment://schedule_preview.png")
+        new_embed.set_footer(text="確認排程 | 增刪議案已更新")
+
+        try:
+            channel = interaction.channel
+            if channel:
+                async for msg in channel.history(limit=20):
+                    if (msg.author.id == bot.user.id
+                        and msg.attachments
+                        and msg.attachments[0].filename == "schedule_preview.png"):
+                        await msg.edit(
+                            embed=new_embed,
+                            attachments=[discord.File(io.BytesIO(new_png), filename="schedule_preview.png")],
+                            view=ScheduleSendView(self.schedule_id),
+                        )
+                        break
+        except Exception as e:
+            print(f"⚠️ 更新排程預覽訊息失敗：{e}")
+
+        await interaction.followup.send(
+            f"✅ 已更新排程圖，共 {len(selected_entries)} 件提案。",
+            ephemeral=True,
+        )
+
 
 class ScheduleEditModal(discord.ui.Modal, title="編輯場次資訊"):
     """Lets an admin correct the meeting type / meeting number and re-render
@@ -14975,14 +15102,20 @@ class ScheduleEditModal(discord.ui.Modal, title="編輯場次資訊"):
         required=True,
         max_length=6,
     )
+    meeting_date_input = discord.ui.TextInput(
+        label="會議日期（例如：8月10日 星期一）",
+        placeholder="留空則顯示今日日期",
+        required=False,
+        max_length=30,
+    )
 
     def __init__(self, schedule_id: str, sched: dict, original_message: discord.Message = None):
         super().__init__()
         self.schedule_id = schedule_id
-        self.original_message = original_message  # captured explicitly — interaction.message
-        # is not reliably populated on modal-submit interactions, so we can't depend on it later.
+        self.original_message = original_message
         self.meeting_type_input.default = sched.get("meeting_type", "例行會議")
         self.meeting_no_input.default = str(sched.get("meeting_no", 1))
+        self.meeting_date_input.default = sched.get("meeting_date", "")
 
     async def on_submit(self, interaction: discord.Interaction):
         sched = _pending_schedules.get(self.schedule_id)
@@ -14996,6 +15129,7 @@ class ScheduleEditModal(discord.ui.Modal, title="編輯場次資訊"):
         except ValueError:
             await interaction.response.send_message("❌ 「第幾次」必須是數字。", ephemeral=True)
             return
+        new_date = self.meeting_date_input.value.strip()
 
         if not _PIL_AVAILABLE:
             await interaction.response.send_message("❌ Pillow 未安裝，無法重新渲染。", ephemeral=True)
@@ -15005,7 +15139,8 @@ class ScheduleEditModal(discord.ui.Modal, title="編輯場次資訊"):
 
         try:
             new_png = _render_schedule_image(
-                new_type, new_no, sched.get("summarized_proposals", []), schedule_settings
+                new_type, new_no, sched.get("summarized_proposals", []), schedule_settings,
+                meeting_date=new_date,
             )
         except Exception as e:
             await interaction.followup.send(f"❌ 重新渲染失敗：{e}", ephemeral=True)
@@ -15013,6 +15148,7 @@ class ScheduleEditModal(discord.ui.Modal, title="編輯場次資訊"):
 
         sched["meeting_type"] = new_type
         sched["meeting_no"] = new_no
+        sched["meeting_date"] = new_date
         sched["png"] = new_png
 
         accepted_count = len(sched.get("proposal_ids", []))
@@ -15022,17 +15158,17 @@ class ScheduleEditModal(discord.ui.Modal, title="編輯場次資訊"):
         new_embed = discord.Embed(
             title=f"📅 {new_type}第{new_no}次 — 排程通知預覽",
             description=(
-                f"共 {accepted_count} 件已受理提案\n"
+                f"共 {accepted_count} 件提案" + (f" | 日期：{new_date}" if new_date else "") + "\n"
                 f"目標頻道：{'<#' + str(target_ch_id) + '>' if target_ch_id else '⚠️ 未設定'}\n"
                 f"提及身分組：{'<@&' + str(mention_role_id) + '>' if mention_role_id else '無'}\n\n"
-                f"請確認後點擊「📤 發送排程通知」按鈕。\n"
-                f"發送成功後，本批提案將標記為已排程，下次不會重複列出。"
+                "可使用下方按鈕編輯場次資訊、增刪議案、或直接發送。\n"
+                ""
             ),
             color=discord.Color.gold(),
             timestamp=discord.utils.utcnow(),
         )
         new_embed.set_image(url="attachment://schedule_preview.png")
-        new_embed.set_footer(text="確認排程 | 發送後提案自動標記為已排程")
+        new_embed.set_footer(text="確認排程 | 發送後提案不自動刪除")
 
         target_message = self.original_message or interaction.message
         try:
@@ -15055,12 +15191,13 @@ class ScheduleGroup(app_commands.Group):
     @app_commands.command(name="generate", description="生成會議排程通知圖（管理員限定）")
     @app_commands.describe(
         meeting_type="會議種類",
+        meeting_date="會議日期（例如：8月10日 星期一）",
     )
     @app_commands.choices(meeting_type=[
         app_commands.Choice(name="例行會議", value="例行會議"),
         app_commands.Choice(name="簡務會議", value="簡務會議"),
     ])
-    async def generate(self, interaction: discord.Interaction, meeting_type: str = "例行會議"):
+    async def generate(self, interaction: discord.Interaction, meeting_type: str = "例行會議", meeting_date: str = ""):
         if not is_admin(interaction):
             await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
@@ -15092,7 +15229,7 @@ class ScheduleGroup(app_commands.Group):
         
         # Render image
         try:
-            png_bytes = _render_schedule_image(meeting_type, meeting_no, summarized, schedule_settings)
+            png_bytes = _render_schedule_image(meeting_type, meeting_no, summarized, schedule_settings, meeting_date=meeting_date)
         except Exception as e:
             await interaction.followup.send(f"❌ 排程圖渲染失敗：{e}", ephemeral=True)
             return
@@ -15108,28 +15245,30 @@ class ScheduleGroup(app_commands.Group):
             "png": png_bytes,
             "meeting_type": meeting_type,
             "meeting_no": meeting_no,
+            "meeting_date": meeting_date,
             "proposal_ids": [p.get("id") for p in accepted],
-            "summarized_proposals": summarized,  # snapshot needed to re-render on edit
+            "summarized_proposals": summarized,
             "target_channel_id": target_ch_id,
             "mention_role_id": mention_role_id,
             "created_at": _time.time(),
         }
         
         # Build preview embed
+        date_display = f" | 日期：{meeting_date}" if meeting_date else ""
         preview_embed = discord.Embed(
             title=f"📅 {meeting_type}第{meeting_no}次 — 排程通知預覽",
             description=(
-                f"共 {len(accepted)} 件已受理提案\n"
+                f"共 {len(accepted)} 件已受理提案" + date_display + "\n"
                 f"目標頻道：{'<#' + str(target_ch_id) + '>' if target_ch_id else '⚠️ 未設定'}\n"
                 f"提及身分組：{'<@&' + str(mention_role_id) + '>' if mention_role_id else '無'}\n\n"
-                f"請確認後點擊「📤 發送排程通知」按鈕。\n"
-                f"發送成功後，本批提案將標記為已排程，下次不會重複列出。"
+                "可使用下方按鈕編輯場次資訊、增刪議案、或直接發送。\n"
+                ""
             ),
             color=discord.Color.gold(),
             timestamp=discord.utils.utcnow(),
         )
         preview_embed.set_image(url="attachment://schedule_preview.png")
-        preview_embed.set_footer(text="確認排程 | 發送後提案自動標記為已排程")
+        preview_embed.set_footer(text="確認排程 | 發送後提案不自動刪除")
         
         view = ScheduleSendView(schedule_id)
         
