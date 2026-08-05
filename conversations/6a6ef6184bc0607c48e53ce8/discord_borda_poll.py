@@ -14485,13 +14485,17 @@ def _text_size(draw, text, font):
 
 def _draw_badge(draw, xy, text, font, bg_color, text_color=(255, 255, 255), padding_x=10, padding_y=5):
     """Draw a small rounded badge with text. xy = (x, y) = top-left corner.
-    Returns (x_end, y_end) = bottom-right corner of the badge."""
+    Returns (x_end, y_end) = bottom-right corner of the badge.
+
+    Uses anchor="mm" to center text on the pill — manual bbox-offset math doesn't
+    reliably match a font's real ascender/descender metrics (this caused text to sit
+    too close to the bottom edge, looking squeezed against the pill border)."""
     x, y = xy
-    tw, th, y_off = _text_size(draw, text, font)
+    tw, th, _ = _text_size(draw, text, font)
     bw = tw + padding_x * 2
     bh = th + padding_y * 2
     draw.rounded_rectangle([x, y, x + bw, y + bh], radius=min(bh // 2, 9), fill=bg_color)
-    draw.text((x + padding_x, y + padding_y + y_off), text, fill=text_color, font=font)
+    draw.text((x + bw / 2, y + bh / 2), text, fill=text_color, font=font, anchor="mm")
     return (x + bw, y + bh)
 
 
@@ -14713,12 +14717,15 @@ def _render_schedule_image(
     # DATE ROW — date pill (plain text, no emoji — avoids missing-glyph tofu boxes)
     # ═══════════════════════════════════════════════
     date_text = f"{date_str}　{weekday_str}"
-    dw, dh, dy_off = _text_size(draw, date_text, font_subtitle)
+    dw, dh, _ = _text_size(draw, date_text, font_subtitle)
     pill_w = dw + 36
+    pill_h = dh + 22
     pill_x = (IMG_W - pill_w) / 2
-    draw.rounded_rectangle([pill_x, y, pill_x + pill_w, y + dh + 22], radius=12, fill=CARD_ALT)
-    draw.text((pill_x + 18, y + 11 + dy_off), date_text, fill=TEXT_SECONDARY, font=font_subtitle)
-    y += dh + 22 + 20
+    draw.rounded_rectangle([pill_x, y, pill_x + pill_w, y + pill_h], radius=12, fill=CARD_ALT)
+    # anchor="mm" centers on real font metrics — same fix as _draw_badge, avoids
+    # the manual-offset mismatch that squeezed text against the pill edge.
+    draw.text((pill_x + pill_w / 2, y + pill_h / 2), date_text, fill=TEXT_SECONDARY, font=font_subtitle, anchor="mm")
+    y += pill_h + 20
 
     # ═══════════════════════════════════════════════
     # SECTION: 會議時間表
@@ -14800,7 +14807,6 @@ def _render_schedule_image(
     notes = [
         ("請各會員國代表準時簽到並參與表決", (87, 181, 96)),
         ("提案審理期間歡迎各國代表發表意見", (250, 168, 50)),
-        ("投票將使用 Borda 計票制進行", (88, 101, 242)),
     ]
 
     notes_card_h = len(notes) * 32 + 24
