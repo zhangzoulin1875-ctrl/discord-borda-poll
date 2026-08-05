@@ -121,7 +121,7 @@
         <label class="block text-sm text-gray-400 mb-1">API 端點 URL</label>
         <input id="ai-api-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/chat/completions">
         <label class="block text-sm text-gray-400 mb-1">API Key</label>
-        <input id="ai-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
+        <input id="ai-api-key" type="password" autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore data-form-type="other" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
         <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
         <input id="ai-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
         <label class="block text-sm text-gray-400 mb-2">模型降級鏈（逗號分隔）</label>
@@ -281,7 +281,7 @@
             <label class="block text-sm text-gray-400 mb-1">備援 API 端點 URL</label>
             <input id="ai-fallback-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/chat/completions">
             <label class="block text-sm text-gray-400 mb-1">備援 API Key</label>
-            <input id="ai-fallback-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入備援 API Key">
+            <input id="ai-fallback-key" type="password" autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore data-form-type="other" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入備援 API Key">
             <label class="block text-sm text-gray-400 mb-1">備援模型名稱</label>
             <input id="ai-fallback-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
             <label class="block text-sm text-gray-400 mb-1">每位用戶每日備援對話上限</label>
@@ -338,7 +338,7 @@
       </div>
       <div>
         <label class="block text-sm text-gray-400 mb-1">API Key</label>
-        <input id="mtg-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
+        <input id="mtg-api-key" type="password" autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore data-bwignore data-form-type="other" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
       </div>
       <div>
         <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
@@ -703,6 +703,8 @@ async function showChatAIPanel() {
   document.getElementById('ai-enabled').checked = s.enabled || false;
   document.getElementById('ai-api-url').value = s.api_url || '';
   document.getElementById('ai-api-key').placeholder = s.api_key_masked ? `已設定（${s.api_key_masked}）輸入新值可覆蓋` : '輸入 API Key';
+  document.getElementById('ai-api-key').value = ''; // 防止瀏覽器密碼管理器自動填入舊值造成誤覆蓋
+  setTimeout(() => { document.getElementById('ai-api-key').value = ''; }, 300); // 部分瀏覽器的自動填入是延遲的，補一次
   document.getElementById('ai-model').value = s.model || 'gpt-4o-mini';
   document.getElementById('ai-model-chain').value = s.model_fallback_chain || '';
   document.getElementById('ai-system-prompt').value = s.system_prompt || '';
@@ -728,6 +730,8 @@ async function showChatAIPanel() {
   document.getElementById('ai-fallback-enabled').checked = s.fallback_enabled || false;
   document.getElementById('ai-fallback-url').value = s.fallback_api_url || '';
   document.getElementById('ai-fallback-key').placeholder = s.fallback_api_key_masked ? `已設定（${s.fallback_api_key_masked}）輸入新值可覆蓋` : '輸入備援 API Key';
+  document.getElementById('ai-fallback-key').value = '';
+  setTimeout(() => { document.getElementById('ai-fallback-key').value = ''; }, 300);
   document.getElementById('ai-fallback-model').value = s.fallback_model || '';
   document.getElementById('ai-fallback-daily-limit').value = s.fallback_daily_limit || 10;
   document.getElementById('ai-fallback-rate-per-min').value = s.fallback_rate_per_min || 6;
@@ -820,6 +824,8 @@ async function showMeetingAIPanel() {
   if (s.error) { if (s.status === 401) { showOnly('login-view'); return; } alert('載入設定失敗：' + s.error); return; }
   document.getElementById('mtg-api-url').value = s.api_url || '';
   document.getElementById('mtg-api-key').placeholder = s.has_key ? '已設定（輸入新值可覆蓋）' : '輸入 API Key';
+  document.getElementById('mtg-api-key').value = '';
+  setTimeout(() => { document.getElementById('mtg-api-key').value = ''; }, 300);
   document.getElementById('mtg-model').value = s.model || 'gpt-4o-mini';
   document.getElementById('mtg-system-prompt').value = s.system_prompt || '';
 }
