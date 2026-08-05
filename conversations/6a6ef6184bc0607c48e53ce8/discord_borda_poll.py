@@ -19188,27 +19188,23 @@ class TurtleSoupStartView(discord.ui.View):
 
     @discord.ui.button(label="🍜 開始海龜湯", style=discord.ButtonStyle.primary, custom_id="turtle_soup_start")
     async def start_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        global _turtle_soup_state
+        global _turtle_soup_state, _turtle_soup_invite_msg_id
+
+        # 同步鎖：第一個人按下就立刻標記 active=True，
+        # 後面的人即使同時按下也會看到「正在進行中」
         if _turtle_soup_state["active"]:
-            await interaction.response.send_message("⚠️ 已經有一局海龜湯正在進行中！", ephemeral=True)
+            await interaction.response.send_message(
+                "⚠️ 已經有一局海龜湯正在進行中！", ephemeral=True,
+            )
             return
 
-        difficulty = chat_ai_settings.get("turtle_soup_difficulty", "medium")
-        await interaction.response.send_message(f"🍜 AI 正在熬湯中（難度：{difficulty}）... 請稍等～", ephemeral=True)
-
-        # 生成湯底
-        soup_data = await _generate_turtle_soup(difficulty)
-        if not soup_data:
-            await interaction.followup.send("⚠️ 湯底生成失敗，請稍後再試。", ephemeral=True)
-            return
-
-        # 初始化遊戲狀態
+        # 立刻佔位，防止併發雙開
         _turtle_soup_state.update({
             "active": True,
-            "surface": soup_data["surface"],
-            "truth": soup_data["truth"],
-            "difficulty": soup_data["difficulty"],
-            "max_questions": soup_data["max_questions"],
+            "surface": "",
+            "truth": "",
+            "difficulty": chat_ai_settings.get("turtle_soup_difficulty", "medium"),
+            "max_questions": 0,
             "questions_used": 0,
             "qa_history": [],
             "consecutive_no": 0,
@@ -19219,6 +19215,27 @@ class TurtleSoupStartView(discord.ui.View):
             "started_at": _time.time(),
             "starter_user_id": str(interaction.user.id),
             "hint_given": False,
+        })
+
+        difficulty = _turtle_soup_state["difficulty"]
+        await interaction.response.send_message(
+            f"🍜 AI 正在熬湯中（難度：{difficulty}）... 請稍等～", ephemeral=True,
+        )
+
+        # 生成湯底
+        soup_data = await _generate_turtle_soup(difficulty)
+        if not soup_data:
+            # 生成失敗，回滾狀態
+            _turtle_soup_state["active"] = False
+            await interaction.followup.send("⚠️ 湯底生成失敗，請稍後再試。", ephemeral=True)
+            return
+
+        # 填入生成的題目
+        _turtle_soup_state.update({
+            "surface": soup_data["surface"],
+            "truth": soup_data["truth"],
+            "difficulty": soup_data["difficulty"],
+            "max_questions": soup_data["max_questions"],
         })
 
         # 發送遊戲開始訊息
