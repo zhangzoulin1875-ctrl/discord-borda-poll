@@ -2152,6 +2152,100 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
             f"系統會自動將此存入你對這位使用者的長期記憶。只記真正值得記住的事。"
         )
 
+    # ── 自動背景資料注入（跟一般聊天室 generate_chat_reply 同一套邏輯）──
+    # 專屬聊天室之前只靠「AI 自己決定要不要呼叫工具」來查百科/搜尋，但較弱的
+    # 免費模型常常不會主動呼叫，導致明明資料庫/百科裡有的資訊也回答「沒有資料」。
+    # 這裡改成跟一般聊天室一樣：不管 AI 想不想查，都先自動比對百科、Discord 歷史、
+    # 會員國登記資料、網路搜尋，直接把結果餵給 AI 當作事實依據。
+    clean_content = (message.content or "").strip()
+
+    _nation_registry_auto = ""
+    if message.guild and any(m in clean_content for m in _NATION_REGISTRY_MARKERS):
+        _nation_registry_auto = _format_nation_registry_context(message.guild.id, clean_content)
+
+    micropedia_enabled = settings.get("micropedia_enabled", True)
+    max_results = settings.get("micropedia_max_results", 5)
+    _need_micropedia = bool(micropedia_enabled and len(clean_content) >= 4)
+    _need_discord = bool(message.guild and len(clean_content) >= 4)
+    _need_web = len(clean_content) >= 6
+
+    async def _do_micropedia():
+        if not _need_micropedia:
+            return ""
+        try:
+            return await asyncio.wait_for(
+                _micropedia_auto_context(clean_content, max_results), timeout=settings.get("preprocess_timeout", 6)
+            )
+        except Exception:
+            return ""
+
+    async def _do_discord():
+        if not _need_discord:
+            return ""
+        try:
+            return await asyncio.wait_for(
+                _search_discord_history(message.guild, clean_content, limit=15), timeout=settings.get("preprocess_timeout", 6)
+            )
+        except Exception:
+            return ""
+
+    async def _do_web():
+        if not _need_web:
+            return ""
+        try:
+            return await asyncio.wait_for(_web_search(clean_content[:200]), timeout=settings.get("preprocess_timeout", 6))
+        except Exception:
+            return ""
+
+    _t_room_pre = _time.time()
+    auto_context, _discord_auto, _web_auto = await asyncio.gather(
+        _do_micropedia(), _do_discord(), _do_web()
+    )
+    print(f"⏱️ AI 聊天室預處理（百科+Discord+網路 平行）耗時 {_time.time()-_t_room_pre:.1f}s")
+
+    if _nation_registry_auto:
+        system_prompt += (
+            f"\n\n─── 本伺服器會員國登記資料（機器人自己的資料庫，非百科）───\n"
+            f"以下是機器人資料庫裡登記的國家名單，依照使用者問題自動篩選類別。"
+            f"這是官方登記資料，請直接引用回答，不要說「查不到」或「沒有明確列出」。\n{_nation_registry_auto}"
+        )
+
+    if auto_context:
+        system_prompt += (
+            f"\n\n─── 微國家百科資料（已自動比對到相關文章）───\n"
+            f"以下是根據使用者訊息，自動從微國家百科 (micropedia.site) 比對到的相關文章。"
+            f"請優先參考這些資料來回答問題，如果文章內容已經涵蓋使用者問的事，就直接回答，"
+            f"不要猶豫或說「沒有資料」。只有文章確實沒涵蓋細節時才誠實說沒查到。\n{auto_context}"
+        )
+
+    if _discord_auto and "沒有找到" not in _discord_auto:
+        system_prompt += (
+            f"\n\n─── Discord 伺服器歷史資料（已自動搜尋到相關內容）───\n"
+            f"以下是根據使用者的問題，自動從整個伺服器搜尋到的相關內容，這些是真實記錄，"
+            f"如果下面的資料已經有答案就直接引用回答，不要說「不確定」。\n{_discord_auto}"
+        )
+
+    if _web_auto:
+        system_prompt += (
+            f"\n\n─── 網際網路搜尋結果（已自動查詢）───\n"
+            f"以下是自動從網際網路搜尋到的結果，如果使用者問的是真實世界的事物就參考這些資料，"
+            f"跟問題無關就忽略。\n{_web_auto[:1500]}"
+        )
+
+    if ai_refined_knowledge:
+        recent_knowledge = ai_refined_knowledge[-12:]
+        if recent_knowledge:
+            knowledge_lines = []
+            for k in recent_knowledge:
+                conf_tag = "✅" if k.get("confidence", "high") == "high" else "⚠️"
+                knowledge_lines.append(f"- {conf_tag} [{k.get('date', '?')}] {k.get('topic', '')}：{k.get('summary', '')}")
+            system_prompt += (
+                f"\n\n─── 微國家精煉知識庫 ───\n"
+                f"以下是從社群討論中萃取、經百科驗證修正的知識摘要。"
+                f"✅ = 已經百科驗證（可信），⚠️ = 社群討論但百科未覆蓋（僅供參考）。\n"
+                + "\n".join(knowledge_lines)
+            )
+
     # ── Fetch channel history ──
     history_messages = []
     try:
@@ -2215,7 +2309,16 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
     _fb_mode = "rate_limited"
     _fb_user = user_id
 
-    # Call the AI API — with tools for search capability
+    # Call the AI API — only offer tools as a FALLBACK when auto-context
+    # above came up thin (mirrors generate_chat_reply's _context_rich logic).
+    # If we already auto-injected micropedia/discord/web results, skip tools
+    # entirely — cheaper, faster, and avoids the weak model just not calling
+    # them and answering "沒有資料" anyway.
+    _room_context_rich = bool(
+        (auto_context and len(auto_context) > 50)
+        or (_discord_auto and "沒有找到" not in _discord_auto and len(_discord_auto) > 50)
+        or _nation_registry_auto
+    )
     _norm = settings.get("api_url", "").rstrip("/")
     if not _norm.endswith("/chat/completions"):
         if _norm.endswith("/v1") or _norm.endswith("/v2"):
@@ -2227,14 +2330,17 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
     tools_ok = _tools_supported and not _tools_unsup
 
     tools = []
-    if tools_ok:
-        if settings.get("micropedia_enabled", True):
-            tools.append(_MICROPEDIA_TOOL_SCHEMA)
-        tools.append(_WEB_SEARCH_TOOL_SCHEMA)
-    elif not _tools_unsup and not _tools_supported:
-        if settings.get("micropedia_enabled", True):
-            tools.append(_MICROPEDIA_TOOL_SCHEMA)
-        tools.append(_WEB_SEARCH_TOOL_SCHEMA)
+    if not _room_context_rich:
+        if tools_ok:
+            if settings.get("micropedia_enabled", True):
+                tools.append(_MICROPEDIA_TOOL_SCHEMA)
+            tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)
+            tools.append(_WEB_SEARCH_TOOL_SCHEMA)
+        elif not _tools_unsup and not _tools_supported:
+            if settings.get("micropedia_enabled", True):
+                tools.append(_MICROPEDIA_TOOL_SCHEMA)
+            tools.append(_DISCORD_SEARCH_TOOL_SCHEMA)
+            tools.append(_WEB_SEARCH_TOOL_SCHEMA)
     tools = tools if tools else None
 
     _reply_model = None
