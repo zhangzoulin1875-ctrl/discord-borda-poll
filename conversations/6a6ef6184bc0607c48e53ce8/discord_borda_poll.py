@@ -3148,7 +3148,7 @@ async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> s
             if not matched:
                 return ""
             print(f"📚 Micropedia: 自動比對/強制聯網到 {len(matched)} 篇文章: {matched}")
-            return await _micropedia_fetch_content(session, matched)
+            return await _micropedia_fetch_content(session, matched, query=message_text)
         else:
             async with aiohttp.ClientSession() as session:
                 titles = await _get_micropedia_titles(session)
@@ -3160,7 +3160,7 @@ async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> s
                 if not matched:
                     return ""
                 print(f"📚 Micropedia: 自動比對/強制聯網到 {len(matched)} 篇文章: {matched}")
-                return await _micropedia_fetch_content(session, matched)
+                return await _micropedia_fetch_content(session, matched, query=message_text)
     except Exception as e:
         print(f"📚 Micropedia: 自動比對錯誤：{e}")
         return ""
@@ -3390,9 +3390,69 @@ async def _micropedia_search_api(session, query: str, max_results: int) -> list:
     return titles
 
 
-async def _micropedia_fetch_content(session, titles: list) -> str:
+def _smart_truncate_wikitext(clean: str, query: str, max_len: int = 3000) -> str:
+    """Truncate cleaned article text to max_len — but NOT naively from the
+    start. Long articles (e.g. a country's main page with 中央官制/旗幟/行政
+    區劃/政治/文化歷史/軍事/外交 sections BEFORE a 其他語言國名翻譯 table near
+    the bottom) put the section the user actually asked about far past a
+    from-the-top cutoff, so the table-to-text conversion succeeded but the
+    result never survived truncation — the AI still never saw it. Instead,
+    locate where the query is actually relevant in the text and keep a
+    window centered there instead of the top:
+    1. Literal substring match on keywords extracted from the query
+       (reuses _extract_search_keywords — strips filler words/punctuation).
+    2. If no keyword appears verbatim (common for Chinese, which has no
+       word segmentation, so a filler-free query can still be one long
+       unsplit chunk), fall back to a bigram-density scan: slide a window
+       across the body and keep whichever one contains the most of the
+       query's 2-char bigrams."""
+    if len(clean) <= max_len:
+        return clean
+    intro_budget = min(400, max_len // 4)
+    intro = clean[:intro_budget]
+    if not query:
+        return clean[:max_len] + "..."
+    remainder_budget = max_len - intro_budget - 30
+
+    keywords = sorted(_extract_search_keywords(query), key=len, reverse=True)
+    match_pos = -1
+    for kw in keywords:
+        idx = clean.find(kw, intro_budget)
+        if idx != -1:
+            match_pos = idx
+            break
+
+    if match_pos == -1:
+        q_bigrams = _bigrams(query)
+        if q_bigrams:
+            body = clean[intro_budget:]
+            step = max(200, remainder_budget // 4)
+            best_score, best_start = 0, -1
+            for start in range(0, max(1, len(body) - 1), step):
+                window = body[start:start + remainder_budget]
+                score = sum(1 for bg in q_bigrams if bg in window)
+                if score > best_score:
+                    best_score, best_start = score, start
+            if best_start != -1 and best_score > 0:
+                match_pos = intro_budget + best_start
+
+    if match_pos == -1:
+        # No relevance signal found at all — fall back to the previous
+        # from-the-top behavior.
+        return clean[:max_len] + "..."
+
+    window_start = max(intro_budget, match_pos - remainder_budget // 3)
+    window_end = min(len(clean), window_start + remainder_budget)
+    window = clean[window_start:window_end]
+    return f"{intro}\n...[中略]...\n{window}..."
+
+
+async def _micropedia_fetch_content(session, titles: list, query: str = "") -> str:
     """Fetch article content for the given titles via the MediaWiki content API
-    (action=query&prop=revisions&rvprop=content) — JSON API, not scraping."""
+    (action=query&prop=revisions&rvprop=content) — JSON API, not scraping.
+    `query` (the user's original message/search term) is used to smart-
+    truncate long articles around the relevant section instead of always
+    keeping only the top of the article."""
     import urllib.parse as _up
     if not titles:
         return ""
@@ -3425,12 +3485,10 @@ async def _micropedia_fetch_content(session, titles: list) -> str:
         clean = _clean_wikitext(wikitext)
         if clean and len(clean) > 10:
             title = page.get("title", "?")
-            # Bumped from 2000 to 3000 chars — tables/infoboxes are now
-            # converted to readable text instead of being deleted outright,
-            # so articles with rich tabular data (e.g. a party list, a
-            # cabinet roster) need more budget to not get cut off mid-table.
-            if len(clean) > 3000:
-                clean = clean[:3000] + "..."
+            # Bumped from 2000 to 3000 chars, and truncation is now
+            # query-aware (see _smart_truncate_wikitext) — long articles
+            # bury far-down sections/tables past a naive from-the-top cutoff.
+            clean = _smart_truncate_wikitext(clean, query, max_len=3000)
             content_parts.append(f"【{title}】\n{clean}")
 
     return "\n\n".join(content_parts)
@@ -3453,7 +3511,7 @@ async def _fetch_micropedia_inner_body(session, query, max_results, cache_key):
         _micropedia_cache[cache_key] = (_time.time(), "")
         return ""
     print(f"📚 Micropedia: 找到 {len(titles)} 篇相關文章: {titles[:5]}")
-    result = await _micropedia_fetch_content(session, titles)
+    result = await _micropedia_fetch_content(session, titles, query=query)
     _micropedia_cache[cache_key] = (_time.time(), result)
     print(f"📚 Micropedia: 取得內容 ({len(result)} chars)")
     return result
@@ -5149,26 +5207,35 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         _sanitized = "我剛剛查了一下資料，但整理答案時卡住了，你可以換個更具體的問法再問我一次嗎？"
     raw_reply = _sanitized
 
-    # Parse [MEMORY:] and [MOD:] tags from reply
+    # Parse [MEMORY:] and [MOD:] tags from reply — REGEX-based and
+    # position-independent. The old rsplit()-based parsing assumed the tag
+    # was always at the very END of the reply (taking everything BEFORE it
+    # as the "real answer"). Weaker/fallback models sometimes put the tag
+    # at the START instead, e.g. "[MEMORY: none]紅石省有紅石南橋、紅石北縣..."
+    # — with the old logic, parts[0] (the "real answer") became "" and the
+    # ENTIRE actual content got swallowed into memory_str, so the user saw
+    # a blank/fallback reply even though the AI had genuinely answered.
+    # Regex-matching "[MEMORY:...]" as a self-contained tag and stripping
+    # ONLY that substring (wherever it sits) fixes this regardless of
+    # whether the model puts it at the start, middle, or end.
     actual_reply = raw_reply
     new_facts = None
     mod_action = None
 
-    if "[MOD:" in actual_reply:
-        parts = actual_reply.rsplit("[MOD:", 1)
-        actual_reply = parts[0].strip()
-        mod_str = parts[1].rstrip("]").strip()
+    _mod_match = re.search(r"\[MOD:\s*(-?\d+)\s*\]", actual_reply)
+    if _mod_match:
         try:
-            mod_seconds = int(mod_str)
+            mod_seconds = int(_mod_match.group(1))
             if mod_seconds > 0:
                 mod_action = mod_seconds
         except ValueError:
             pass
+        actual_reply = (actual_reply[:_mod_match.start()] + actual_reply[_mod_match.end():]).strip()
 
-    if "[MEMORY:" in actual_reply:
-        parts = actual_reply.rsplit("[MEMORY:", 1)
-        actual_reply = parts[0].strip()
-        memory_str = parts[1].rstrip("]").strip()
+    _mem_match = re.search(r"\[MEMORY:\s*(.*?)\]", actual_reply, re.DOTALL)
+    if _mem_match:
+        memory_str = _mem_match.group(1).strip()
+        actual_reply = (actual_reply[:_mem_match.start()] + actual_reply[_mem_match.end():]).strip()
         if memory_str.lower() != "none" and memory_str:
             new_facts = [f.strip() for f in memory_str.split(",") if f.strip()]
 
