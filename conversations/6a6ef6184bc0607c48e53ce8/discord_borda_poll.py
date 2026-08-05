@@ -2165,6 +2165,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         return max(floor, _primary_deadline - _time.time())
 
     _max_single_attempt = max(5, (timeout_total - _fallback_reserve) * 0.6)
+    _used_model = None        # which model actually answered (for logging)
+    _used_fallback = False    # whether the backup API was used
 
     async def _post(payload, _tt=None, _tr=None):
         """Streaming-aware POST: always uses stream=True to keep the
@@ -2495,6 +2497,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                                     _msg = data["choices"][0].get("message", {})
                                     if _msg.get("content") or _msg.get("tool_calls"):
                                         ok = True
+                                        _used_model = _alt_model
                                         print(f"✅ 模型降級成功：{_alt_model}")
                                         break
                                     # Empty content but 200 — try non-streaming
@@ -2513,6 +2516,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                                                             data = json_module.loads(await resp2.text())
                                                             if "choices" in data and data["choices"][0].get("message", {}).get("content"):
                                                                 ok = True
+                                                                _used_model = _alt_model
                                                                 print(f"✅ 模型降級 {_alt_model} 非串流成功")
                                                                 break
                             except Exception:
@@ -2525,7 +2529,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
 
         _track_token_usage(data)
         _ai_circuit_success()  # successful call — reset the 403 counter
-        return data["choices"][0]["message"]
+        _used_model = payload.get("model", settings.get("model", "?"))
+        return {**data["choices"][0]["message"], "_used_model": _used_model, "_used_fallback": False}
 
     # ── Retry once on a hollow result ──
     # Two real failure modes show up in production with free/weak API
@@ -2568,6 +2573,9 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             print(f"⚠️ AI 回應為空（finish_reason=stop 但沒有實際內容），重試一次（primary 剩餘 {_remaining_primary():.1f}s）...")
             continue
         if msg.get("content") or msg.get("tool_calls"):
+            if "_used_model" not in msg:
+                msg["_used_model"] = _used_model or settings.get("model", "?")
+                msg["_used_fallback"] = _used_fallback
             return msg
         # Empty result without exception — let fallback handle it
         break
@@ -2654,6 +2662,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                                 fallback_mode="disabled",  # fallback of fallback = no
                             )
                             if _fb_msg.get("content") or _fb_msg.get("tool_calls"):
+                                _fb_msg["_used_model"] = _fb_model or settings.get("model", "?")
+                                _fb_msg["_used_fallback"] = True
                                 print(f"✅ 備援 API 成功！({_fb_msg.get('content', '')[:60]}...)")
                                 return _fb_msg
                             else:
@@ -2666,10 +2676,13 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     # Ran out of retry budget without an exception (e.g. broke out of the
     # loop above) — return whatever we have, or a clean timeout error.
     if msg is not None:
+        if "_used_model" not in msg:
+            msg["_used_model"] = _used_model or settings.get("model", "?")
+            msg["_used_fallback"] = _used_fallback
         return msg
     if last_exc:
-        return {"content": "", "error": f"AI 回應逾時或失敗：{last_exc}"}
-    return {"content": "", "error": "AI 回應逾時"}
+        return {"content": "", "error": f"AI 回應逾時或失敗：{last_exc}", "_used_model": _used_model or settings.get("model", "?"), "_used_fallback": _used_fallback}
+    return {"content": "", "error": "AI 回應逾時", "_used_model": _used_model or settings.get("model", "?"), "_used_fallback": _used_fallback}
 
 
 # ──────────────────────────────────────────────
@@ -4823,9 +4836,11 @@ def _format_nation_registry_context(guild_id: int, query: str) -> str:
 
 async def generate_chat_reply(message, settings: dict) -> tuple:
     """Generate a reply for a chat message with brief context, server awareness, and per-user memory.
-    Returns (reply_text, new_facts_or_None, mod_action_or_None)."""
+    Returns (reply_text, new_facts_or_None, mod_action_or_None, model_info_or_None)."""
     user_id = str(message.author.id)
     user_name = message.author.display_name
+    _reply_model = None      # which model actually answered (for AI log)
+    _reply_fallback = False  # whether the backup API was used
 
     # Load user memory
     mem = user_memories.get(user_id, {})
@@ -5403,7 +5418,9 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             _call_tt = max(6, _ai_budget - 1.5)
         _call_tr = max(4, _call_tt - 2)
         assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
-        print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s")
+        _reply_model = assistant_msg.get("_used_model")
+        _reply_fallback = assistant_msg.get("_used_fallback", False)
+        print(f"⏱️ Round 1（{'含 tools' if tools else '無 tools'}，預算 {_call_tt:.1f}s）耗時 {_time.time()-t0:.1f}s，模型={_reply_model}")
         tool_calls = assistant_msg.get("tool_calls")
         if not tool_calls:
             return assistant_msg.get("content") or ""
@@ -5460,7 +5477,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         t2 = _time.time()
         _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
         final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
-        print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s")
+        nonlocal _reply_model, _reply_fallback
+        _reply_model = final_msg.get("_used_model")
+        _reply_fallback = final_msg.get("_used_fallback", False)
+        print(f"⏱️ Round 2（最終答案，無 tools，預算 {_round2_budget:.1f}s）耗時 {_time.time()-t2:.1f}s，總計 {_time.time()-t0:.1f}s，模型={_reply_model}")
         return final_msg.get("content") or ""
 
     # ── 20s is a HARD requirement per user specification ──
@@ -5496,6 +5516,8 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         fallback_msg = await asyncio.wait_for(
             call_chat_api(messages, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=10, timeout_read=8, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id), timeout=12
         )
+        _reply_model = fallback_msg.get("_used_model")
+        _reply_fallback = fallback_msg.get("_used_fallback", False)
         raw_reply = fallback_msg.get("content") or ""
 
     # Safety net: strip raw tool-output dumps that a weak model sometimes
@@ -5559,7 +5581,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     if not actual_reply:
         actual_reply = None
 
-    return actual_reply, new_facts, mod_action
+    return actual_reply, new_facts, mod_action, {"model": _reply_model, "fallback": _reply_fallback}
 
 
 # ──────────────────────────────────────────────
