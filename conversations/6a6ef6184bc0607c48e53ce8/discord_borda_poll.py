@@ -2238,6 +2238,13 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
     # 這裡改成跟一般聊天室一樣：不管 AI 想不想查，都先自動比對百科、Discord 歷史、
     # 會員國登記資料、網路搜尋，直接把結果餵給 AI 當作事實依據。
     clean_content = (message.content or "").strip()
+    # Image-only messages get a placeholder so downstream auto-context
+    # checks don't all short-circuit on len < 4.  We don't actually
+    # search micropedia/discord/web for an image (that would be silly),
+    # but we need clean_content to be non-empty for the system prompt
+    # assembly below (e.g. the chat room mode instruction references it).
+    if not clean_content and message.attachments:
+        clean_content = "(使用者傳了一張圖片)"
 
     _nation_registry_auto = ""
     if message.guild and any(m in clean_content for m in _NATION_REGISTRY_MARKERS):
@@ -2385,6 +2392,12 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
                         current_content += "\n[圖片]"
                 else:
                     current_content += "\n[圖片（未設定視覺模型）]"
+    # Safety net: if the current message ended up with only whitespace
+    # (e.g. image-only with no vision model and the [圖片] tag got eaten
+    # by some edge case), give the AI a minimal placeholder so the API
+    # doesn't reject it as an empty user message.
+    if not current_content.strip():
+        current_content = "(使用者傳了一張圖片，請看看圖片內容並回應)"
     api_messages.append({"role": "user", "content": current_content[:2000]})
 
     # Determine fallback mode — chat room uses rate_limited (same as regular chat)
@@ -5905,7 +5918,12 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # instead of the actual question being asked. Only the current user's
     # own message is sent now. Also reduces prompt size (helps latency).
     bot_id = bot.user.id
-    clean_content = message.content.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
+    clean_content = (message.content or "").replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
+    # If the message is image-only (no text), give the AI a placeholder
+    # so it has something to anchor its reply on, beyond just the image
+    # description that gets injected later.
+    if not clean_content and message.attachments:
+        clean_content = "(使用者傳了一張圖片，請看看圖片內容並回應)"
 
     # ── 圖片識別（子流程）──
     # 如果訊息有圖片附件，且設定了 vision_model，就先用視覺模型描述圖片，
@@ -8528,10 +8546,17 @@ async def on_message(message):
         print(f"   ⏭️ No API key set.")
         return
 
-    # Check if message content is empty (intent not enabled)
+    # Check if message content is empty — but allow image-only messages
+    # (message.content is "" when the user sent ONLY an image with no text).
     if not message.content or len(message.content.strip()) == 0:
-        print(f"   ⚠️ message.content is empty! Message Content Intent may not be enabled in Discord Developer Portal.")
-        return
+        _has_image = any(
+            att.content_type and att.content_type.startswith("image/")
+            for att in message.attachments
+        )
+        if not _has_image:
+            print(f"   ⚠️ message.content is empty! Message Content Intent may not be enabled in Discord Developer Portal.")
+            return
+        print(f"   📷 純圖片訊息（無文字），允許通過進入 AI 處理")
 
     # Check channel whitelist
     whitelist = chat_ai_settings.get("channels_whitelist", [])
@@ -8576,16 +8601,28 @@ async def on_message(message):
         except Exception as e:
             print(f"⚠️ fetch ref_msg 例外: {e}")
 
-    # Worthiness check
-    worth, clean = _is_worth_replying(
-        message.content, is_mentioned, bot.user.id,
-        chat_ai_settings.get("filter_strength", "mention"),
-        is_reply_to_bot=is_reply_to_bot,
+    # Worthiness check — skip if the message is image-only (no text but
+    # has image attachments).  _is_worth_replying returns False for empty
+    # content, but an image with zero text is still a valid user intent
+    # (they want the AI to look at the image and react to it).
+    _has_image_att = any(
+        att.content_type and att.content_type.startswith("image/")
+        for att in message.attachments
     )
-    if not worth:
-        print(f"   ⏭️ Not worth replying (content too short/low-value).")
-        return
-    print(f"   ✅ Worth replying! Generating...")
+    if _has_image_att and (not message.content or not message.content.strip()):
+        worth = True
+        clean = "(圖片)"
+        print(f"   ✅ Worth replying! (image-only, bypassing worthiness check)")
+    else:
+        worth, clean = _is_worth_replying(
+            message.content, is_mentioned, bot.user.id,
+            chat_ai_settings.get("filter_strength", "mention"),
+            is_reply_to_bot=is_reply_to_bot,
+        )
+        if not worth:
+            print(f"   ⏭️ Not worth replying (content too short/low-value).")
+            return
+        print(f"   ✅ Worth replying! Generating...")
 
     # Check if bot has permission to send messages in this channel
     if message.guild:
