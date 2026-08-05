@@ -368,6 +368,20 @@
         <label class="block text-sm text-gray-400 mb-1">額外伺服器規則（注入到審查 AI 的 prompt）</label>
         <textarea id="ai-mod-custom-rules" rows="4" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm resize-none" placeholder="範例：&#10;8. 禁止在非提案頻道討論政治話題&#10;9. 禁止使用特定敏感詞彙&#10;10. 所有發言必須使用繁體中文"></textarea>
         <p class="text-xs text-gray-400">伺服器管理員（有管理伺服器權限）自動豁免。API Key 留空則沿用主 API。模型可設為更便宜/快速的模型以節省用量。</p>
+
+        <!-- 嚴重違規自動處置 -->
+        <div class="border-t border-[#3a3c43] mt-4 pt-4">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <label class="text-sm font-medium">🚫 嚴重違規自動處置</label>
+              <p class="text-xs text-gray-400 mt-1">偵測到可能導致伺服器被 Discord 官方檢舉的言論時，自動刪除訊息 + 在原頻道警告用戶 + 記錄到網警頻道</p>
+            </div>
+            <label class="toggle"><input type="checkbox" id="ai-mod-severe-enabled"><span class="toggle-slider"></span></label>
+          </div>
+          <label class="block text-sm text-gray-400 mb-1">嚴重違規判定規則（留空=使用預設規則）</label>
+          <textarea id="ai-mod-severe-rules" rows="6" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-2 outline-none focus:ring-2 ring-[#5865f2] text-sm resize-none" placeholder="預設規則（留空即使用）：&#10;S1. 公然支持或宣揚種族歧視、種族優越論&#10;S2. 支持或宣揚極端主義（法西斯、納粹、白人至上等）&#10;S3. 煽動針對特定族群的暴力或仇恨行為&#10;S4. 散布恐怖主義內容或為恐怖攻擊辯護&#10;S5. 鼓勵或指導自殘、自殺&#10;S6. 兒少性剝削內容（含暗示性）&#10;S7. 非法活動的明確教唆或組織&#10;S8. 針對個人的嚴重死亡威脅或具體恐嚇"></textarea>
+          <p class="text-xs text-orange-400">⚠️ 啟用後 AI 需有「管理訊息」權限才能刪除訊息。未刪除成功仍會記錄到網警頻道。</p>
+        </div>
       </div>
 
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
@@ -823,6 +837,9 @@ async function showChatAIPanel() {
   document.getElementById('ai-mod-cooldown').value = s.ai_mod_cooldown ?? 30;
   document.getElementById('ai-mod-max-tokens').value = s.ai_mod_max_tokens ?? 150;
   document.getElementById('ai-mod-timeout').value = s.ai_mod_timeout ?? 10;
+  // 嚴重違規
+  document.getElementById('ai-mod-severe-enabled').checked = s.ai_mod_severe_enabled || false;
+  document.getElementById('ai-mod-severe-rules').value = s.ai_mod_severe_rules || '';
 }
 
 async function saveChatAISettings() {
@@ -875,6 +892,8 @@ async function saveChatAISettings() {
   data.ai_mod_cooldown = parseInt(document.getElementById('ai-mod-cooldown').value) || 30;
   data.ai_mod_max_tokens = parseInt(document.getElementById('ai-mod-max-tokens').value) || 150;
   data.ai_mod_timeout = parseInt(document.getElementById('ai-mod-timeout').value) || 10;
+  data.ai_mod_severe_enabled = document.getElementById('ai-mod-severe-enabled').checked;
+  data.ai_mod_severe_rules = document.getElementById('ai-mod-severe-rules').value.trim();
   const modKey = document.getElementById('ai-mod-api-key').value.trim();
   if (modKey) data.ai_mod_api_key = modKey;
   const fallbackKey = document.getElementById('ai-fallback-key').value.trim();

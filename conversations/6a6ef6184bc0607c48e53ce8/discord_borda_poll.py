@@ -1637,6 +1637,9 @@ chat_ai_settings = {
     "ai_mod_max_tokens": 150,          # 審查回覆最大 token 數（輕量級）
     "ai_mod_timeout": 10,              # 審查 API 逾時（秒）
     "ai_mod_exempt_roles": [],          # 豁免角色 ID 列表（管理員等）
+    # ── AI 網警：嚴重違規自動處置 ──
+    "ai_mod_severe_enabled": False,       # 啟用嚴重違規自動刪除+警告
+    "ai_mod_severe_rules": "",           # 嚴重違規判定規則（留空=用預設）
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -7069,6 +7072,8 @@ async def api_get_chat_ai_settings(request):
         "ai_mod_max_tokens": chat_ai_settings.get("ai_mod_max_tokens", 150),
         "ai_mod_timeout": chat_ai_settings.get("ai_mod_timeout", 10),
         "ai_mod_exempt_roles": chat_ai_settings.get("ai_mod_exempt_roles", []),
+        "ai_mod_severe_enabled": chat_ai_settings.get("ai_mod_severe_enabled", False),
+        "ai_mod_severe_rules": chat_ai_settings.get("ai_mod_severe_rules", ""),
     })
 
 
@@ -7184,6 +7189,10 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["ai_mod_timeout"] = int(body["ai_mod_timeout"])
     if "ai_mod_exempt_roles" in body:
         chat_ai_settings["ai_mod_exempt_roles"] = body["ai_mod_exempt_roles"]
+    if "ai_mod_severe_enabled" in body:
+        chat_ai_settings["ai_mod_severe_enabled"] = bool(body["ai_mod_severe_enabled"])
+    if "ai_mod_severe_rules" in body:
+        chat_ai_settings["ai_mod_severe_rules"] = body["ai_mod_severe_rules"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -8413,14 +8422,36 @@ async def _ai_moderate_message(message):
     if custom_rules:
         mod_prompt += "\n【伺服器自訂規則】\n" + custom_rules + "\n"
 
+    # 嚴重違規規則（可能導致伺服器被檢舉的言論）
+    severe_enabled = settings.get("ai_mod_severe_enabled", False)
+    DEFAULT_SEVERE_RULES = (
+        "【嚴重違規判定標準】（以下行為判定為 critical，可直接刪除訊息）\n"
+        "S1. 公然支持或宣揚種族歧視、種族優越論（如宣稱某種族天生低劣或優越）\n"
+        "S2. 支持或宣揚極端主義（法西斯、納粹、白人至上等意識形態）\n"
+        "S3. 煽動針對特定族群的暴力或仇恨行為\n"
+        "S4. 散布恐怖主義內容或為恐怖攻擊辯護\n"
+        "S5. 鼓勵或指導自殘、自殺\n"
+        "S6. 兒少性剝削內容（含暗示性）\n"
+        "S7. 非法活動的明確教唆或組織（如毒品交易、武器買賣）\n"
+        "S8. 針對個人的嚴重死亡威脅或具體恐嚇\n"
+    )
+    if severe_enabled:
+        severe_rules = settings.get("ai_mod_severe_rules", "").strip()
+        mod_prompt += "\n" + (severe_rules if severe_rules else DEFAULT_SEVERE_RULES)
+
     _nl = "\n"
     mod_prompt += (
         _nl + "【審查規則】" + _nl
         + "判斷標準：" + threshold_desc + "（low=只通報嚴重違規，medium=中等，high=敏感）" + _nl
         + "如果訊息是正常聊天、玩笑、討論，即使語氣不太好也不算違規。" + _nl
         + "只有真正違反上述規則的訊息才需要通報。" + _nl + _nl
+        + "嚴重度分級：" + _nl
+        + "- low: 輕微違規（如不當玩笑、邊界灰色言論）" + _nl
+        + "- medium: 中等違規（如人身攻擊、騷擾）" + _nl
+        + "- high: 嚴重違規（如仇恨言論、歧視）" + _nl
+        + "- critical: 可能導致伺服器被 Discord 官方檢舉/封鎖的言論（種族歧視宣揚、極端主義、恐怖主義等）" + _nl + _nl
         + "請以 JSON 格式回覆，格式如下：" + _nl
-        + '{"violation": true/false, "severity": "low/medium/high", '
+        + '{"violation": true/false, "severity": "low/medium/high/critical", '
         + '"rule": "違反的規則簡述", "reason": "判斷理由"}' + _nl
         + '如果沒有違規，回覆 {"violation": false}。' + _nl
         + "只回覆 JSON，不要加其他文字。"
@@ -8496,8 +8527,9 @@ async def _ai_moderate_message(message):
         "low": discord.Color.yellow(),
         "medium": discord.Color.orange(),
         "high": discord.Color.red(),
+        "critical": discord.Color.dark_red(),
     }
-    severity_emojis = {"low": "⚠️", "medium": "🟠", "high": "🔴"}
+    severity_emojis = {"low": "⚠️", "medium": "🟠", "high": "🔴", "critical": "🚫"}
 
     embed = discord.Embed(
         title=f"{severity_emojis.get(severity, '⚠️')} AI 網警偵測到疑似違規",
@@ -8514,25 +8546,76 @@ async def _ai_moderate_message(message):
         value=f"#{message.channel.name} ({message.channel.mention})",
         inline=False,
     )
-    embed.add_field(
-        name="💬 訊息內容",
-        value=f"> {content[:500]}{'...' if len(content) > 500 else ''}",
-        inline=False,
-    )
+
+    # 嚴重違規：嘗試刪除訊息並在原頻道警告
+    is_critical = (severity == "critical" and severe_enabled)
+    message_deleted = False
+
+    if is_critical:
+        embed.add_field(
+            name="💬 原始訊息內容（已刪除）",
+            value=f"> {content[:500]}{'...' if len(content) > 500 else ''}",
+            inline=False,
+        )
+        embed.add_field(name="🚫 處置", value="訊息已自動刪除 + 原頻道警告", inline=True)
+    else:
+        embed.add_field(
+            name="💬 訊息內容",
+            value=f"> {content[:500]}{'...' if len(content) > 500 else ''}",
+            inline=False,
+        )
+
     embed.add_field(name="📋 違反規則", value=rule, inline=True)
     embed.add_field(name="⚠️ 嚴重度", value=severity, inline=True)
     embed.add_field(name="🔍 判斷理由", value=reason[:500], inline=False)
 
-    # 訊息連結
-    try:
-        msg_url = message.jump_url
-        embed.add_field(name="🔗 原始訊息", value=f"[點擊查看]({msg_url})", inline=False)
-    except Exception:
-        pass
+    # 訊息連結（嚴重違規訊息已刪除，連結可能失效）
+    if not is_critical:
+        try:
+            msg_url = message.jump_url
+            embed.add_field(name="🔗 原始訊息", value=f"[點擊查看]({msg_url})", inline=False)
+        except Exception:
+            pass
 
     embed.set_footer(text=f"AI 網警 | 模型: {model} | 靈敏度: {confidence} | 自動偵測，非最終判定")
 
-    # 發送通報
+    # 嚴重違規處置：刪除訊息 + 原頻道警告
+    if is_critical:
+        # 刪除訊息
+        try:
+            await message.delete()
+            message_deleted = True
+            print(f"🚫 AI 網警：已刪除 {message.author.display_name} 在 #{message.channel.name} 的嚴重違規訊息")
+        except discord.Forbidden:
+            print(f"⚠️ AI 網警：無權限刪除訊息（缺少 Manage Messages 權限）")
+        except discord.NotFound:
+            print(f"⚠️ AI 網警：訊息已被刪除或不存在")
+        except Exception as e:
+            print(f"⚠️ AI 網警：刪除訊息失敗：{e}")
+
+        # 在原頻道發送警告
+        try:
+            warn_embed = discord.Embed(
+                title="🚫 嚴重違規警告",
+                description=(
+                    f"{message.author.mention} 你的訊息因涉嫌嚴重違規已被 AI 網警自動刪除。\n\n"
+                    f"**違反規則：** {rule}\n"
+                    f"**嚴重度：** critical\n"
+                    f"**判斷理由：** {reason[:300]}\n\n"
+                    f"此為自動偵測，非最終判定。如認為誤判，請聯繫管理員。"
+                ),
+                color=discord.Color.dark_red(),
+                timestamp=discord.utils.utcnow(),
+            )
+            warn_embed.set_footer(text="AI 網警自動偵測 | 管理員可至網警記錄頻道查看詳情")
+            await message.channel.send(embed=warn_embed)
+            print(f"🚫 AI 網警：已在 #{message.channel.name} 發送嚴重違規警告")
+        except discord.Forbidden:
+            print(f"⚠️ AI 網警：無權限在原頻道發送警告")
+        except Exception as e:
+            print(f"⚠️ AI 網警：發送警告失敗：{e}")
+
+    # 發送通報到網警記錄頻道
     try:
         report_ch_id = settings.get("ai_mod_report_channel")
         report_ch = message.guild.get_channel(int(report_ch_id))
@@ -8545,7 +8628,7 @@ async def _ai_moderate_message(message):
                     break
         if report_ch:
             await report_ch.send(embed=embed)
-            print(f"🚨 AI 網警通報：{message.author.display_name} 在 #{message.channel.name} | {rule} | {severity}")
+            print(f"🚨 AI 網警通報：{message.author.display_name} 在 #{message.channel.name} | {rule} | {severity}{' [已刪除]' if message_deleted else ''}")
         else:
             print(f"⚠️ AI 網警：找不到通報頻道 ID={report_ch_id}")
     except discord.Forbidden:
