@@ -1784,6 +1784,11 @@ _chat_semaphore: asyncio.Semaphore = None  # initialised in on_ready
 # concurrency; one reusable session with connection pooling handles load far
 # better.
 _shared_session: aiohttp.ClientSession = None  # initialised in on_ready
+# Guards the AI-chat-room stale cleanup + panel auto-repost so they only run
+# ONCE per process lifetime, even if on_ready fires again after a gateway
+# reconnect (not just a full restart) — avoids re-deleting/re-posting the
+# panel on every reconnect blip.
+_chat_room_startup_done: bool = False
 
 # ──────────────────────────────────────────────
 # 每用戶記憶系統（per-user memory）
@@ -1850,6 +1855,7 @@ AI_CHAT_ROOMS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "d
 ai_chat_rooms: dict = {
     "rooms": {},        # channel_id_str -> {"user_id": str, "user_name": str, "created_at": float, "guild_id": int, "message_count": int}
     "panel_channel_id": None,   # where the button panel is
+    "panel_message_id": None,   # the panel message itself (for redeploy cleanup/repost)
     "category_id": None,        # category to create rooms under
     "max_rooms": 50,             # global cap
     "max_history_messages": 50, # how many messages to fetch for AI context
@@ -2089,6 +2095,79 @@ class AIChatRoomCloseView(discord.ui.View):
             pass
         except Exception as e:
             print(f"❌ AI 聊天室關閉失敗：{e}")
+
+
+def _make_chat_room_panel_embed() -> discord.Embed:
+    """Build the panel embed shown with the 'open chat room' button.
+    Shared by /room setup and the auto-repost-on-startup logic so both
+    always produce byte-identical panels."""
+    panel_embed = discord.Embed(
+        title="🤖 專屬 AI 聊天室",
+        description=(
+            "點擊下方按鈕，開啟你自己的專屬 AI 聊天室！\n\n"
+            "✅ 1 對 1 私人對話空間\n"
+            "✅ AI 記住整個頻道的對話歷史（像 ChatGPT/Gemini）\n"
+            "✅ 不需要 @，直接打字 AI 就會回\n"
+            "✅ 可以傳圖片讓 AI 分析\n\n"
+            "每人限開 1 間，不用時可以關閉。"
+        ),
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow(),
+    )
+    panel_embed.set_footer(text="ICEA 專屬 AI 聊天室系統")
+    return panel_embed
+
+
+async def _repost_chat_room_panel(channel, delete_old: bool = True) -> discord.Message | None:
+    """(Re)post the chat room panel in `channel`, deleting any previous panel
+    message first. Used both by /room setup (manual) and automatically on
+    every bot startup (in on_ready) — this guarantees the button always
+    works after a redeploy, regardless of whether the old message's
+    persistent view survived the restart cleanly or not.
+
+    Returns the newly sent message, or None if it failed."""
+    if delete_old:
+        # 1) Try the message ID we saved from last time — fastest path.
+        old_msg_id = ai_chat_rooms.get("panel_message_id")
+        if old_msg_id:
+            try:
+                old_msg = await channel.fetch_message(int(old_msg_id))
+                await old_msg.delete()
+                print(f"🧹 已刪除舊的聊天室面板訊息（ID: {old_msg_id}）")
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                print(f"⚠️ 刪除舊面板訊息失敗（by ID）：{e}")
+
+        # 2) Safety net: also scan recent history for any leftover bot
+        # messages that look like the panel embed (covers cases where the
+        # stored message_id is missing/stale, e.g. very first upgrade, or
+        # duplicates left over from manual re-runs of /room setup).
+        try:
+            async for msg in channel.history(limit=20):
+                if msg.author.id == bot.user.id and msg.embeds:
+                    if msg.embeds[0].title == "🤖 專屬 AI 聊天室":
+                        try:
+                            await msg.delete()
+                            print(f"🧹 已清除殘留的聊天室面板訊息（ID: {msg.id}）")
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"⚠️ 掃描舊面板訊息失敗：{e}")
+
+    # 3) Send the fresh panel with an identical embed + a freshly-bound
+    # persistent view (the view class is already registered globally via
+    # bot.add_view(), so this new message's components work immediately —
+    # no need to wait for anything else).
+    try:
+        new_msg = await channel.send(embed=_make_chat_room_panel_embed(), view=AIChatRoomPanelView())
+        ai_chat_rooms["panel_message_id"] = new_msg.id
+        save_ai_chat_rooms()
+        print(f"✅ 聊天室面板已（重新）發送至 #{channel.name}（訊息 ID: {new_msg.id}）")
+        return new_msg
+    except Exception as e:
+        print(f"❌ 發送聊天室面板失敗：{e}")
+        return None
 
 
 # ── Generate AI reply for chat room (with full channel history) ──
@@ -7848,6 +7927,45 @@ async def on_ready():
     for guild in bot.guilds:
         await _check_and_fix_nickname(guild)
 
+    # ── AI 聊天室：失效頻道清理 + 面板自動重發（僅執行一次）──
+    # bot.guilds is finally populated here (unlike setup_hook, which runs
+    # BEFORE the gateway connects) — this is the correct place for any
+    # "does this channel still exist" check.
+    global _chat_room_startup_done
+    if not _chat_room_startup_done:
+        _chat_room_startup_done = True
+
+        # 1) Clean up rooms whose Discord channel was actually deleted.
+        _stale_rooms = []
+        for ch_id_str, room in list(ai_chat_rooms.get("rooms", {}).items()):
+            ch_id = int(ch_id_str)
+            found = any(guild.get_channel(ch_id) for guild in bot.guilds)
+            if not found:
+                _stale_rooms.append(ch_id_str)
+                ai_chat_rooms["rooms"].pop(ch_id_str, None)
+        if _stale_rooms:
+            save_ai_chat_rooms()
+            print(f"🧹 AI 聊天室：清理了 {len(_stale_rooms)} 個已失效的頻道")
+
+        # 2) Auto-repost the chat room panel button so it always works after
+        # a redeploy, regardless of whether the old message's persistent
+        # view state survived the restart cleanly.
+        panel_ch_id = ai_chat_rooms.get("panel_channel_id")
+        if panel_ch_id:
+            panel_channel = None
+            for guild in bot.guilds:
+                ch = guild.get_channel(int(panel_ch_id))
+                if ch:
+                    panel_channel = ch
+                    break
+            if panel_channel:
+                try:
+                    await _repost_chat_room_panel(panel_channel)
+                except Exception as e:
+                    print(f"⚠️ 啟動時重發聊天室面板失敗：{e}")
+            else:
+                print(f"⚠️ 聊天室面板頻道（ID: {panel_ch_id}）已不存在，略過重發")
+
 
 # ── 暱稱保護系統 ──
 # 機器人偵測到自己的暱稱被改成非預期名稱時，自動改回來。
@@ -7983,21 +8101,10 @@ async def setup_hook():
     load_user_memories()
     load_ai_chat_rooms()
     load_emoji_aliases()
-    # Clean up stale AI chat rooms (channels that no longer exist in Discord)
-    _stale_rooms = []
-    for ch_id_str, room in list(ai_chat_rooms.get("rooms", {}).items()):
-        ch_id = int(ch_id_str)
-        found = False
-        for guild in bot.guilds:
-            if guild.get_channel(ch_id):
-                found = True
-                break
-        if not found:
-            _stale_rooms.append(ch_id_str)
-            ai_chat_rooms["rooms"].pop(ch_id_str, None)
-    if _stale_rooms:
-        save_ai_chat_rooms()
-        print(f"🧹 AI 聊天室：清理了 {len(_stale_rooms)} 個已失效的頻道")
+    # NOTE: stale-AI-chat-room cleanup moved to on_ready() — bot.guilds is
+    # still EMPTY here in setup_hook (runs before the gateway connects), so
+    # running the "does this channel still exist" check here would wrongly
+    # flag every single room as stale on every restart. See on_ready().
     load_tools_unsupported()
     load_tools_supported()
     asyncio.ensure_future(self_ping_loop())
@@ -12417,33 +12524,41 @@ class ChatRoomGroup(app_commands.Group):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # If the panel is moving to a different channel, try to clean up the
+        # old panel message in the OLD channel first (it won't be found by
+        # the helper below, which only scans the NEW target channel).
+        old_channel_id = ai_chat_rooms.get("panel_channel_id")
+        old_msg_id = ai_chat_rooms.get("panel_message_id")
+        if old_channel_id and int(old_channel_id) != channel.id and old_msg_id:
+            old_ch = interaction.guild.get_channel(int(old_channel_id)) if interaction.guild else None
+            if old_ch:
+                try:
+                    old_msg = await old_ch.fetch_message(int(old_msg_id))
+                    await old_msg.delete()
+                    print(f"🧹 已刪除舊頻道 #{old_ch.name} 中的聊天室面板")
+                except Exception:
+                    pass
+
         ai_chat_rooms["panel_channel_id"] = channel.id
         save_ai_chat_rooms()
 
-        # Send the panel embed with button
-        panel_embed = discord.Embed(
-            title="🤖 專屬 AI 聊天室",
-            description=(
-                "點擊下方按鈕，開啟你自己的專屬 AI 聊天室！\n\n"
-                "✅ 1 對 1 私人對話空間\n"
-                "✅ AI 記住整個頻道的對話歷史（像 ChatGPT/Gemini）\n"
-                "✅ 不需要 @，直接打字 AI 就會回\n"
-                "✅ 可以傳圖片讓 AI 分析\n\n"
-                "每人限開 1 間，不用時可以關閉。"
-            ),
-            color=discord.Color.blue(),
-            timestamp=discord.utils.utcnow(),
-        )
-        panel_embed.set_footer(text="ICEA 專屬 AI 聊天室系統")
-        view = AIChatRoomPanelView()
-        await channel.send(embed=panel_embed, view=view)
+        # Use the shared helper — also cleans up any previous panel message
+        # in this channel (or the old configured channel, if different).
+        sent = await _repost_chat_room_panel(channel)
 
-        await interaction.response.send_message(
-            f"✅ AI 聊天室面板已設定在 {channel.mention}\n"
-            f"用戶現在可以點擊按鈕建立自己的聊天室。\n"
-            f"記得用 `/room category` 設定聊天室分類頻道。",
-            ephemeral=True
-        )
+        if sent:
+            await interaction.followup.send(
+                f"✅ AI 聊天室面板已設定在 {channel.mention}\n"
+                f"用戶現在可以點擊按鈕建立自己的聊天室。\n"
+                f"記得用 `/room category` 設定聊天室分類頻道。\n"
+                f"往後每次重新部署，面板會自動偵測舊按鈕並重新發送，不需要手動重跑此指令。",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send("❌ 面板發送失敗，請查看日誌。", ephemeral=True)
 
     @app_commands.command(name="category", description="設定 AI 聊天室建立的分類頻道（機器人擁有者限定）")
     @app_commands.describe(category="新建聊天室會建立在這個分類下")
