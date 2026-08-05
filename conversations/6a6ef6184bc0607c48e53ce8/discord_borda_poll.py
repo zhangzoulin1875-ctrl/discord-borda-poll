@@ -7738,7 +7738,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -12225,9 +12225,17 @@ class ChatGroup(app_commands.Group):
             text = text[:1900] + "\n..."
         await interaction.response.send_message(text, ephemeral=True)
 
-    # ── 專屬 AI 聊天室指令 ──
 
-    @app_commands.command(name="room_setup", description="設定專屬 AI 聊天室面板頻道（機器人擁有者限定）")
+
+# ──────────────────────────────────────────────
+# 專屬 AI 聊天室指令群組
+# ──────────────────────────────────────────────
+
+class ChatRoomGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="room", description="專屬 AI 聊天室設定")
+
+    @app_commands.command(name="setup", description="設定專屬 AI 聊天室面板頻道（機器人擁有者限定）")
     @app_commands.describe(channel="要放置「開啟聊天室」按鈕面板的頻道")
     async def chat_room_setup(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not is_owner(interaction):
@@ -12257,11 +12265,11 @@ class ChatGroup(app_commands.Group):
         await interaction.response.send_message(
             f"✅ AI 聊天室面板已設定在 {channel.mention}\n"
             f"用戶現在可以點擊按鈕建立自己的聊天室。\n"
-            f"記得用 `/chat room_category` 設定聊天室分類頻道。",
+            f"記得用 `/room category` 設定聊天室分類頻道。",
             ephemeral=True
         )
 
-    @app_commands.command(name="room_category", description="設定 AI 聊天室建立的分類頻道（機器人擁有者限定）")
+    @app_commands.command(name="category", description="設定 AI 聊天室建立的分類頻道（機器人擁有者限定）")
     @app_commands.describe(category="新建聊天室會建立在這個分類下")
     async def chat_room_category(self, interaction: discord.Interaction, category: discord.CategoryChannel):
         if not is_owner(interaction):
@@ -12275,7 +12283,7 @@ class ChatGroup(app_commands.Group):
             ephemeral=True
         )
 
-    @app_commands.command(name="room_list", description="列出所有活躍的 AI 聊天室（機器人擁有者限定）")
+    @app_commands.command(name="list", description="列出所有活躍的 AI 聊天室（機器人擁有者限定）")
     async def chat_room_list(self, interaction: discord.Interaction):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
@@ -12296,7 +12304,7 @@ class ChatGroup(app_commands.Group):
             text = text[:1900] + "\n..."
         await interaction.response.send_message(text, ephemeral=True)
 
-    @app_commands.command(name="room_max", description="設定 AI 聊天室數量上限（機器人擁有者限定）")
+    @app_commands.command(name="max_rooms", description="設定 AI 聊天室數量上限（機器人擁有者限定）")
     @app_commands.describe(max_rooms="最大聊天室數量（預設 50）")
     async def chat_room_max(self, interaction: discord.Interaction, max_rooms: int):
         if not is_owner(interaction):
@@ -12310,7 +12318,7 @@ class ChatGroup(app_commands.Group):
         save_ai_chat_rooms()
         await interaction.response.send_message(f"✅ AI 聊天室數量上限已設為 {max_rooms}", ephemeral=True)
 
-    @app_commands.command(name="room_history", description="設定 AI 聊天室歷史訊息數量（機器人擁有者限定）")
+    @app_commands.command(name="history", description="設定 AI 聊天室歷史訊息數量（機器人擁有者限定）")
     @app_commands.describe(messages="抓取最近幾則訊息作為 AI 上下文（預設 50，建議 20-100）")
     async def chat_room_history(self, interaction: discord.Interaction, messages: int):
         if not is_owner(interaction):
@@ -12328,7 +12336,7 @@ class ChatGroup(app_commands.Group):
             ephemeral=True
         )
 
-    @app_commands.command(name="room_toggle", description="開啟/關閉 AI 聊天室功能（機器人擁有者限定）")
+    @app_commands.command(name="toggle", description="開啟/關閉 AI 聊天室功能（機器人擁有者限定）")
     async def chat_room_toggle(self, interaction: discord.Interaction):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
