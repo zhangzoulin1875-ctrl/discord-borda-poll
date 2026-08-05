@@ -123,7 +123,10 @@
         <label class="block text-sm text-gray-400 mb-1">API Key</label>
         <input id="ai-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入 API Key">
         <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
-        <input id="ai-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+        <input id="ai-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+        <label class="block text-sm text-gray-400 mb-2">模型降級鏈（逗號分隔）</label>
+        <input id="ai-model-chain" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini,gpt-3.5-turbo,gemini-1.5-flash">
+        <p class="text-xs text-gray-500 mb-3">主模型遇到 401/403/503/502/504 時，自動依序嘗試後續模型（同一個 API、同一個 Key，只是換模型名）。留空 = 不降級</p>
         <label class="block text-sm text-gray-400 mb-1">系統提示詞（人設）</label>
         <textarea id="ai-system-prompt" rows="5" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] resize-none text-sm" placeholder="定義 AI 的角色和回覆風格"></textarea>
       </div>
@@ -309,11 +312,13 @@
       <div class="bg-[#2b2d31] rounded-xl p-5">
         <h3 class="font-semibold mb-1">🔌 API 連接測試</h3>
         <p class="text-xs text-gray-400 mb-4">發送一個最小請求來測試主 API 和備援 API 是否正常連線，不需要實際對話</p>
-        <div class="flex gap-2 mb-4">
+        <div class="flex gap-2 mb-4 flex-wrap">
           <button onclick="testAIConnection('both')" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg font-semibold text-sm flex-1">🔍 測試全部</button>
+          <button onclick="testAIConnection('chain')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">🔗 測試降級鏈</button>
           <button onclick="testAIConnection('primary')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">主 API</button>
           <button onclick="testAIConnection('fallback')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">備援 API</button>
         </div>
+        <p class="text-xs text-gray-500 mb-3">🔗 測試降級鏈：逐一測試主模型 + 降級鏈中的每個模型，查看哪些可用、哪些 401/503</p>
         <div id="ai-test-results" class="space-y-3"></div>
       </div>
     </div>
@@ -699,6 +704,7 @@ async function showChatAIPanel() {
   document.getElementById('ai-api-url').value = s.api_url || '';
   document.getElementById('ai-api-key').placeholder = s.api_key_masked ? `已設定（${s.api_key_masked}）輸入新值可覆蓋` : '輸入 API Key';
   document.getElementById('ai-model').value = s.model || 'gpt-4o-mini';
+  document.getElementById('ai-model-chain').value = s.model_fallback_chain || '';
   document.getElementById('ai-system-prompt').value = s.system_prompt || '';
   document.getElementById('ai-cooldown').value = s.cooldown_seconds ?? 60;
   document.getElementById('ai-min-interval').value = s.min_response_interval ?? 0;
@@ -737,6 +743,7 @@ async function saveChatAISettings() {
     enabled: document.getElementById('ai-enabled').checked,
     api_url: document.getElementById('ai-api-url').value.trim(),
     model: document.getElementById('ai-model').value.trim(),
+    model_fallback_chain: document.getElementById('ai-model-chain').value.trim(),
     system_prompt: document.getElementById('ai-system-prompt').value,
     cooldown_seconds: parseInt(document.getElementById('ai-cooldown').value) || 0,
     min_response_interval: parseInt(document.getElementById('ai-min-interval').value) || 0,

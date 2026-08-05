@@ -1539,6 +1539,7 @@ chat_ai_settings = {
     "fallback_api_url": "",         # 備援 API 端點 URL
     "fallback_api_key": "",         # 備援 API Key
     "fallback_model": "",          # 備援模型名稱
+    "model_fallback_chain": "",   # 模型降級鏈（逗號分隔，主模型 401/503/502/504 時自動依序嘗試）
     "fallback_daily_limit": 10,    # 備援模式下每位用戶每日對話上限
     "fallback_rate_per_min": 6,    # 備援 API 每分鐘聊天請求上限
     "fallback_owner_exempt": True,  # 機器人擁有者豁免備援限速與每日配額
@@ -2222,8 +2223,24 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         unrecoverable failure; otherwise returns the assistant message dict
         (which may legitimately have empty content — the outer retry loop
         decides whether that's worth retrying)."""
+        # ── Model fallback chain ──
+        # Parse the comma-separated model list from settings. The first
+        # entry is the primary model (same as settings["model"]); subsequent
+        # entries are fallbacks tried only when the primary returns 401
+        # (key not authorized for that model) or 503/502/504 (model down
+        # or overloaded). This stays on the SAME API endpoint + key —
+        # it's a cheap retry, much faster than the full backup API switchover.
+        _chain_raw = settings.get("model_fallback_chain", "").strip()
+        _primary_model = settings.get("model", "gpt-4o-mini")
+        if _chain_raw:
+            _model_chain = [m.strip() for m in _chain_raw.split(",") if m.strip()]
+            if _primary_model not in _model_chain:
+                _model_chain.insert(0, _primary_model)
+        else:
+            _model_chain = [_primary_model]
+
         payload = {
-            "model": settings.get("model", "gpt-4o-mini"),
+            "model": _model_chain[0],
             "messages": messages,
             "temperature": 0.7,
             # Default kept low (300) for normal quick chat replies. Callers that
@@ -2345,7 +2362,56 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                     ok = False
 
         if not ok:
-            raise Exception(f"Chat AI API returned {status}: {body_text[:300]}")
+            # ── Model fallback chain: try next model on 401/503/502/504 ──
+            # These statuses mean the SPECIFIC MODEL is unavailable (not the
+            # API endpoint itself), so retrying with a different model on
+            # the same endpoint+key often works. Other errors (400 bad
+            # request, 429 rate limit, etc.) are less likely to be model-
+            # specific, so we don't waste time retrying those.
+            _model_retryable = status in (401, 403, 503, 502, 504)
+            if _model_retryable and len(_model_chain) > 1:
+                for _mi in range(1, len(_model_chain)):
+                    if _remaining() < 2:
+                        print(f"⏱️ 模型降級鏈：剩餘時間不足，跳過 {_model_chain[_mi]}")
+                        break
+                    _alt_model = _model_chain[_mi]
+                    print(f"🔄 模型降級：{payload['model']} → {_alt_model}（HTTP {status}）")
+                    payload["model"] = _alt_model
+                    try:
+                        status, body_text = await _post(payload)
+                        print(f"⏱️ 模型降級 {_alt_model}：status={status}, 耗時 {_time.time()-_t0:.1f}s")
+                        if status == 200:
+                            try:
+                                data = json_module.loads(body_text)
+                                if "choices" in data:
+                                    _msg = data["choices"][0].get("message", {})
+                                    if _msg.get("content") or _msg.get("tool_calls"):
+                                        ok = True
+                                        print(f"✅ 模型降級成功：{_alt_model}")
+                                        break
+                                    # Empty content but 200 — try non-streaming
+                                    _fb_budget = _remaining()
+                                    if _fb_budget >= 2:
+                                        payload_ns = dict(payload)
+                                        payload_ns.pop("stream", None)
+                                        t2 = aiohttp.ClientTimeout(total=_fb_budget, connect=min(10, _fb_budget), sock_read=_fb_budget)
+                                        if is_background:
+                                            async with _AI_BG_SEMAPHORE:
+                                                async with aiohttp.ClientSession() as sess:
+                                                    async with sess.post(api_url, json=payload_ns, headers=headers, timeout=t2) as resp2:
+                                                        if resp2.status == 200:
+                                                            data = json_module.loads(await resp2.text())
+                                                            if "choices" in data and data["choices"][0].get("message", {}).get("content"):
+                                                                ok = True
+                                                                print(f"✅ 模型降級 {_alt_model} 非串流成功")
+                                                                break
+                            except Exception:
+                                pass
+                    except Exception as _me:
+                        print(f"⚠️ 模型降級 {_alt_model} 也失敗：{_me}")
+                        continue
+            if not ok:
+                raise Exception(f"Chat AI API returned {status}: {body_text[:300]}")
 
         _track_token_usage(data)
         _ai_circuit_success()  # successful call — reset the 403 counter
@@ -2407,7 +2473,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     if _primary_error and settings.get("fallback_enabled") and fallback_mode != "disabled":
         _is_provider_error = any(
             code in _primary_error
-            for code in ["503", "502", "500", "504", "Service Unavailable",
+            for code in ["503", "502", "500", "504", "401", "403",
+                        "Service Unavailable",
                         "Bad Gateway", "Internal Server Error",
                         "Gateway Timeout", "timeout", "Timeout",
                         "逾時", "Connection", "connection"]
@@ -5792,6 +5859,7 @@ async def api_get_chat_ai_settings(request):
         "fallback_api_url": chat_ai_settings.get("fallback_api_url", ""),
         "fallback_api_key_masked": (lambda k: k[:6]+"..."+k[-4:] if len(k)>10 else ("***" if k else ""))(chat_ai_settings.get("fallback_api_key", "")),
         "fallback_model": chat_ai_settings.get("fallback_model", ""),
+        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
         "fallback_daily_limit": chat_ai_settings.get("fallback_daily_limit", 10),
         "fallback_rate_per_min": chat_ai_settings.get("fallback_rate_per_min", 6),
         "fallback_owner_exempt": chat_ai_settings.get("fallback_owner_exempt", True),
@@ -5861,6 +5929,8 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["fallback_api_key"] = body["fallback_api_key"]
     if "fallback_model" in body:
         chat_ai_settings["fallback_model"] = body["fallback_model"]
+    if "model_fallback_chain" in body:
+        chat_ai_settings["model_fallback_chain"] = body["model_fallback_chain"]
     if "fallback_daily_limit" in body:
         chat_ai_settings["fallback_daily_limit"] = int(body["fallback_daily_limit"])
     if "fallback_rate_per_min" in body:
@@ -5881,13 +5951,16 @@ async def api_set_chat_ai_settings(request):
 
 async def api_test_ai_connection(request):
     """Test primary and/or fallback API connection with a minimal request.
-    POST body: {"target": "primary" | "fallback" | "both"}
+    POST body: {"target": "primary" | "fallback" | "both" | "chain"}
+               {"model": "specific model name to test (optional)"}
+    - "chain": test every model in the model_fallback_chain individually
     Returns per-target: status (ok/error/timeout), latency_ms, model, response_snippet, error."""
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     body = await request.json()
     target = body.get("target", "both")
+    specific_model = body.get("model", "").strip()
 
     async def _test_one(api_url, api_key, model, label):
         import time as _time
@@ -5916,7 +5989,8 @@ async def api_test_ai_connection(request):
                     if resp.status != 200:
                         err_text = await resp.text()
                         return {"label": label, "status": "error", "http_status": resp.status,
-                                "latency_ms": elapsed, "error": f"HTTP {resp.status}: {err_text[:200]}"}
+                                "latency_ms": elapsed, "model": model or "gpt-4o-mini",
+                                "error": f"HTTP {resp.status}: {err_text[:200]}"}
                     data = await resp.json()
                     content = ""
                     choices = data.get("choices", [])
@@ -5928,25 +6002,45 @@ async def api_test_ai_connection(request):
         except asyncio.TimeoutError:
             elapsed = int((_time.monotonic() - t0) * 1000)
             return {"label": label, "status": "timeout", "latency_ms": elapsed,
+                    "model": model or "gpt-4o-mini",
                     "error": "請求逾時（15 秒）"}
         except Exception as e:
             elapsed = int((_time.monotonic() - t0) * 1000)
             return {"label": label, "status": "error", "latency_ms": elapsed,
+                    "model": model or "gpt-4o-mini",
                     "error": str(e)[:300]}
 
     results = []
-    if target in ("primary", "both"):
+    if target == "chain":
+        # Test every model in the fallback chain individually
+        chain_raw = chat_ai_settings.get("model_fallback_chain", "").strip()
+        primary_model = chat_ai_settings.get("model", "")
+        models = [primary_model]
+        if chain_raw:
+            models += [m.strip() for m in chain_raw.split(",") if m.strip()]
+        for m in models:
+            results.append(await _test_one(
+                chat_ai_settings.get("api_url", ""),
+                chat_ai_settings.get("api_key", ""),
+                m, f"主 API · {m}"))
+    elif target == "primary" and specific_model:
         results.append(await _test_one(
             chat_ai_settings.get("api_url", ""),
             chat_ai_settings.get("api_key", ""),
-            chat_ai_settings.get("model", ""),
-            "主 API"))
-    if target in ("fallback", "both"):
-        results.append(await _test_one(
-            chat_ai_settings.get("fallback_api_url", ""),
-            chat_ai_settings.get("fallback_api_key", ""),
-            chat_ai_settings.get("fallback_model", ""),
-            "備援 API"))
+            specific_model, f"主 API · {specific_model}"))
+    else:
+        if target in ("primary", "both"):
+            results.append(await _test_one(
+                chat_ai_settings.get("api_url", ""),
+                chat_ai_settings.get("api_key", ""),
+                chat_ai_settings.get("model", ""),
+                "主 API"))
+        if target in ("fallback", "both"):
+            results.append(await _test_one(
+                chat_ai_settings.get("fallback_api_url", ""),
+                chat_ai_settings.get("fallback_api_key", ""),
+                chat_ai_settings.get("fallback_model", ""),
+                "備援 API"))
     return web.json_response({"results": results})
 
 
