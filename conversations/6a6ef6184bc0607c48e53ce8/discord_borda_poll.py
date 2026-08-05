@@ -18933,7 +18933,7 @@ _turtle_soup_state = {
     "max_questions": 20,   # 最大提問次數
     "questions_used": 0,    # 已用提問次數
     "qa_history": [],       # [{"q": "他死了嗎？", "a": "是", "asked_by": "張三"}, ...]
-        "extra_time_used": False,  # 是否已用過加時 (+5)
+    "extra_time_used": False,  # 是否已用過加時 (+5)
     "hint_panel_active": False,  # 提示按鈕面板是否正在等待玩家選擇
     "game_msg_id": None,    # 遊戲進行中的主訊息 ID
     "channel_id": None,     # 當前遊戲所在頻道 ID
@@ -18941,7 +18941,7 @@ _turtle_soup_state = {
     "queue": [],            # 排隊中的提問 [{"user_id", "user_name", "question", "interaction"}]
     "started_at": 0,        # 遊戲開始時間
     "starter_user_id": None,  # 發起遊戲的用戶
-    "hint_given": False,    # 是否已給過防卡關線索
+    "hints_given": 0,       # 已「接受」過幾次提示（僅供統計，不影響等級判定）
 }
 
 _turtle_soup_invite_msg_id = None  # 當前邀請面板的訊息 ID
@@ -19135,33 +19135,71 @@ async def _judge_turtle_soup_question(question: str, truth: str, qa_history: lis
         return "無關"
 
 # ── AI 防卡關線索 ──
-TURTLE_SOUP_HINT_PROMPT = """你是一個海龜湯遊戲的主持人。玩家們需要提示。
+# 重要：每次呼叫只把「這一個等級」的指示給 AI，絕對不要把四個等級全部列出來
+# 讓 AI 自己選——弱模型很容易選錯或直接把最詳細那條整段複製輸出，等於劇透。
+_TURTLE_SOUP_HINT_LEVEL_INSTRUCTIONS = {
+    1: "給一句非常含蓄的暗示，15字以內。只點出一個模糊的大方向或情緒（例如「跟他的工作有關」「跟一段時間有關」）。絕對不能提到任何具體物品、人物身分、動作細節。",
+    2: "給一句中等程度的暗示，20-35字。可以指出一個玩家可能還沒想到的情境角度（例如「他這麼做其實有個目的」），但絕對不能提到職業、身分、具體物品名稱或動機。",
+    3: "給一句較明顯的暗示，30-50字。可以透露情境中『一個』關鍵元素（例如他的職業或身分二選一），但絕對不能同時透露動機和結果，也絕對不能說出他為什麼這麼做或這件事為什麼結束/改變。",
+    4: "給一句最明顯、最後一次的暗示，40-60字。可以組合情境中兩個關鍵元素一起講（例如身分+一個行為模式），但『為什麼』或『最後發生了什麼轉折』這個核心答案本身，絕對絕對不能講出來——玩家聽完仍必須自己推理出那個關鍵原因才算破案，不能讓提示直接等於答案。",
+}
 
-【湯底】
+TURTLE_SOUP_HINT_PROMPT = """你是一個海龜湯遊戲的主持人，要給玩家一句提示，幫助他們卡關時往正確方向推理。
+
+【湯底（真相，只給你自己參考，絕對不能整句或大段透露給玩家）】
 {truth}
 
 【目前提問歷史】
 {qa_history}
 
-【提示等級】{level}
-- 等級1（模糊）：給一句非常含蓄的暗示，20字以內。只暗示一個大方向（如「注意時間」「想想空間」），不提及任何具體細節。
-- 等級2（中等）：給一句中等暗示，20-40字。指出一個玩家還沒問到的具體面向（如「注意他出門前做了什麼」），但不說出答案。
-- 等級3（明顯）：給一句明顯暗示，40-60字。直接指向關鍵推理方向（如「這和他的職業有關，而且發生在特定節日」），接近答案但不直接說出。
-- 等級4+（直白）：給一句非常直白的暗示，60-80字。幾乎把答案的關鍵要素都點出來，只差沒有組合成完整句子。
+【這次提示要求】
+{level_instruction}
 
-【底線】不管哪個等級，都「不能直接說出湯底」。要引導方向，不能替代推理。
+【絕對規則（不管上面要求什麼等級都要遵守）】
+1. 玩家看完這句提示，絕對不能等於已經知道完整真相——核心的「為什麼」或最後轉折，必須留給玩家自己推理出來。
+2. 不能出現湯底原文的完整句子或近乎逐字的內容。
+3. 輸出裡絕對不能出現「等級」「提示」「線索」「模糊」「中等」「明顯」「直白」這些字眼，也不能有任何編號、標籤、前綴、引號。
+4. 只能輸出這一句暗示語本身，不要有任何說明、開場白或格式符號。
 
-請只輸出一句提示語，不要有任何其他文字。"""
+現在請直接輸出這一句暗示語："""
+
+
+def _sanitize_turtle_soup_hint(hint: str) -> str:
+    """防禦性清理：移除 AI 可能誤植的等級標籤/前綴文字。"""
+    import re as _re
+    hint = hint.strip().strip('「」"\'')
+    # 移除開頭類似「等級X」「等級X+」「提示：」「線索：」等標籤前綴
+    hint = _re.sub(r'^(等級\s*\d*\+?\s*[（(][^）)]*[）)]\s*[:：]?\s*)+', '', hint)
+    hint = _re.sub(r'^(提示|線索|暗示)\s*[:：]\s*', '', hint)
+    return hint.strip() or hint
+
+
+def _turtle_soup_hint_level() -> int:
+    """依「已用/總提問次數」比例決定提示等級：1=模糊 ~ 4=直白。
+    完全基於進度，不受玩家接受/拒絕提示的次數影響。"""
+    used = _turtle_soup_state["questions_used"]
+    total = max(_turtle_soup_state["max_questions"], 1)
+    ratio = used / total
+    if ratio <= 0.35:
+        return 1
+    elif ratio <= 0.6:
+        return 2
+    elif ratio <= 0.85:
+        return 3
+    return 4
+
 
 async def _generate_turtle_soup_hint(truth: str, qa_history: list, level: int = 1) -> str:
-    """生成防卡關線索。level 越高提示越明顯。"""
+    """生成防卡關線索。level 越高提示越明顯（但永遠保留核心答案不講）。"""
+    level = max(1, min(int(level), 4))
     history_text = "\n".join(
         f"Q: {qa['q']}\nA: {qa['a']}"
         for qa in qa_history[-15:]
     ) or "（尚無歷史）"
 
+    level_instruction = _TURTLE_SOUP_HINT_LEVEL_INSTRUCTIONS[level]
     prompt = TURTLE_SOUP_HINT_PROMPT.format(
-        truth=truth, qa_history=history_text, level=level,
+        truth=truth, qa_history=history_text, level_instruction=level_instruction,
     )
 
     settings = {
@@ -19186,6 +19224,7 @@ async def _generate_turtle_soup_hint(truth: str, qa_history: list, level: int = 
             fallback_user_id="turtle_soup",
         )
         hint = result.get("content", "").strip()
+        hint = _sanitize_turtle_soup_hint(hint) if hint else hint
         return hint or "試著從時間線的角度想一想？"
     except Exception as e:
         print(f"⚠️ Turtle soup hint failed: {e}")
@@ -19229,7 +19268,16 @@ class TurtleSoupHintView(discord.ui.View):
                 print(f"⚠️ Turtle soup hint generation failed: {e}")
                 await interaction.response.edit_message(content="⚠️ 線索生成失敗。", view=None)
         else:
-            await interaction.response.edit_message(content="👍 好的，繼續加油！", view=None)
+            next_milestone = (
+                (_turtle_soup_state["questions_used"] // 5 + 1) * 5
+            )
+            extra = (
+                f"\n（下次提問到第 {next_milestone} 次時還會再問一次要不要提示）"
+                if next_milestone < _turtle_soup_state["max_questions"] else ""
+            )
+            await interaction.response.edit_message(
+                content=f"👍 好的，繼續推理！{extra}", view=None,
+            )
 
     @discord.ui.button(label="是，給我提示", style=discord.ButtonStyle.success, custom_id="turtle_soup_hint_yes")
     async def hint_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -19561,16 +19609,18 @@ async def _process_turtle_soup_question(message, question, user_id, user_name):
         reply_text = f"{answer_emoji} **{answer}**\n📝 提問者：{user_name}｜剩餘提問：{remaining} 次"
 
         # 每 5 次提問就詢問是否需要提示
+        # 提示等級依「已用/總提問次數」比例決定，越接近尾聲提示越明顯，
+        # 不受玩家是否接受過提示影響（避免跳級或level跟次數脫節的問題）
         if (_turtle_soup_state["questions_used"] % 5 == 0
                 and not _turtle_soup_state["hint_panel_active"]
                 and answer != "答對了！恭喜破案！"
                 and _turtle_soup_state["questions_used"] < _turtle_soup_state["max_questions"]):
             _turtle_soup_state["hint_panel_active"] = True
-            hint_level = min(_turtle_soup_state["hints_given"] + 1, 4)
+            hint_level = _turtle_soup_hint_level()
             level_desc = {1: "模糊", 2: "中等", 3: "明顯", 4: "直白"}.get(hint_level, "直白")
             await message.channel.send(
                 f"🤔 已用 {_turtle_soup_state['questions_used']} 次提問，需要提示嗎？\n"
-                f"（下次提示等級：{level_desc}）",
+                f"（本次提示等級：{level_desc}）",
                 view=TurtleSoupHintView(level=hint_level),
             )
 
