@@ -110,11 +110,20 @@ import random
 import string
 import re
 import time as _time
+import io
+import glob
 
 try:
     import jwt as pyjwt  # PyJWT for Google Drive service account auth
 except ImportError:
     pyjwt = None
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
+    print("⚠️ Pillow 未安裝，會議排程通知圖功能將無法使用（pip install Pillow）")
 import hmac
 import hashlib
 import json as json_module
@@ -8208,6 +8217,8 @@ async def setup_hook():
     load_applications()
     save_applications()  # Create file if not exists (ensures Drive sync)
     load_proposals()
+    load_schedule_settings()
+    save_schedule_settings()  # Create file if not exists (ensures Drive sync)
     # Load local files (will use Drive-downloaded data if available)
     load_polls_from_disk()
     save_polls_to_disk()  # Create file if not exists
@@ -13885,6 +13896,8 @@ async def _analyze_proposal(content: str, channel_name: str) -> dict:
         "- 政策提案（提出新政策或修改現有政策）\n"
         "- 任命案（提名或任命官員）\n"
         "- 預算提案（撥款或預算相關）\n"
+        "- 升格案（會員國/觀察員申請升格為理事國、觀察員申請升格為會員國等地位變更案）\n"
+        "- 選舉案（理事國選舉、秘書長選舉等職位選舉）\n"
         "- 其他提案\n\n"
         "請以以下 JSON 格式回覆（不要加 markdown code block）：\n"
         '{"type": "提案種類", "summary": "一句話摘要（50字以內）"}\n\n'
@@ -13914,7 +13927,11 @@ async def _analyze_proposal(content: str, channel_name: str) -> dict:
 def _heuristic_proposal_analysis(content: str, channel_name: str) -> dict:
     """Fallback heuristic when AI is unavailable."""
     text = content.lower()
-    if "罷免" in text:
+    if "升格" in text:
+        ptype = "升格案"
+    elif "選舉" in text:
+        ptype = "選舉案"
+    elif "罷免" in text:
         ptype = "罷免案"
     elif "任命" in text or "提名" in text:
         ptype = "任命案"
@@ -18031,6 +18048,55 @@ BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
 
 PROPOSAL_SETTINGS_FILE = os.path.join(DATA_DIR, "proposal_settings.json")
 PROPOSALS_FILE = os.path.join(DATA_DIR, "proposals.json")
+SCHEDULE_SETTINGS_FILE = os.path.join(DATA_DIR, "schedule_settings.json")
+
+# ──────────────────────────────────────────────
+# 自動排程／會議通知系統
+# ──────────────────────────────────────────────
+# 將所有已受理（status=="accepted"）的提案自動彙整成會議排程通知圖，
+# 套用固定的視覺樣式（例行會議/簡務會議），AI 負責把提案內容整理成
+# 精簡的公告顯示文字，圖片用 Pillow 繪製（非 AI 生圖，避免文字失真）。
+# 秘書處在確認頻道預覽圖片後，點擊「發送」才會真正發到目標頻道並
+# @ 指定身分組；發送成功後，這批提案會從待辦清單中刪除，避免下次
+# 排程重複列出。
+schedule_settings = {
+    "enabled": True,
+    "review_channel_id": None,      # 秘書處確認頻道（留空則沿用提案系統的秘書處頻道）
+    "target_channel_id": None,      # 排程通知圖最終發送頻道
+    "mention_role_id": None,        # 發送時 @ 提及的身分組 ID
+    "checkin_start": "13:00",
+    "checkin_end": "21:00",
+    "review_time": "15:00",         # 升格案／提案審理標示時間
+    "motion_time": "20:00",         # 臨時動議標示時間
+    "vote_time": "21:00",           # 投票結算＆散會標示時間
+    "regular_meeting_no": 1,        # 下一次「例行會議」編號（發送成功後自動 +1）
+    "briefing_meeting_no": 1,       # 下一次「簡務會議」編號（發送成功後自動 +1）
+}
+
+# 待確認的排程通知（記憶體暫存，不落地存檔）：
+# schedule_id -> {png, proposal_ids, target_channel_id, mention_role_id, meta}
+# 機器人重啟會清空此暫存，屆時秘書處需重新執行 /schedule generate。
+_pending_schedules: dict = {}
+
+
+def load_schedule_settings():
+    global schedule_settings
+    try:
+        if os.path.exists(SCHEDULE_SETTINGS_FILE):
+            with open(SCHEDULE_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.loads(f.read())
+            schedule_settings.update(loaded)
+            print(f"📅 會議排程設定已載入（下次例行會議#{schedule_settings.get('regular_meeting_no')}，簡務會議#{schedule_settings.get('briefing_meeting_no')}）")
+    except Exception as e:
+        print(f"⚠️ 會議排程設定載入失敗：{e}")
+
+
+def save_schedule_settings():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        _save_json_file(SCHEDULE_SETTINGS_FILE, schedule_settings)
+    except Exception as e:
+        print(f"⚠️ 會議排程設定儲存失敗：{e}")
 
 # 提案區 AI 自動受理系統
 # When a new thread/message appears in a designated proposal channel, the AI
