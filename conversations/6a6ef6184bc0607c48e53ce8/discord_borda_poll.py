@@ -961,26 +961,51 @@ async def api_default_guild(request):
     of making the user pick from a list of every Discord server they happen
     to manage. Still verifies the logged-in user actually has admin rights
     (or is nation-whitelisted/the bot owner) on ICEA before handing back
-    dashboard access, same check as the old guild list used per-guild."""
+    dashboard access.
+
+    IMPORTANT: membership/permissions are checked via the bot's OWN live
+    guild connection (bot.get_guild + fetch_member), NOT via the user's
+    Discord OAuth access token hitting /users/@me/guilds. That endpoint is
+    aggressively rate-limited by Discord and _fetch_guilds silently returns
+    [] on any failure (429, network hiccup, etc.) — which used to surface as
+    a false "你不是 ICEA 伺服器的成員" error even for actual members. The
+    bot token's own guild/member cache has no such rate-limit trap and is
+    always accurate for the one guild this bot lives in."""
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     uid_str = user.get("user_id", "")
-    guilds = await _fetch_guilds(user["access_token"])
-    icea = next((g for g in guilds if str(g["id"]) == ICEA_GUILD_ID), None)
-    if not icea:
+
+    guild = bot.get_guild(int(ICEA_GUILD_ID))
+    if not guild:
+        # Bot itself isn't connected/ready yet — genuine transient state,
+        # not a permissions issue. Tell the user to just retry.
+        return web.json_response({"error": "機器人尚未連上 ICEA 伺服器（可能剛重啟），請稍後重試"}, status=503)
+
+    member = guild.get_member(int(uid_str))
+    if member is None:
+        try:
+            member = await guild.fetch_member(int(uid_str))
+        except discord.NotFound:
+            member = None
+        except Exception as e:
+            print(f"⚠️ api_default_guild：fetch_member 失敗：{e}")
+            member = None
+
+    if member is None:
         return web.json_response({"error": "你不是 ICEA 伺服器的成員，無法使用此後台"}, status=403)
 
+    is_guild_admin = member.guild_permissions.administrator or member.guild_permissions.manage_guild
     is_owner_or_whitelisted = _is_nation_admin(uid_str, None)
-    if not _is_guild_admin(icea) and not is_owner_or_whitelisted:
+    if not is_guild_admin and not is_owner_or_whitelisted:
         return web.json_response({"error": "forbidden：你在 ICEA 伺服器沒有管理權限"}, status=403)
 
-    ic = f"https://cdn.discordapp.com/icons/{icea['id']}/{icea['icon']}.png" if icea.get("icon") else None
+    ic = str(guild.icon.url) if guild.icon else None
     return web.json_response({
-        "id": icea["id"],
-        "name": icea["name"],
+        "id": str(guild.id),
+        "name": guild.name,
         "icon_url": ic,
-        "nation_only": (not _is_guild_admin(icea)) and is_owner_or_whitelisted,
+        "nation_only": (not is_guild_admin) and is_owner_or_whitelisted,
     })
 
 
