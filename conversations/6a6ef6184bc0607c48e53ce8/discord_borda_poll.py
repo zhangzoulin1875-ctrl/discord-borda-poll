@@ -71,6 +71,13 @@
 
 波達計數法：n 個選項中，第 1 名得 n-1 分，…，最後一名得 0 分。
 一般投票：每人一票，最高票獲勝。
+
+AI 自動計票（論壇貼文投票，用於秘書處自行在論壇貼文發起的投票，非 /poll 系統）：
+  /tally count [thread] [legend] [mode]  自動判讀貼文投票格式與 Emoji 對照並計票（管理員限定）
+                                          thread 留空則使用目前所在的貼文
+                                          legend 可手動指定 Emoji=候選人 對照（逗號分隔）
+                                          mode 可強制指定 single（單選）或 ranked（波達計數法）
+                                          計票完成後可點擊按鈕將結果公佈於原貼文
 """
 
 import sys
@@ -8216,7 +8223,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -17974,6 +17981,416 @@ def _get_community_awareness_context() -> str:
     )
 
     return "\n".join(lines)
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# AI 自動計票系統（論壇貼文投票）
+# ──────────────────────────────────────────────
+# 秘書處在論壇貼文（原po）用文字說明投票格式與選項對應的 Emoji（可能是
+# 自訂 Emoji，也可能是 Unicode Emoji，例如 1️⃣2️⃣3️⃣ 或 🟩🟧🟥），會員國
+# 代表則直接在貼文底下回覆「國家代號+國名+Emoji」來投票。
+#
+# 本功能會：
+#   1. 讀取原po文字（含 embed），自動抓出裡面出現過的所有 Emoji token。
+#   2. 用 AI 判斷這是「單選」還是「排序（波達計數法）」投票，並將每個
+#      Emoji 對應到候選人/選項名稱（AI 無法判斷時可用 legend 參數手動指定）。
+#   3. 掃描貼文底下所有回覆，只挑出「含有合法選項 Emoji」的訊息視為有效
+#      投票，其餘閒聊訊息自動忽略。
+#   4. 每位使用者僅計最後一筆有效投票（避免重複/更正造成的重複計票）。
+#   5. 依偵測到的計票方式計算結果（單選＝計數；排序＝波達計數法）。
+# ──────────────────────────────────────────────
+
+# 自訂 Emoji：<a?:名稱:數字ID>；一般 Emoji：常見的 Unicode Emoji 區段
+# （含 keycap 數字組合 1️⃣2️⃣...、色塊方塊 🟩🟧🟥、常見符號 ✅❌⭐ 等）。
+_CUSTOM_EMOJI_RE_SRC = r'<a?:[A-Za-z0-9_~]+:[0-9]+>'
+_KEYCAP_EMOJI_RE_SRC = r'[0-9#\*]\uFE0F?\u20E3'
+_UNICODE_EMOJI_RE_SRC = (
+    r'[\U0001F1E6-\U0001F1FF]{2}'          # 國旗（區域指示符號對）
+    r'|[\U0001F300-\U0001FAFF]\uFE0F?'      # 主要 Emoji 區段
+    r'|[\u2600-\u27BF]\uFE0F?'              # 雜項符號 & Dingbats（✅❌➡️ 等）
+    r'|[\u2B00-\u2BFF]\uFE0F?'              # 雜項符號與箭頭（⭐⬛⬜ 等）
+)
+_EMOJI_TOKEN_RE = re.compile(
+    "(?:" + _CUSTOM_EMOJI_RE_SRC + ")"
+    "|(?:" + _KEYCAP_EMOJI_RE_SRC + ")"
+    "|(?:" + _UNICODE_EMOJI_RE_SRC + ")"
+)
+
+
+def _extract_emoji_tokens(text: str) -> list:
+    """依出現順序抓出文字中所有 Emoji token（自訂或 Unicode），保留原始寫法。"""
+    if not text:
+        return []
+    return _EMOJI_TOKEN_RE.findall(text)
+
+
+def _dedup_preserve_order(items: list) -> list:
+    seen = set()
+    out = []
+    for it in items:
+        if it not in seen:
+            seen.add(it)
+            out.append(it)
+    return out
+
+
+def _gather_thread_text(starter_message) -> str:
+    """把貼文原po的文字內容 + embed 內容合併成一段文字，供 Emoji 偵測與 AI 判讀使用。"""
+    parts = []
+    if starter_message is None:
+        return ""
+    if starter_message.content:
+        parts.append(starter_message.content)
+    for embed in starter_message.embeds:
+        if embed.title:
+            parts.append(str(embed.title))
+        if embed.description:
+            parts.append(str(embed.description))
+        for f in embed.fields:
+            parts.append(f"{f.name} {f.value}")
+        if embed.footer and embed.footer.text:
+            parts.append(str(embed.footer.text))
+    return "\n".join(parts)
+
+
+async def _ai_detect_vote_legend(op_text: str, emoji_tokens: list) -> dict:
+    """用 AI 判斷投票方式（單選/排序）與每個 Emoji 對應的候選人/選項名稱。
+    回傳格式：{"mode": "single"|"ranked", "legend": {emoji: label, ...}, "notes": str}
+    若 AI 不可用或解析失敗，回傳一個保底結果（單選模式，選項名稱＝Emoji 本身）。"""
+    fallback = {
+        "mode": "single",
+        "legend": {tok: tok for tok in emoji_tokens},
+        "notes": "AI 無法使用，採用保底規則（每個 Emoji 視為獨立選項，單選計票）。",
+    }
+    if not emoji_tokens:
+        return {"mode": "single", "legend": {}, "notes": "貼文中沒有偵測到任何 Emoji。"}
+
+    ps_ai = proposal_settings.get("ai_settings", {})
+    settings = {
+        "api_url": ps_ai.get("api_url") or chat_ai_settings.get("api_url", ""),
+        "api_key": ps_ai.get("api_key") or chat_ai_settings.get("api_key", ""),
+        "model": ps_ai.get("model") or chat_ai_settings.get("model", "gpt-4o-mini"),
+        "system_prompt": "你是投票制度分析助手，負責判讀 Discord 論壇投票貼文的計票規則。",
+    }
+    if not settings["api_url"] or not settings["api_key"]:
+        return fallback
+
+    emoji_list_str = "、".join(emoji_tokens)
+    prompt = (
+        "以下是一篇 Discord 論壇投票貼文的原文內容（可能包含投票格式說明、候選人清單等）：\n\n"
+        f"「{op_text[:2000]}」\n\n"
+        f"這篇貼文中偵測到以下 Emoji（依出現順序，只能使用這些，不要自己發明新的）：\n{emoji_list_str}\n\n"
+        "請判斷：\n"
+        "1. mode：這是「single」（每人只能選一個選項投票）還是「ranked」"
+        "（每人需依偏好排序多個選項，即波達計數法）？"
+        "判斷依據：如果投票格式要求填入多個 Emoji 代表偏好順序（例如「請依序填入你的第一、第二、第三選擇」），"
+        "就是 ranked；如果只是從幾個選項中選一個，就是 single。\n"
+        "2. legend：把每一個列出的 Emoji 對應到它代表的候選人/選項名稱"
+        "（依貼文中該 Emoji 附近的文字或 @提及來判斷，例如「1️⃣ @張作霖 張作霖」代表 1️⃣ 對應「張作霖」）。"
+        "如果貼文文字中完全找不到對應名稱（可能寫在圖片裡），"
+        "就用「選項（Emoji本身）」這種格式當作 label，不要亂猜名字。\n\n"
+        "請直接回覆 JSON（不要加 markdown code block），格式：\n"
+        '{"mode": "single", "legend": {"emoji1": "候選人A", "emoji2": "候選人B"}, "notes": "簡短說明"}\n'
+        "只回覆 JSON，不要加其他文字。"
+    )
+
+    try:
+        result = await call_ai_api(prompt, settings)
+        result = result.strip()
+        if result.startswith("```"):
+            result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = json_module.loads(result)
+        mode = parsed.get("mode", "single")
+        if mode not in ("single", "ranked"):
+            mode = "single"
+        legend_raw = parsed.get("legend", {}) or {}
+        # 只保留真的出現在貼文裡的 Emoji，避免 AI 幻覺出新 Emoji
+        legend = {tok: legend_raw.get(tok, tok) for tok in emoji_tokens if tok in legend_raw or tok in emoji_tokens}
+        if not legend:
+            legend = {tok: tok for tok in emoji_tokens}
+        return {
+            "mode": mode,
+            "legend": legend,
+            "notes": str(parsed.get("notes", ""))[:200],
+        }
+    except Exception as e:
+        print(f"⚠️ 計票 AI 判讀失敗，改用保底規則：{e}")
+        return fallback
+
+
+def _parse_manual_legend(legend_str: str) -> dict:
+    """解析手動指定的 legend 字串，格式：'emoji1=名稱1,emoji2=名稱2'。"""
+    mapping = {}
+    if not legend_str:
+        return mapping
+    for pair in legend_str.split(","):
+        pair = pair.strip()
+        if "=" not in pair:
+            continue
+        emoji_part, label_part = pair.split("=", 1)
+        emoji_part = emoji_part.strip()
+        label_part = label_part.strip()
+        if emoji_part and label_part:
+            mapping[emoji_part] = label_part
+    return mapping
+
+
+def _compute_tally(ballots: dict, legend: dict, mode: str) -> dict:
+    """ballots: voter_key -> ordered list of distinct legend-emoji tokens they cast.
+    legend: emoji_token -> candidate label.
+    回傳每個候選人 label 的分數/票數。"""
+    n = len(legend)
+    scores = {label: 0 for label in legend.values()}
+    for ordered_emojis in ballots.values():
+        if mode == "ranked":
+            for rank_pos, tok in enumerate(ordered_emojis):
+                label = legend.get(tok)
+                if label is not None and rank_pos < n:
+                    scores[label] = scores.get(label, 0) + max(0, n - 1 - rank_pos)
+        else:
+            if ordered_emojis:
+                label = legend.get(ordered_emojis[0])
+                if label is not None:
+                    scores[label] = scores.get(label, 0) + 1
+    return scores
+
+
+async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", mode_override: str = "auto"):
+    """核心計票流程。回傳一個 dict，包含所有計票結果與統計資訊，供指令與後續公佈使用。"""
+    # 1. 取得原po內容
+    starter = thread.starter_message
+    if starter is None:
+        try:
+            starter = await asyncio.wait_for(thread.fetch_message(thread.id), timeout=8)
+        except Exception:
+            starter = None
+
+    op_text = _gather_thread_text(starter)
+    op_emoji_tokens = _dedup_preserve_order(_extract_emoji_tokens(op_text))
+
+    manual_legend = _parse_manual_legend(manual_legend_str)
+    if manual_legend:
+        # 手動指定：只信任手動給的對照表，並補上原po偵測到但未手動指定的 Emoji（用 Emoji 本身當名稱）
+        legend = dict(manual_legend)
+        for tok in op_emoji_tokens:
+            if tok not in legend:
+                legend[tok] = tok
+        detected_mode = "single"
+        ai_notes = "使用手動指定的選項對照表。"
+    else:
+        ai_result = await _ai_detect_vote_legend(op_text, op_emoji_tokens)
+        legend = ai_result["legend"]
+        detected_mode = ai_result["mode"]
+        ai_notes = ai_result.get("notes", "")
+
+    final_mode = detected_mode if mode_override == "auto" else mode_override
+    legend_emoji_set = set(legend.keys())
+
+    # 2. 掃描回覆訊息，蒐集每位使用者的最後一筆有效投票
+    ballots = {}          # author_id -> ordered emoji list
+    voter_labels = {}      # author_id -> (display_name, raw_country_text)
+    voter_last_time = {}   # author_id -> created_at（用於「取最後一筆」判斷)
+    skipped_count = 0
+    disputed = []          # 有爭議的投票（單選卻填多個選項等）
+
+    async for msg in thread.history(limit=None, oldest_first=True):
+        if starter is not None and msg.id == starter.id:
+            continue
+        if msg.author.bot:
+            continue
+        content = msg.content or ""
+        found = _dedup_preserve_order(
+            [tok for tok in _extract_emoji_tokens(content) if tok in legend_emoji_set]
+        )
+        if not found:
+            skipped_count += 1
+            continue
+
+        if final_mode == "single" and len(found) > 1:
+            disputed.append({
+                "author": msg.author.display_name,
+                "content": content[:80],
+                "reason": f"單選投票卻偵測到 {len(found)} 個選項 Emoji",
+            })
+            continue
+
+        aid = msg.author.id
+        prev_time = voter_last_time.get(aid)
+        if prev_time is not None and msg.created_at <= prev_time:
+            continue  # 已有更新的投票，忽略這筆較舊的（理論上 oldest_first 不會發生，保險起見）
+
+        ballots[aid] = found
+        # 嘗試抓出 Emoji 前面的文字當作「國家代號+國名」顯示用
+        first_tok = found[0]
+        idx = content.find(first_tok)
+        raw_label = content[:idx].strip() if idx > 0 else content.strip()
+        voter_labels[aid] = (msg.author.display_name, raw_label[:60] or msg.author.display_name)
+        voter_last_time[aid] = msg.created_at
+
+    scores = _compute_tally(ballots, legend, final_mode)
+
+    return {
+        "op_text": op_text,
+        "legend": legend,
+        "mode": final_mode,
+        "ai_notes": ai_notes,
+        "scores": scores,
+        "ballots": ballots,
+        "voter_labels": voter_labels,
+        "valid_vote_count": len(ballots),
+        "skipped_count": skipped_count,
+        "disputed": disputed,
+        "thread_id": thread.id,
+        "thread_name": thread.name,
+    }
+
+
+def _build_tally_embed(result: dict) -> discord.Embed:
+    mode = result["mode"]
+    mode_label = "🔢 排序偏好（波達計數法）" if mode == "ranked" else "☑️ 單選"
+    unit = "分" if mode == "ranked" else "票"
+
+    scores = result["scores"]
+    ranked_scores = sorted(scores.items(), key=lambda x: -x[1])
+
+    embed = discord.Embed(
+        title=f"🗳️ AI 自動計票結果 — {result['thread_name']}",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="偵測到的計票方式", value=mode_label, inline=False)
+
+    legend_lines = [f"{tok} → {label}" for tok, label in result["legend"].items()]
+    if legend_lines:
+        embed.add_field(name="選項對照", value="\n".join(legend_lines)[:1024], inline=False)
+
+    if ranked_scores:
+        medals = ["🥇", "🥈", "🥉"]
+        result_lines = []
+        for i, (label, score) in enumerate(ranked_scores):
+            prefix = medals[i] if i < 3 else f"{i + 1}."
+            result_lines.append(f"{prefix} {label} — {score} {unit}")
+        embed.add_field(name="計票結果", value="\n".join(result_lines)[:1024], inline=False)
+    else:
+        embed.add_field(name="計票結果", value="（沒有偵測到任何選項）", inline=False)
+
+    stats_lines = [
+        f"✅ 有效投票：{result['valid_vote_count']} 筆",
+        f"🚫 已過濾閒聊/無效訊息：{result['skipped_count']} 筆",
+    ]
+    if result["disputed"]:
+        stats_lines.append(f"⚠️ 有爭議訊息：{len(result['disputed'])} 筆（需人工複核）")
+    embed.add_field(name="統計", value="\n".join(stats_lines), inline=False)
+
+    if result["disputed"]:
+        dispute_lines = [
+            f"• {d['author']}：{d['reason']}（「{d['content']}」）" for d in result["disputed"][:8]
+        ]
+        embed.add_field(name="⚠️ 爭議投票明細", value="\n".join(dispute_lines)[:1024], inline=False)
+
+    if result.get("ai_notes"):
+        embed.add_field(name="AI 判讀備註", value=result["ai_notes"][:300], inline=False)
+
+    embed.set_footer(text="AI 自動計票 | 建議秘書處人工複核後正式公佈")
+    return embed
+
+
+class TallyPublishView(discord.ui.View):
+    """讓秘書處確認無誤後，把計票結果正式回覆到原投票貼文裡。"""
+
+    def __init__(self, thread_id: int, embed: discord.Embed):
+        super().__init__(timeout=600)
+        self.thread_id = thread_id
+        self.embed = embed
+
+    @discord.ui.button(label="📤 公佈於原貼文", style=discord.ButtonStyle.success, custom_id="tally_publish")
+    async def publish_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+            return
+        thread = None
+        for g in bot.guilds:
+            ch = g.get_channel_or_thread(self.thread_id)
+            if ch:
+                thread = ch
+                break
+        if thread is None:
+            await interaction.response.send_message("❌ 找不到原貼文（可能已被刪除）。", ephemeral=True)
+            return
+        try:
+            await thread.send(embed=self.embed)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 公佈失敗：{e}", ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            content="✅ 已公佈計票結果於原貼文。",
+            embed=self.embed,
+            view=None,
+        )
+
+
+# ── Slash Command Group ──
+
+class TallyGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="tally", description="AI 自動計票（論壇貼文投票）")
+
+    @app_commands.command(name="count", description="AI 自動判斷投票格式並計票（管理員限定）")
+    @app_commands.describe(
+        thread="要計票的論壇貼文（留空則使用目前所在的貼文）",
+        legend="手動指定選項對照，格式：Emoji1=候選人1,Emoji2=候選人2（留空則由 AI 自動判斷）",
+        mode="計票方式（留空則由 AI 自動判斷）",
+    )
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="自動判斷", value="auto"),
+        app_commands.Choice(name="單選（計數）", value="single"),
+        app_commands.Choice(name="排序偏好（波達計數法）", value="ranked"),
+    ])
+    async def count(
+        self,
+        interaction: discord.Interaction,
+        thread: discord.Thread = None,
+        legend: str = "",
+        mode: str = "auto",
+    ):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+
+        target_thread = thread or (interaction.channel if isinstance(interaction.channel, discord.Thread) else None)
+        if target_thread is None:
+            await interaction.response.send_message(
+                "❌ 請在投票貼文（論壇貼文）裡直接執行本指令，或用 thread 參數指定要計票的貼文。",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        try:
+            result = await _run_forum_tally(target_thread, manual_legend_str=legend, mode_override=mode)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 計票失敗：{e}", ephemeral=True)
+            return
+
+        if not result["legend"]:
+            await interaction.followup.send(
+                "ℹ️ 沒有在這篇貼文裡偵測到任何選項 Emoji，無法計票。"
+                "請確認貼文中有寫明投票用的 Emoji，或改用 legend 參數手動指定。",
+                ephemeral=True,
+            )
+            return
+
+        embed = _build_tally_embed(result)
+        view = TallyPublishView(target_thread.id, embed)
+        await interaction.followup.send(
+            content="✅ 計票完成（僅你可見），請確認結果無誤後點擊下方按鈕公佈：",
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
+        print(f"🗳️ AI 計票完成：{target_thread.name}｜模式={result['mode']}｜有效票數={result['valid_vote_count']}")
 
 
 
