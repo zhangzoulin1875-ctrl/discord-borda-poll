@@ -18359,6 +18359,97 @@ def _compute_tally(ballots: dict, legend: dict, mode: str) -> dict:
     return scores
 
 
+def _looks_like_possible_ballot(content: str, found: list, legend: dict) -> bool:
+    """便宜的預篩：判斷這則訊息值不值得花 AI 額度去做逐訊息智能判讀。
+    避免對純聊天/純圖片（完全沒有文字、或內容太短不像選票）也呼叫 AI，
+    浪費資源；但只要有一點點「可能是選票」的訊號，就寧可花這次 AI 呼叫，
+    也不要用格式規則直接錯殺一張完整的票。"""
+    stripped = (content or "").strip()
+    if not stripped:
+        return False  # 純圖片/貼圖，完全沒有文字內容，AI 也判讀不出東西
+    if len(stripped) < 4 and not found:
+        return False  # 太短又完全沒抓到任何代碼，不像選票（例如「ok」、單個字）
+    if found:
+        return True  # regex 已經抓到至少幾個合法代碼，很可能是投票，值得讓 AI 判讀救回完整票
+    if re.search(r'\d', stripped):
+        return True  # 訊息裡有數字，可能是名次編號只是格式跟 regex 預期的不完全一樣
+    for name in legend.values():
+        if name and name in stripped:
+            return True  # 提到候選人全名，很可能就是在投票
+    return False
+
+
+async def _ai_judge_ballot(content: str, legend: dict, n_candidates: int) -> dict:
+    """AI 逐訊息智能判讀一則論壇回覆是否為完整有效的排序選票（波達計數法）。
+    不只依賴格式規則（半形/全形數字字母、有沒有打句點、代碼跟候選人全名是否
+    黏在一起等），而是真正理解語意去抓出投票者「從第1名到最後一名」的完整
+    排序意圖——這樣才不會因為投票者漏打一個句點、用了全形字元，或把代碼跟
+    國名寫在一起，就把一張完整有效的票錯殺成廢票或閒聊噪音。
+
+    回傳 {"is_vote": bool, "ranking": [代碼,...], "complete": bool, "reason": str}
+    這是行政功能（正式選舉計票），使用 fallback_mode="full"（主 API 故障時
+    直接切換備援 API，不受聊天限速/每日配額限制），確保計票結果可靠。"""
+    fallback = {"is_vote": False, "ranking": [], "complete": False, "reason": "AI 判讀失敗或未設定 AI，保留原判定"}
+    if not chat_ai_settings.get("api_url") or not chat_ai_settings.get("api_key"):
+        return fallback
+
+    candidate_list = "\n".join(f"{code} = {name}" for code, name in legend.items())
+    prompt = (
+        f"這是一場排序偏好投票（波達計數法），共有 {n_candidates} 位候選人，代碼對照如下：\n"
+        f"{candidate_list}\n\n"
+        "請判讀以下這則論壇回覆訊息，抓出投票者「從第1名到最後一名」完整的候選人代碼排序。\n\n"
+        "重要規則：\n"
+        "1. 訊息格式可能不規則——半形或全形數字/字母、漏打句點或其他分隔符號、"
+        "代碼跟候選人全名黏在一起寫（例如「1.e厂万共和國」或「1e厂万共和國」）、"
+        "多餘的空白、暱稱、國名重複等。只要人類讀者能清楚看懂「第幾名選了誰」，"
+        "就要判定為合法格式並正確抓出來，不要因為格式瑕疵就判定失敗。\n"
+        f"2. 只有在「明顯真的沒有排完全部 {n_candidates} 位候選人」（少了幾位、"
+        "代碼寫錯到完全對不到任何候選人、或訊息根本不是選票，只是閒聊/純圖片沒有文字）"
+        "時，才視為不完整或不是選票。\n"
+        "3. 絕對不要自己「補完」或「猜測」缺漏的名次——沒被明確提到的候選人就是沒排到，"
+        "不要因為想湊滿而亂猜順序。\n\n"
+        "只回覆 JSON（不要加 markdown code block、不要有其他文字），格式：\n"
+        '{"is_vote": true/false, "ranking": ["代碼1","代碼2","...按名次順序排列到最後一名"], '
+        '"complete": true/false, "reason": "簡短說明（尤其是判定不完整/非選票的原因）"}\n\n'
+        f"訊息內容：\n\"\"\"\n{content[:1500]}\n\"\"\""
+    )
+    try:
+        msg = await call_chat_api(
+            [
+                {"role": "system", "content": "你是嚴謹的選票判讀助手，只回覆 JSON，不要有其他文字。"},
+                {"role": "user", "content": prompt},
+            ],
+            chat_ai_settings,
+            max_tokens=500,
+            timeout_total=40,
+            timeout_read=30,
+            is_background=True,
+            fallback_mode="full",  # 行政功能（正式選舉計票）— 主 API 故障直接切備援，不受聊天限速影響
+        )
+        raw = (msg.get("content") or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = json_module.loads(raw)
+        ranking_raw = parsed.get("ranking", []) or []
+        ranking = []
+        seen = set()
+        for code in ranking_raw:
+            code_up = str(code).upper().strip()
+            if code_up in legend and code_up not in seen:
+                seen.add(code_up)
+                ranking.append(code_up)
+        is_complete = bool(parsed.get("complete", False)) and len(ranking) == n_candidates
+        return {
+            "is_vote": bool(parsed.get("is_vote", False)),
+            "ranking": ranking,
+            "complete": is_complete,
+            "reason": str(parsed.get("reason", ""))[:200],
+        }
+    except Exception as e:
+        print(f"⚠️ AI 選票判讀失敗：{e}")
+        return fallback
+
+
 async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", mode_override: str = "auto"):
     """核心計票流程。回傳一個 dict，包含所有計票結果與統計資訊，供指令與後續公佈使用。"""
     # 1. 取得原po內容
@@ -18409,6 +18500,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
     disputed = []          # 有爭議的投票（單選卻填多個選項等）
     spoiled = []           # 排序投票但沒填完整/代碼有誤的廢票
     excluded_announcements = []  # 明確排除的「開票/計票結果公告」訊息
+    ai_recovered = []      # 格式有瑕疵、靠 AI 逐訊息智能判讀救回來的完整票（供複核透明度）
 
     # 主席/秘書處在投票結束後，通常會在同一個貼文串裡回覆公佈人工計票結果
     # （例如列出每個候選人的總分/總票數，最後宣布誰當選）。這種訊息長得很像
@@ -18430,6 +18522,39 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
             })
             continue
         found = _extract_vote_tokens(content, legend_keys, token_type)
+
+        # ── AI 逐訊息智能判讀（不只看格式）──
+        # 純規則 regex 只認得固定格式（半形數字+固定分隔符號+半形字母代碼）。
+        # 但真實投票訊息很雜：全形數字/字母、漏打句點、代碼跟候選人全名黏在
+        # 一起寫等等，光靠格式規則永遠在追加新的例外情況、還是會錯殺一些
+        # 語意上完全清楚、完整的票。所以 ranked 模式下，只要 regex 沒有剛好
+        # 抓到全部 n 個代碼，且這則訊息看起來有點像選票（不是純聊天/純圖片），
+        # 就交給 AI 逐則重新判讀語意，而不是直接認定為廢票或閒聊噪音。
+        if (
+            final_mode == "ranked"
+            and n_candidates > 0
+            and len(found) != n_candidates
+            and _looks_like_possible_ballot(content, found, legend)
+        ):
+            ai_result = await _ai_judge_ballot(content, legend, n_candidates)
+            if ai_result["is_vote"] and ai_result["complete"]:
+                found = ai_result["ranking"]
+                ai_recovered.append({
+                    "author": msg.author.display_name,
+                    "content": content[:80],
+                    "note": "規則比對格式抓不全，AI 逐訊息判讀後確認為完整排序票",
+                })
+            elif ai_result["is_vote"]:
+                spoiled.append({
+                    "author": msg.author.display_name,
+                    "content": content[:80],
+                    "reason": f"AI 判讀：{ai_result['reason'] or '排序不完整'}",
+                })
+                continue
+            else:
+                skipped_count += 1
+                continue
+
         if not found:
             skipped_count += 1
             continue
@@ -18476,6 +18601,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
         "disputed": disputed,
         "spoiled": spoiled,
         "excluded_announcements": excluded_announcements,
+        "ai_recovered": ai_recovered,
         "thread_id": thread.id,
         "thread_name": thread.name,
     }
@@ -18514,10 +18640,13 @@ def _build_tally_embed(result: dict) -> discord.Embed:
 
     spoiled = result.get("spoiled", [])
     excluded_ann = result.get("excluded_announcements", [])
+    ai_recovered = result.get("ai_recovered", [])
     stats_lines = [
         f"✅ 有效投票：{result['valid_vote_count']} 筆",
         f"🚫 已過濾閒聊/圖片/無效訊息：{result['skipped_count']} 筆",
     ]
+    if ai_recovered:
+        stats_lines.append(f"🤖 AI 判讀救回的票（格式有瑕疵但排序完整）：{len(ai_recovered)} 筆")
     if spoiled:
         stats_lines.append(f"🗑️ 廢票（未完整排序/代碼有誤）：{len(spoiled)} 筆")
     if excluded_ann:
@@ -18525,6 +18654,12 @@ def _build_tally_embed(result: dict) -> discord.Embed:
     if result["disputed"]:
         stats_lines.append(f"⚠️ 有爭議訊息：{len(result['disputed'])} 筆（需人工複核）")
     embed.add_field(name="統計", value="\n".join(stats_lines), inline=False)
+
+    if ai_recovered:
+        recovered_lines = [f"• {d['author']}：{d['note']}" for d in ai_recovered[:8]]
+        if len(ai_recovered) > 8:
+            recovered_lines.append(f"…等共 {len(ai_recovered)} 筆")
+        embed.add_field(name="🤖 AI 判讀救回明細（已計入正式票數）", value="\n".join(recovered_lines)[:1024], inline=False)
 
     if spoiled:
         spoiled_lines = [
