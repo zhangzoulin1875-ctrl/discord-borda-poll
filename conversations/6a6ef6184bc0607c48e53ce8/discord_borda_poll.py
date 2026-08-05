@@ -2994,41 +2994,122 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     _used_fallback = False    # whether the backup API was used
     _diag = []                # diagnostic events for AI log embed
 
-    async def _post(payload, _tt=None, _tr=None):
-        """Streaming-aware POST: always uses stream=True to keep the
-        connection alive on slow endpoints. Creates a FRESH session per
-        call (like the briefing function does) to avoid any session-level
-        timeout interference from _shared_session. The sock_read timeout
-        only applies BETWEEN chunks — once the first chunk arrives, the
-        timer resets. Defaults to whatever time is left in the PRIMARY
-        phase (deadline minus the reserved backup-API slice), capped to
-        _max_single_attempt, so retries/model-downgrades can't each claim
-        the whole remaining budget for themselves and starve both each
-        other and the backup API reserved after them."""
-        payload = {**payload, "stream": True}
-        _budget = _tt if _tt is not None else min(_remaining_primary(), _max_single_attempt)
-        _read_budget = _tr if _tr is not None else min(timeout_read, _budget)
-        # FIX：串流模式下不要用 aiohttp 的 total timeout——它會在 _budget
-        # 秒後硬殺連線，即使串流正在正常逐 chunk 生成 token 也照殺不誤，
-        # 導致「主模型明明有回應、只生成十幾個 token 就被切斷」的問題。
-        # 改用 total=None（不設總時限），只靠 sock_read 做斷線偵測：
-        # sock_read 是「兩次 chunk 之間的等待上限」，只要 chunk 持續到達
-        # 就不會觸發。把 sock_read 至少給 8 秒——reasoning 模型（如
-        # deepseek-r1 風格）在生成途中會有思考停頓，4 秒太短會誤殺。
-        # 整體時限由 _read_stream 裡的 _deadline 顯式檢查來控制。
-        t = aiohttp.ClientTimeout(total=None, connect=min(10, _budget), sock_read=max(8, _read_budget))
-        # Always create a fresh session — no session-level timeout to interfere.
-        # Background callers queue behind the shared throttle so they can't
-        # pile onto the provider alongside a live chat request; live chat
-        # (is_background=False) always goes straight through.
+    async def _do_non_stream_post(url, pl, timeout):
+        """Non-streaming POST: sends stream=False, reads the full JSON
+        response in one shot. Returns (status, json_body_string) just like
+        _read_stream does — a (200, json_string) on success, (status,
+        error_text) on failure."""
         if is_background:
             async with _AI_BG_SEMAPHORE:
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
+                    async with session.post(url, json=pl, headers=headers, timeout=timeout) as resp:
+                        if resp.status != 200:
+                            err = await resp.text()
+                            print(f"⚠️ 非串流 POST status={resp.status}: {err[:200]}")
+                            if resp.status == 403 and "anomalous" in err.lower():
+                                _ai_circuit_trip()
+                            return resp.status, err
+                        body = await resp.text()
+                        # Verify it's valid JSON with choices
+                        try:
+                            data = json_module.loads(body)
+                            if "choices" in data:
+                                msg = data["choices"][0].get("message", {})
+                                # Strip reasoning_content if present
+                                if "reasoning_content" in msg:
+                                    msg.pop("reasoning_content", None)
+                                return 200, json_module.dumps(data)
+                        except Exception:
+                            pass
+                        return 200, body  # might still be parseable downstream
+        else:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=pl, headers=headers, timeout=timeout) as resp:
+                    if resp.status != 200:
+                        err = await resp.text()
+                        print(f"⚠️ 非串流 POST status={resp.status}: {err[:200]}")
+                        if resp.status == 403 and "anomalous" in err.lower():
+                            _ai_circuit_trip()
+                        return resp.status, err
+                    body = await resp.text()
+                    try:
+                        data = json_module.loads(body)
+                        if "choices" in data:
+                            msg = data["choices"][0].get("message", {})
+                            if "reasoning_content" in msg:
+                                msg.pop("reasoning_content", None)
+                            return 200, json_module.dumps(data)
+                    except Exception:
+                        pass
+                    return 200, body
+
+    async def _post(payload, _tt=None, _tr=None):
+        """Non-streaming-first POST.
+
+        ── FIX：非串流優先 ──
+        用戶反映「測試時明明 deepseek 正常，但聊天時一直降級」。根因：
+        dashboard 的「完整行政測試」用的是非串流 (stream=False) + 30 秒
+        timeout——DeepSeek 處理完提示後直接回傳完整 JSON，穩穩成功。
+        但聊天的 call_chat_api 走的是串流模式 (stream=True)，串流需要
+        逐 chunk 讀取 SSE，大模型（如 deepseek-v4-pro）在生成前的
+        「思考」期間不吐 chunk，如果這段靜默期超過 sock_read 或 _deadline
+        限制，連線就被判定為失敗 → 觸發降級鏈 → 換到備援 API，明明
+        模型完全正常、只是需要多幾秒思考。
+
+        修正：改為非串流優先（跟測試一樣），串流作為備援。非串流模式
+        不依賴 SSE 逐 chunk 時序——API 處理完就一次回傳完整 JSON，只要
+        total timeout 足夠就好，沒有「chunk 間靜默被誤殺」的問題。
+
+        串流備援仍然保留：如果非串流 timeout（某些 API 供應商在長回應
+        時非串流會被 CDN/代理層先斷線），才改用串流模式，靠 SSE keep-alive
+        維持連線。"""
+        _budget = _tt if _tt is not None else min(_remaining_primary(), _max_single_attempt)
+        _read_budget = _tr if _tr is not None else min(timeout_read, _budget)
+
+        # ── 第一步：非串流 ──
+        payload_ns = {**payload, "stream": False}
+        payload_ns.pop("stream_options", None)  # non-streaming doesn't need this
+        _ns_budget = min(_budget, _remaining_primary(floor=2))
+        if _ns_budget >= 2:
+            t_ns = aiohttp.ClientTimeout(total=_ns_budget, connect=min(10, _ns_budget), sock_read=max(8, _ns_budget))
+            try:
+                status, body = await _do_non_stream_post(api_url, payload_ns, t_ns)
+                if status == 200:
+                    # Quick check: does it have actual content?
+                    try:
+                        data = json_module.loads(body)
+                        msg = data.get("choices", [{}])[0].get("message", {})
+                        if msg.get("content") or msg.get("tool_calls"):
+                            if use_tools:
+                                _tools_supported_apis.add(api_url)
+                                save_tools_supported()
+                            return status, body
+                        # 200 but empty content — fall through to streaming
+                        print(f"⚠️ 非串流回應為空，嘗試串流模式...")
+                    except Exception:
+                        return status, body  # can't parse, let upstream handle
+                else:
+                    print(f"⚠️ 非串流 POST 失敗 (status={status})，嘗試串流模式...")
+            except (asyncio.TimeoutError, Exception) as e:
+                print(f"⚠️ 非串流 POST 逾時/錯誤（{type(e).__name__}: {e}），嘗試串流模式...")
+        else:
+            print(f"⏱️ 非串流預算不足（{_ns_budget:.1f}s），直接走串流...")
+
+        # ── 第二步：串流備援 ──
+        payload_s = {**payload, "stream": True}
+        _s_budget = _remaining_primary(floor=1)
+        if _s_budget < 1:
+            # Primary phase is exhausted — let the outer deadline/degradation handle it
+            raise asyncio.TimeoutError("串流備援：剩餘時間不足")
+        t_s = aiohttp.ClientTimeout(total=None, connect=min(10, _s_budget), sock_read=max(8, _read_budget))
+        if is_background:
+            async with _AI_BG_SEMAPHORE:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(api_url, json=payload_s, headers=headers, timeout=t_s) as resp:
                         return await _read_stream(resp)
         else:
             async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload, headers=headers, timeout=t) as resp:
+                async with session.post(api_url, json=payload_s, headers=headers, timeout=t_s) as resp:
                     return await _read_stream(resp)
 
     async def _read_stream(resp):
