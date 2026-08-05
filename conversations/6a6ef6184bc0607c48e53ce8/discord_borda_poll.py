@@ -5935,23 +5935,27 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         att for att in message.attachments[:2]  # 最多處理 2 張圖
         if att.content_type and att.content_type.startswith("image/")
     ]
+
+    # Defined unconditionally (not just inside "if vision_model and image_atts")
+    # so it can ALSO be reused below for describing images in a message the
+    # user is replying to — not just the user's own message.
+    async def _describe_with_timeout(att):
+        try:
+            # Matches _describe_image's own 90s internal budget, plus a
+            # small margin — the inner aiohttp timeout should fire first
+            # in normal cases, this is just a hard outer safety net.
+            return await asyncio.wait_for(_describe_image(att.url, settings, _vision_diag=_vision_diag), timeout=95)
+        except asyncio.TimeoutError:
+            _vision_diag.append(f"📷 譖覺模型識圖逾時（>95s）")
+            print(f"⚠️ 視覺模型識圖逾時（>95s），此圖片將略過")
+            return ""
+        except Exception as e:
+            _vision_diag.append(f"📷 識圖子流程例外：{str(e)[:80]}")
+            print(f"⚠️ 識圖子流程錯誤：{e}")
+            return ""
+
     if vision_model and image_atts:
         print(f"📷 偵測到 {len(image_atts)} 張圖片附件，呼叫視覺模型 {vision_model} 識圖中...")
-
-        async def _describe_with_timeout(att):
-            try:
-                # Matches _describe_image's own 90s internal budget, plus a
-                # small margin — the inner aiohttp timeout should fire first
-                # in normal cases, this is just a hard outer safety net.
-                return await asyncio.wait_for(_describe_image(att.url, settings, _vision_diag=_vision_diag), timeout=95)
-            except asyncio.TimeoutError:
-                _vision_diag.append(f"📷 譖覺模型識圖逾時（>95s）")
-                print(f"⚠️ 視覺模型識圖逾時（>95s），此圖片將略過")
-                return ""
-            except Exception as e:
-                _vision_diag.append(f"📷 識圖子流程例外：{str(e)[:80]}")
-                print(f"⚠️ 識圖子流程錯誤：{e}")
-                return ""
 
         # Run all images concurrently instead of one-by-one — with 2 images,
         # sequential processing would double the worst-case wait; concurrent
@@ -5966,6 +5970,48 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             print(f"⚠️ 識圖流程跑完但沒有拿到任何描述（可能全部逾時或失敗）")
     elif image_atts and not vision_model:
         _vision_diag.append("📷 有圖片但視覺模型未設定，無法識圖")
+
+    # ── 回覆訊息上下文（含圖片）──
+    # 使用者常常是「回覆」某人的訊息後再 @ 提及機器人（例如：秘書長貼了一張圖
+    # 抱怨審美很雷，張作霖回覆那則訊息說「這圖怎麼樣」並 @ 機器人）。
+    # 之前只看得到使用者自己打的字，完全看不到被回覆的原始訊息內容/圖片，
+    # 導致 AI 答非所問。現在不管被回覆的人是誰（不只是回覆機器人自己），
+    # 都會把原始訊息的文字和圖片（呼叫視覺模型描述）一起讀進來當上下文。
+    reply_context = ""
+    if message.reference and message.reference.message_id:
+        try:
+            _ref_msg = message.reference.resolved
+            if _ref_msg is None or isinstance(_ref_msg, discord.DeletedReferencedMessage):
+                _ref_msg = await message.channel.fetch_message(message.reference.message_id)
+            if _ref_msg:
+                _ref_author = "機器人自己" if _ref_msg.author.id == bot_id else _ref_msg.author.display_name
+                _ref_text = (_ref_msg.content or "").strip()
+                _ref_image_atts = [
+                    att for att in _ref_msg.attachments[:2]
+                    if att.content_type and att.content_type.startswith("image/")
+                ]
+                if _ref_image_atts:
+                    if vision_model:
+                        print(f"📷 被回覆的訊息含 {len(_ref_image_atts)} 張圖片，一併呼叫視覺模型識圖...")
+                        _ref_descs = await asyncio.gather(*[_describe_with_timeout(att) for att in _ref_image_atts])
+                        for _d in _ref_descs:
+                            if _d:
+                                _ref_text += f"\n[圖片：{_d}]"
+                        if not any(_ref_descs):
+                            _ref_text += "\n[圖片（識圖失敗或逾時）]"
+                    else:
+                        _ref_text += "\n[圖片（未設定視覺模型，無法分析）]"
+                if _ref_text.strip():
+                    reply_context = (
+                        f"\n\n─── 使用者正在回覆的訊息（來自 {_ref_author}）───\n"
+                        f"使用者這則訊息是在 Discord 上「回覆」下面這則訊息，"
+                        f"請理解使用者的話是針對這則被回覆的訊息說的，不要當作獨立的一句話來理解：\n"
+                        f"{_ref_text[:1000]}"
+                    )
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f"⚠️ 讀取被回覆訊息失敗：{e}")
 
     # ── Discord 連結解析 ──
     # If the user's message contains Discord jump URLs, fetch the actual
@@ -6247,6 +6293,10 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             f"使用者傳送了圖片，以下是視覺模型對圖片內容的描述。"
             f"請參考這些描述來回覆使用者的問題或回應圖片內容：\n{image_context}"
         )
+
+    # ── 注入「被回覆的訊息」到 system prompt ──
+    if reply_context:
+        system_prompt += reply_context
 
     # ── CONDITIONAL TOOLS: if auto-context already found rich data, skip
     # tools entirely → single AI round (saves a full 7-15s round-trip on slow
