@@ -1508,6 +1508,11 @@ chat_ai_settings = {
     "fallback_api_key": "",         # 備援 API Key
     "fallback_model": "",          # 備援模型名稱
     "fallback_daily_limit": 10,    # 備援模式下每位用戶每日對話上限
+    "fallback_rate_per_min": 6,    # 備援 API 每分鐘聊天請求上限
+    "fallback_daily_limit_msg": "⚠️ 你的今日備援 API 用量已達上限，為了節省備援資源給重要的行政功能，聊天備援暫時關閉。主要 API 恢復後即可正常使用～",
+    "fallback_rate_limit_msg": "⚠️ 備援 API 請求過於頻繁，請稍等一下再試～",
+    "entertainment_unavailable_msg": "🔧 AI 系統暫時維護中，娛樂功能暫時關閉，請稍後再試～",
+    "circuit_cooldown_msg": "🔌 AI API 目前被供應商暫時封鎖（anomalous behavior），已自動暫停請求，將在約 2 分鐘後重試。",
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -1963,14 +1968,17 @@ def _is_api_unavailable(error_str: str) -> bool:
         return False
     return any(code in str(error_str) for code in ["503", "502", "500", "504", "Service Unavailable", "service_unavailable"])
 
-_ENTERTAINMENT_UNAVAILABLE_MSG = "🔧 AI 系統暫時維護中，娛樂功能暫時關閉，請稍後再試～"
+_ENTERTAINMENT_UNAVAILABLE_MSG_DEFAULT = "🔧 AI 系統暫時維護中，娛樂功能暫時關閉，請稍後再試～"
 
-def _check_fallback_chat_rate():
+def _get_entertainment_unavailable_msg():
+    return chat_ai_settings.get("entertainment_unavailable_msg", _ENTERTAINMENT_UNAVAILABLE_MSG_DEFAULT)
+
+def _check_fallback_chat_rate(limit: int = 6):
     """Sliding-window rate limiter for chat fallback API usage.
     Returns True if a new request is allowed, False if rate limit exceeded."""
     now = _time.time()
     _fallback_chat_timestamps[:] = [t for t in _fallback_chat_timestamps if now - t < 60]
-    if len(_fallback_chat_timestamps) >= _FALLBACK_CHAT_RATE_PER_MIN:
+    if len(_fallback_chat_timestamps) >= limit:
         return False
     _fallback_chat_timestamps.append(now)
     return True
@@ -2002,7 +2010,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     if not _ai_circuit_check():
         remaining = _ai_circuit_breaker["cooldown_seconds"] - (_time.time() - _ai_circuit_breaker["trip_time"])
         print(f"🚫 AI 熔斷器開啟中，跳過請求（剩餘冷卻 {remaining:.0f}s）")
-        return {"content": "", "error": AI_CIRCUIT_COOLDOWN_MSG, "circuit_open": True}
+        return {"content": "", "error": _get_circuit_cooldown_msg(), "circuit_open": True}
 
     headers = {
         "Authorization": f"Bearer {settings['api_key']}",
@@ -2324,7 +2332,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # If the circuit breaker tripped during a previous attempt's 403,
         # stop retrying — further attempts will just hit the same block.
         if not _ai_circuit_check():
-            return {"content": "", "error": AI_CIRCUIT_COOLDOWN_MSG, "circuit_open": True}
+            return {"content": "", "error": _get_circuit_cooldown_msg(), "circuit_open": True}
         # ── Deadline guard: don't even START a retry if there isn't
         # meaningfully enough time left for a network round-trip. This is
         # what actually caps total wall-clock time at ~timeout_total — without
@@ -2340,7 +2348,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             # If the circuit breaker just tripped (403 anomalous), don't retry
             if _ai_circuit_breaker["tripped"]:
                 print(f"🚫 AI 熔斷器因 403 觸發，停止重試")
-                return {"content": "", "error": AI_CIRCUIT_COOLDOWN_MSG, "circuit_open": True}
+                return {"content": "", "error": _get_circuit_cooldown_msg(), "circuit_open": True}
             if _attempt_i == 0 and _remaining() >= 1.5:
                 print(f"⚠️ Chat AI 呼叫失敗（{e}），重試一次（剩餘 {_remaining():.1f}s）...")
                 continue
@@ -2374,8 +2382,11 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         if _is_provider_error:
             # Rate limiter for chat fallback (gate 1)
             _fb_gate_ok = True
-            if fallback_mode == "rate_limited" and not _check_fallback_chat_rate():
-                print(f"⚠️ 備援 API 速率限制（{_FALLBACK_CHAT_RATE_PER_MIN}/min），聊天備援請求被拒絕")
+            _fb_rate_limit = settings.get("fallback_rate_per_min", 6)
+            if fallback_mode == "rate_limited" and not _check_fallback_chat_rate(_fb_rate_limit):
+                _fb_rate_msg = settings.get("fallback_rate_limit_msg", "⚠️ 備援 API 請求過於頻繁，請稍等一下再試～")
+                print(f"⚠️ 備援 API 速率限制（{_fb_rate_limit}/min），聊天備援請求被拒絕")
+                return {"content": _fb_rate_msg, "error": "rate_limit_exceeded"}
                 _fb_gate_ok = False
 
             # Daily per-user quota (gate 2) — only applies to rate_limited mode
@@ -2383,7 +2394,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                 _daily_limit = settings.get("fallback_daily_limit", 10)
                 if not _check_fallback_daily_limit(fallback_user_id, _daily_limit):
                     print(f"⚠️ 備援 API 每日上限已達（用戶 {fallback_user_id}，上限 {_daily_limit}/天）")
-                    return {"content": FALLBACK_DAILY_LIMIT_MSG, "error": "daily_limit_exceeded"}
+                    _fb_daily_msg = settings.get("fallback_daily_limit_msg", FALLBACK_DAILY_LIMIT_MSG)
+                    return {"content": _fb_daily_msg, "error": "daily_limit_exceeded"}
                 else:
                     _daily_remaining = _get_fallback_daily_remaining(fallback_user_id, _daily_limit)
                     print(f"✅ 備援 API 每日配額通過（用戶 {fallback_user_id}，今日剩餘 {_daily_remaining}/{_daily_limit}）")
@@ -2873,6 +2885,9 @@ _ai_circuit_breaker: dict = {
 }
 
 AI_CIRCUIT_COOLDOWN_MSG = "🔌 AI API 目前被供應商暫時封鎖（anomalous behavior），已自動暫停請求，將在約 2 分鐘後重試。"
+
+def _get_circuit_cooldown_msg():
+    return chat_ai_settings.get("circuit_cooldown_msg", AI_CIRCUIT_COOLDOWN_MSG)
 
 def _ai_circuit_check() -> bool:
     """Return True if calls are ALLOWED (breaker closed or cooldown expired).
@@ -5453,6 +5468,11 @@ async def api_get_chat_ai_settings(request):
         "fallback_api_key_masked": (lambda k: k[:6]+"..."+k[-4:] if len(k)>10 else ("***" if k else ""))(chat_ai_settings.get("fallback_api_key", "")),
         "fallback_model": chat_ai_settings.get("fallback_model", ""),
         "fallback_daily_limit": chat_ai_settings.get("fallback_daily_limit", 10),
+        "fallback_rate_per_min": chat_ai_settings.get("fallback_rate_per_min", 6),
+        "fallback_daily_limit_msg": chat_ai_settings.get("fallback_daily_limit_msg", ""),
+        "fallback_rate_limit_msg": chat_ai_settings.get("fallback_rate_limit_msg", ""),
+        "entertainment_unavailable_msg": chat_ai_settings.get("entertainment_unavailable_msg", ""),
+        "circuit_cooldown_msg": chat_ai_settings.get("circuit_cooldown_msg", ""),
     })
 
 
@@ -5517,6 +5537,16 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["fallback_model"] = body["fallback_model"]
     if "fallback_daily_limit" in body:
         chat_ai_settings["fallback_daily_limit"] = int(body["fallback_daily_limit"])
+    if "fallback_rate_per_min" in body:
+        chat_ai_settings["fallback_rate_per_min"] = int(body["fallback_rate_per_min"])
+    if "fallback_daily_limit_msg" in body:
+        chat_ai_settings["fallback_daily_limit_msg"] = body["fallback_daily_limit_msg"]
+    if "fallback_rate_limit_msg" in body:
+        chat_ai_settings["fallback_rate_limit_msg"] = body["fallback_rate_limit_msg"]
+    if "entertainment_unavailable_msg" in body:
+        chat_ai_settings["entertainment_unavailable_msg"] = body["entertainment_unavailable_msg"]
+    if "circuit_cooldown_msg" in body:
+        chat_ai_settings["circuit_cooldown_msg"] = body["circuit_cooldown_msg"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -14522,7 +14552,7 @@ class NationGroup(app_commands.Group):
 
         if "error" in result:
             if _is_api_unavailable(result["error"]):
-                await interaction.followup.send(_ENTERTAINMENT_UNAVAILABLE_MSG)
+                await interaction.followup.send(_get_entertainment_unavailable_msg())
             else:
                 await interaction.followup.send(f"❌ 評價失敗：{result['error']}")
             return
@@ -14871,7 +14901,7 @@ async def _analyze_user(user_name: str, messages: list, ai_settings: dict) -> di
     except Exception as e:
         print(f"⚠️ 用戶分析 AI 呼叫失敗：{e}")
         if _is_api_unavailable(str(e)):
-            return {"error": _ENTERTAINMENT_UNAVAILABLE_MSG}
+            return {"error": _get_entertainment_unavailable_msg()}
         return {"error": "AI 暫時沒有給出有效回覆，稍後再試一次應該就能過"}
 
 
@@ -14913,7 +14943,7 @@ class AnalyzeGroup(app_commands.Group):
 
         if "error" in result:
             if _is_api_unavailable(result.get("error", "")):
-                await interaction.followup.send(_ENTERTAINMENT_UNAVAILABLE_MSG)
+                await interaction.followup.send(_get_entertainment_unavailable_msg())
             else:
                 await interaction.followup.send(f"❌ 分析失敗：{result['error']}")
             return
