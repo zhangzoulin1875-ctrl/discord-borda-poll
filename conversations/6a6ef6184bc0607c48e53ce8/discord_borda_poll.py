@@ -1509,6 +1509,7 @@ chat_ai_settings = {
     "fallback_model": "",          # 備援模型名稱
     "fallback_daily_limit": 10,    # 備援模式下每位用戶每日對話上限
     "fallback_rate_per_min": 6,    # 備援 API 每分鐘聊天請求上限
+    "fallback_owner_exempt": True,  # 機器人擁有者豁免備援限速與每日配額
     "fallback_daily_limit_msg": "⚠️ 你的今日備援 API 用量已達上限，為了節省備援資源給重要的行政功能，聊天備援暫時關閉。主要 API 恢復後即可正常使用～",
     "fallback_rate_limit_msg": "⚠️ 備援 API 請求過於頻繁，請稍等一下再試～",
     "entertainment_unavailable_msg": "🔧 AI 系統暫時維護中，娛樂功能暫時關閉，請稍後再試～",
@@ -2380,17 +2381,22 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         "逾時", "Connection", "connection"]
         )
         if _is_provider_error:
+            # Owner exemption — skip rate limit AND daily quota for the bot
+            # owner so they're never throttled by their own bot's fallback limits
+            _owner_exempt = settings.get("fallback_owner_exempt", True) and str(BOT_OWNER_ID) == fallback_user_id
+            if _owner_exempt:
+                print(f"👑 擁有者豁免備援限速與配額（用戶 {fallback_user_id}）")
+
             # Rate limiter for chat fallback (gate 1)
             _fb_gate_ok = True
             _fb_rate_limit = settings.get("fallback_rate_per_min", 6)
-            if fallback_mode == "rate_limited" and not _check_fallback_chat_rate(_fb_rate_limit):
+            if not _owner_exempt and fallback_mode == "rate_limited" and not _check_fallback_chat_rate(_fb_rate_limit):
                 _fb_rate_msg = settings.get("fallback_rate_limit_msg", "⚠️ 備援 API 請求過於頻繁，請稍等一下再試～")
                 print(f"⚠️ 備援 API 速率限制（{_fb_rate_limit}/min），聊天備援請求被拒絕")
                 return {"content": _fb_rate_msg, "error": "rate_limit_exceeded"}
-                _fb_gate_ok = False
 
             # Daily per-user quota (gate 2) — only applies to rate_limited mode
-            if _fb_gate_ok and fallback_mode == "rate_limited" and fallback_user_id:
+            if not _owner_exempt and _fb_gate_ok and fallback_mode == "rate_limited" and fallback_user_id:
                 _daily_limit = settings.get("fallback_daily_limit", 10)
                 if not _check_fallback_daily_limit(fallback_user_id, _daily_limit):
                     print(f"⚠️ 備援 API 每日上限已達（用戶 {fallback_user_id}，上限 {_daily_limit}/天）")
@@ -5602,6 +5608,7 @@ async def api_get_chat_ai_settings(request):
         "fallback_model": chat_ai_settings.get("fallback_model", ""),
         "fallback_daily_limit": chat_ai_settings.get("fallback_daily_limit", 10),
         "fallback_rate_per_min": chat_ai_settings.get("fallback_rate_per_min", 6),
+        "fallback_owner_exempt": chat_ai_settings.get("fallback_owner_exempt", True),
         "fallback_daily_limit_msg": chat_ai_settings.get("fallback_daily_limit_msg", ""),
         "fallback_rate_limit_msg": chat_ai_settings.get("fallback_rate_limit_msg", ""),
         "entertainment_unavailable_msg": chat_ai_settings.get("entertainment_unavailable_msg", ""),
@@ -5672,6 +5679,8 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["fallback_daily_limit"] = int(body["fallback_daily_limit"])
     if "fallback_rate_per_min" in body:
         chat_ai_settings["fallback_rate_per_min"] = int(body["fallback_rate_per_min"])
+    if "fallback_owner_exempt" in body:
+        chat_ai_settings["fallback_owner_exempt"] = bool(body["fallback_owner_exempt"])
     if "fallback_daily_limit_msg" in body:
         chat_ai_settings["fallback_daily_limit_msg"] = body["fallback_daily_limit_msg"]
     if "fallback_rate_limit_msg" in body:

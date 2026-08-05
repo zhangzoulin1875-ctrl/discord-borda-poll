@@ -285,6 +285,13 @@
             <input id="ai-fallback-daily-limit" type="number" min="1" max="999" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="10">
             <label class="block text-sm text-gray-400 mb-1">每分鐘備援請求上限（聊天用）</label>
             <input id="ai-fallback-rate-per-min" type="number" min="1" max="60" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="6">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <p class="text-sm">擁有者豁免限速與配額</p>
+                <p class="text-xs text-gray-400">開啟時，機器人擁有者不受備援限速和每日配額限制</p>
+              </div>
+              <label class="toggle"><input type="checkbox" id="ai-fallback-owner-exempt"><span class="toggle-slider"></span></label>
+            </div>
             <label class="block text-sm text-gray-400 mb-1">每日用量上限罐頭訊息</label>
             <textarea id="ai-fallback-daily-limit-msg" rows="2" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm resize-none" placeholder="⚠️ 你的今日備援 API 用量已達上限..."></textarea>
             <label class="block text-sm text-gray-400 mb-1">速率限制罐頭訊息</label>
@@ -702,6 +709,7 @@ async function showChatAIPanel() {
   document.getElementById('ai-fallback-model').value = s.fallback_model || '';
   document.getElementById('ai-fallback-daily-limit').value = s.fallback_daily_limit || 10;
   document.getElementById('ai-fallback-rate-per-min').value = s.fallback_rate_per_min || 6;
+  document.getElementById('ai-fallback-owner-exempt').checked = s.fallback_owner_exempt ?? true;
   document.getElementById('ai-fallback-daily-limit-msg').value = s.fallback_daily_limit_msg || '';
   document.getElementById('ai-fallback-rate-limit-msg').value = s.fallback_rate_limit_msg || '';
   document.getElementById('ai-entertainment-unavailable-msg').value = s.entertainment_unavailable_msg || '';
@@ -738,6 +746,7 @@ async function saveChatAISettings() {
     fallback_model: document.getElementById('ai-fallback-model').value.trim(),
     fallback_daily_limit: parseInt(document.getElementById('ai-fallback-daily-limit').value) || 10,
     fallback_rate_per_min: parseInt(document.getElementById('ai-fallback-rate-per-min').value) || 6,
+    fallback_owner_exempt: document.getElementById('ai-fallback-owner-exempt').checked,
     fallback_daily_limit_msg: document.getElementById('ai-fallback-daily-limit-msg').value.trim(),
     fallback_rate_limit_msg: document.getElementById('ai-fallback-rate-limit-msg').value.trim(),
     entertainment_unavailable_msg: document.getElementById('ai-entertainment-unavailable-msg').value.trim(),
