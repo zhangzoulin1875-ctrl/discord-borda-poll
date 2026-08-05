@@ -18933,8 +18933,7 @@ _turtle_soup_state = {
     "max_questions": 20,   # 最大提問次數
     "questions_used": 0,    # 已用提問次數
     "qa_history": [],       # [{"q": "他死了嗎？", "a": "是", "asked_by": "張三"}, ...]
-    "consecutive_miss": 0,  # 連續「不是」或「無關」次數（防卡關用）
-    "extra_time_used": False,  # 是否已用過加時 (+5)
+        "extra_time_used": False,  # 是否已用過加時 (+5)
     "hint_panel_active": False,  # 提示按鈕面板是否正在等待玩家選擇
     "game_msg_id": None,    # 遊戲進行中的主訊息 ID
     "channel_id": None,     # 當前遊戲所在頻道 ID
@@ -19136,7 +19135,7 @@ async def _judge_turtle_soup_question(question: str, truth: str, qa_history: lis
         return "無關"
 
 # ── AI 防卡關線索 ──
-TURTLE_SOUP_HINT_PROMPT = """你是一個海龜湯遊戲的主持人。玩家們已經連續問了5個問題但都沒有進展（全部是「不是」或「無關」）。
+TURTLE_SOUP_HINT_PROMPT = """你是一個海龜湯遊戲的主持人。玩家們需要提示。
 
 【湯底】
 {truth}
@@ -19144,22 +19143,26 @@ TURTLE_SOUP_HINT_PROMPT = """你是一個海龜湯遊戲的主持人。玩家們
 【目前提問歷史】
 {qa_history}
 
-請給出一句「微小但不直接劇透的線索」，幫助玩家們打破僵局。
-要求：
-- 只給一句話，20-40字
-- 不能直接說出湯底
-- 要暗示一個玩家還沒問到的方向
-- 語氣輕鬆有趣
-"""
+【提示等級】{level}
+- 等級1（模糊）：給一句非常含蓄的暗示，20字以內。只暗示一個大方向（如「注意時間」「想想空間」），不提及任何具體細節。
+- 等級2（中等）：給一句中等暗示，20-40字。指出一個玩家還沒問到的具體面向（如「注意他出門前做了什麼」），但不說出答案。
+- 等級3（明顯）：給一句明顯暗示，40-60字。直接指向關鍵推理方向（如「這和他的職業有關，而且發生在特定節日」），接近答案但不直接說出。
+- 等級4+（直白）：給一句非常直白的暗示，60-80字。幾乎把答案的關鍵要素都點出來，只差沒有組合成完整句子。
 
-async def _generate_turtle_soup_hint(truth: str, qa_history: list) -> str:
-    """生成防卡關線索。"""
+【底線】不管哪個等級，都「不能直接說出湯底」。要引導方向，不能替代推理。
+
+請只輸出一句提示語，不要有任何其他文字。"""
+
+async def _generate_turtle_soup_hint(truth: str, qa_history: list, level: int = 1) -> str:
+    """生成防卡關線索。level 越高提示越明顯。"""
     history_text = "\n".join(
         f"Q: {qa['q']}\nA: {qa['a']}"
         for qa in qa_history[-15:]
     ) or "（尚無歷史）"
 
-    prompt = TURTLE_SOUP_HINT_PROMPT.format(truth=truth, qa_history=history_text)
+    prompt = TURTLE_SOUP_HINT_PROMPT.format(
+        truth=truth, qa_history=history_text, level=level,
+    )
 
     settings = {
         "api_url": chat_ai_settings["api_url"],
@@ -19190,8 +19193,20 @@ async def _generate_turtle_soup_hint(truth: str, qa_history: list) -> str:
 
 # ── Discord UI: 提示按鈕面板 ──
 class TurtleSoupHintView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+    def __init__(self, level: int = 1):
+        super().__init__(timeout=300)  # 5 分鐘內有效
+        self._level = level
+
+    async def on_timeout(self):
+        """超時後移除按鈕，保留訊息內容。"""
+        for child in self.children:
+            child.disabled = True
+        try:
+            # 嘗試更新第一個找到的訊息
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
 
     async def _give_hint(self, interaction: discord.Interaction, want_hint: bool):
         global _turtle_soup_state
@@ -19202,11 +19217,13 @@ class TurtleSoupHintView(discord.ui.View):
         if want_hint:
             try:
                 hint = await _generate_turtle_soup_hint(
-                    _turtle_soup_state["truth"], _turtle_soup_state["qa_history"]
+                    _turtle_soup_state["truth"], _turtle_soup_state["qa_history"],
+                    level=self._level,
                 )
-                _turtle_soup_state["hint_given"] = True
+                _turtle_soup_state["hints_given"] += 1
+                level_desc = {1: "模糊", 2: "中等", 3: "明顯", 4: "直白"}.get(self._level, "直白")
                 await interaction.response.edit_message(
-                    content=f"💡 **線索：** {hint}", view=None,
+                    content=f"💡 **線索（{level_desc}）：** {hint}", view=None,
                 )
             except Exception as e:
                 print(f"⚠️ Turtle soup hint generation failed: {e}")
@@ -19226,7 +19243,23 @@ class TurtleSoupHintView(discord.ui.View):
 # ── Discord UI: 加時按鈕面板 ──
 class TurtleSoupExtraTimeView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(timeout=300)  # 5 分鐘內有效
+
+    async def on_timeout(self):
+        """超時後自動放棄，公佈湯底。"""
+        global _turtle_soup_state
+        if _turtle_soup_state["active"] and not _turtle_soup_state["extra_time_used"]:
+            try:
+                if self.message:
+                    await self.message.edit(content="⏰ 加時時間已過，即將公佈湯底...", view=None)
+                # 找到遊戲頻道
+                ch_id = _turtle_soup_state.get("channel_id")
+                if ch_id:
+                    ch = bot.get_channel(ch_id)
+                    if ch:
+                        await _end_turtle_soup(ch, solved=False)
+            except Exception as e:
+                print(f"⚠️ Turtle soup extra time timeout error: {e}")
 
     @discord.ui.button(label="➕ 加時 +5 次", style=discord.ButtonStyle.success, custom_id="turtle_soup_extra_yes")
     async def extra_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -19281,14 +19314,13 @@ class TurtleSoupStartView(discord.ui.View):
             "max_questions": 0,
             "questions_used": 0,
             "qa_history": [],
-            "consecutive_miss": 0,
-            "game_msg_id": None,
+                        "game_msg_id": None,
             "channel_id": interaction.channel.id,
             "processing": False,
             "queue": [],
             "started_at": _time.time(),
             "starter_user_id": str(interaction.user.id),
-            "hint_given": False,
+            "hints_given": 0,
             "extra_time_used": False,
             "hint_panel_active": False,
         })
@@ -19516,12 +19548,6 @@ async def _process_turtle_soup_question(message, question, user_id, user_name):
             "asked_by": user_name,
         })
 
-        # 更新連續無進展計數（「不是」或「無關」都算）
-        if answer in ("不是", "無關"):
-            _turtle_soup_state["consecutive_miss"] += 1
-        else:
-            _turtle_soup_state["consecutive_miss"] = 0
-
         # 回覆玩家
         remaining = _turtle_soup_state["max_questions"] - _turtle_soup_state["questions_used"]
         answer_emoji = {
@@ -19534,15 +19560,18 @@ async def _process_turtle_soup_question(message, question, user_id, user_name):
 
         reply_text = f"{answer_emoji} **{answer}**\n📝 提問者：{user_name}｜剩餘提問：{remaining} 次"
 
-        # 防卡關：連續5次「不是」或「無關」→ 發送提示按鈕面板
-        if (_turtle_soup_state["consecutive_miss"] >= 5
-                and not _turtle_soup_state["hint_given"]
+        # 每 5 次提問就詢問是否需要提示
+        if (_turtle_soup_state["questions_used"] % 5 == 0
                 and not _turtle_soup_state["hint_panel_active"]
-                and answer != "答對了！恭喜破案！"):
+                and answer != "答對了！恭喜破案！"
+                and _turtle_soup_state["questions_used"] < _turtle_soup_state["max_questions"]):
             _turtle_soup_state["hint_panel_active"] = True
+            hint_level = min(_turtle_soup_state["hints_given"] + 1, 4)
+            level_desc = {1: "模糊", 2: "中等", 3: "明顯", 4: "直白"}.get(hint_level, "直白")
             await message.channel.send(
-                "🤔 連續 5 次沒有進展，需要提示嗎？",
-                view=TurtleSoupHintView(),
+                f"🤔 已用 {_turtle_soup_state['questions_used']} 次提問，需要提示嗎？\n"
+                f"（下次提示等級：{level_desc}）",
+                view=TurtleSoupHintView(level=hint_level),
             )
 
         await message.reply(reply_text, mention_author=False)
@@ -19642,11 +19671,10 @@ async def _end_turtle_soup(channel, solved: bool, winner: str = None):
         "active": False,
         "surface": "", "truth": "", "difficulty": "medium",
         "max_questions": 20, "questions_used": 0,
-        "qa_history": [], "consecutive_miss": 0,
-        "game_msg_id": None, "channel_id": None,
+        "qa_history": [],         "game_msg_id": None, "channel_id": None,
         "processing": False, "queue": [],
         "started_at": 0, "starter_user_id": None,
-        "hint_given": False,
+        "hints_given": 0,
         "extra_time_used": False,
         "hint_panel_active": False,
     }
@@ -21561,9 +21589,7 @@ def main():
 # Register persistent views for AI Chat Room buttons (survives bot restarts)
 bot.add_view(AIChatRoomPanelView())
 bot.add_view(AIChatRoomCloseView())
-bot.add_view(TurtleSoupStartView())
-bot.add_view(TurtleSoupHintView())
-bot.add_view(TurtleSoupExtraTimeView())
+bot.add_view(TurtleSoupStartView())  # 只有開始按鈕是持久化的
 
 bot.setup_hook = setup_hook
 
