@@ -2372,19 +2372,24 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         "逾時", "Connection", "connection"]
         )
         if _is_provider_error:
-            # Rate limiter for chat fallback
+            # Rate limiter for chat fallback (gate 1)
+            _fb_gate_ok = True
             if fallback_mode == "rate_limited" and not _check_fallback_chat_rate():
                 print(f"⚠️ 備援 API 速率限制（{_FALLBACK_CHAT_RATE_PER_MIN}/min），聊天備援請求被拒絕")
-            elif fallback_mode == "rate_limited" and fallback_user_id:
+                _fb_gate_ok = False
+
+            # Daily per-user quota (gate 2) — only applies to rate_limited mode
+            if _fb_gate_ok and fallback_mode == "rate_limited" and fallback_user_id:
                 _daily_limit = settings.get("fallback_daily_limit", 10)
                 if not _check_fallback_daily_limit(fallback_user_id, _daily_limit):
-                    _remaining = _get_fallback_daily_remaining(fallback_user_id, _daily_limit)
                     print(f"⚠️ 備援 API 每日上限已達（用戶 {fallback_user_id}，上限 {_daily_limit}/天）")
                     return {"content": FALLBACK_DAILY_LIMIT_MSG, "error": "daily_limit_exceeded"}
                 else:
-                    _remaining = _get_fallback_daily_remaining(fallback_user_id, _daily_limit)
-                    print(f"✅ 備援 API 每日配額通過（用戶 {fallback_user_id}，今日剩餘 {_remaining}/{_daily_limit}）")
-            else:
+                    _daily_remaining = _get_fallback_daily_remaining(fallback_user_id, _daily_limit)
+                    print(f"✅ 備援 API 每日配額通過（用戶 {fallback_user_id}，今日剩餘 {_daily_remaining}/{_daily_limit}）")
+
+            # Both gates passed — actually call the fallback API
+            if _fb_gate_ok:
                 _fb_url = settings.get("fallback_api_url", "").strip()
                 _fb_key = settings.get("fallback_api_key", "").strip()
                 _fb_model = settings.get("fallback_model", "").strip()
