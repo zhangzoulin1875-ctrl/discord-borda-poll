@@ -1832,6 +1832,543 @@ def _append_user_history(user_id: str, user_text: str, assistant_text: str):
         entry["turns"] = entry["turns"][-max_msgs:]
 
 
+# ──────────────────────────────────────────────
+# 專屬 AI 聊天室系統（AI Chat Room — like ChatGPT/Gemini app experience）
+# ──────────────────────────────────────────────
+# Each user can create their own private text channel via a button panel.
+# In these channels, the AI:
+#   - Responds to EVERY message (no mention needed, no cooldown, no filter)
+#   - Has FULL channel conversation history (fetches last N messages as
+#     actual message objects passed to the API, not system-prompt injection)
+#   - Behaves like a dedicated 1-on-1 AI assistant (like ChatGPT/Gemini app)
+#
+# Data is persisted to ai_chat_rooms.json (auto-synced to Drive like all
+# other data/*.json files).
+
+AI_CHAT_ROOMS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "ai_chat_rooms.json")
+ai_chat_rooms: dict = {
+    "rooms": {},        # channel_id_str -> {"user_id": str, "user_name": str, "created_at": float, "guild_id": int, "message_count": int}
+    "panel_channel_id": None,   # where the button panel is
+    "category_id": None,        # category to create rooms under
+    "max_rooms": 50,             # global cap
+    "max_history_messages": 50, # how many messages to fetch for AI context
+    "enabled": True,
+}
+
+
+def save_ai_chat_rooms():
+    try:
+        os.makedirs(os.path.dirname(AI_CHAT_ROOMS_FILE), exist_ok=True)
+        _save_json_file(AI_CHAT_ROOMS_FILE, ai_chat_rooms, indent=None)
+    except Exception as e:
+        print(f"⚠️ Failed to save AI chat rooms: {e}")
+
+
+def load_ai_chat_rooms():
+    global ai_chat_rooms
+    try:
+        if os.path.exists(AI_CHAT_ROOMS_FILE):
+            with open(AI_CHAT_ROOMS_FILE, "r", encoding="utf-8") as f:
+                loaded = json_module.load(f)
+            # Merge with defaults so new keys appear on old saves
+            for k, v in loaded.items():
+                ai_chat_rooms[k] = v
+            print(f"✅ 載入 AI 聊天室設定：{len(ai_chat_rooms.get('rooms', {}))} 個聊天室")
+    except Exception as e:
+        print(f"⚠️ Failed to load AI chat rooms: {e}")
+
+
+def is_ai_chat_room(channel_id: int) -> bool:
+    """Check if this channel is an AI chat room."""
+    return str(channel_id) in ai_chat_rooms.get("rooms", {})
+
+
+def get_ai_chat_room_owner(channel_id: int) -> str:
+    """Get the owner user_id of this AI chat room, or empty string."""
+    room = ai_chat_rooms.get("rooms", {}).get(str(channel_id))
+    return room.get("user_id", "") if room else ""
+
+
+def user_has_chat_room(user_id: int, guild_id: int = None) -> bool:
+    """Check if this user already has an active AI chat room."""
+    rooms = ai_chat_rooms.get("rooms", {})
+    for ch_id, room in rooms.items():
+        if room.get("user_id") == str(user_id):
+            if guild_id is None or room.get("guild_id") == guild_id:
+                return True
+    return False
+
+
+def get_user_chat_room_channel(user_id: int) -> int:
+    """Get the channel_id of the user's existing chat room, or 0."""
+    rooms = ai_chat_rooms.get("rooms", {})
+    for ch_id, room in rooms.items():
+        if room.get("user_id") == str(user_id):
+            return int(ch_id)
+    return 0
+
+
+# ── Button View for the chat room panel ──
+class AIChatRoomPanelView(discord.ui.View):
+    """Persistent view for the AI Chat Room creation panel.
+    This needs to be added to the bot's persistent views so it survives
+    bot restarts."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="開啟專屬 AI 聊天室",
+        style=discord.ButtonStyle.primary,
+        emoji="🤖",
+        custom_id="ai_chat_room:create"
+    )
+    async def create_room_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not ai_chat_rooms.get("enabled", True):
+            await interaction.response.send_message("❌ AI 聊天室功能目前未開放。", ephemeral=True)
+            return
+
+        user = interaction.user
+        uid_str = str(user.id)
+
+        # Check if user already has a room
+        existing_ch = get_user_chat_room_channel(user.id)
+        if existing_ch:
+            # Try to find the channel and point them to it
+            ch = interaction.guild.get_channel(existing_ch) if interaction.guild else None
+            if ch:
+                await interaction.response.send_message(
+                    f"你已經有一個專屬聊天室了：{ch.mention}\n直接在那裡跟 AI 對話即可～",
+                    ephemeral=True
+                )
+                return
+            else:
+                # Channel was deleted but record remains — clean up
+                ai_chat_rooms["rooms"].pop(str(existing_ch), None)
+                save_ai_chat_rooms()
+
+        # Check max rooms
+        rooms = ai_chat_rooms.get("rooms", {})
+        if len(rooms) >= ai_chat_rooms.get("max_rooms", 50):
+            await interaction.response.send_message(
+                "❌ 已達聊天室數量上限，請聯繫管理員。", ephemeral=True
+            )
+            return
+
+        # Check category is set
+        category_id = ai_chat_rooms.get("category_id")
+        if not category_id:
+            await interaction.response.send_message(
+                "❌ 管理員尚未設定聊天室分類頻道。請聯繫管理員使用 `/chat room_category` 設定。",
+                ephemeral=True
+            )
+            return
+
+        category = interaction.guild.get_channel(int(category_id))
+        if not category or not isinstance(category, discord.CategoryChannel):
+            await interaction.response.send_message(
+                "❌ 聊天室分類頻道不存在或類型錯誤。請聯繫管理員重新設定。",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Create the private channel
+        try:
+            # Channel name: ai-username or ai-userid
+            safe_name = "".join(c for c in user.display_name if c.isalnum() or c in "-_") or str(user.id)
+            ch_name = f"ai-{safe_name}"[:100]
+
+            overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                interaction.guild.me: discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True,
+                    read_message_history=True, manage_channels=True,
+                    embed_links=True, attach_files=True
+                ),
+                user: discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True,
+                    read_message_history=True, attach_files=True,
+                    embed_links=True
+                ),
+            }
+
+            new_ch = await interaction.guild.create_text_channel(
+                name=ch_name,
+                category=category,
+                overwrites=overwrites,
+                topic=f"專屬 AI 聊天室 — {user.display_name} (ID: {user.id})"
+            )
+
+            # Register in data
+            ai_chat_rooms["rooms"][str(new_ch.id)] = {
+                "user_id": uid_str,
+                "user_name": user.display_name,
+                "created_at": _time.time(),
+                "guild_id": interaction.guild.id,
+                "message_count": 0,
+            }
+            save_ai_chat_rooms()
+
+            # Send welcome message with close button
+            welcome_embed = discord.Embed(
+                title="🤖 歡迎來到你的專屬 AI 聊天室！",
+                description=(
+                    f"嗨 {user.mention}！這是你和 AI 的私人聊天空間。\n\n"
+                    f"✅ 在這裡**直接打字**，AI 就會回覆（不需要 @）\n"
+                    f"✅ AI 會記住這個頻道裡的**所有對話**，就像 ChatGPT/Gemini 一樣\n"
+                    f"✅ 你可以傳送圖片讓 AI 分析（如果視覺模型已設定）\n\n"
+                    f"準備好就開始聊吧～"
+                ),
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow(),
+            )
+            welcome_embed.set_footer(text="點擊下方按鈕可以關閉聊天室（頻道會被刪除）")
+
+            close_view = AIChatRoomCloseView()
+            await new_ch.send(embed=welcome_embed, view=close_view)
+
+            await interaction.followup.send(
+                f"✅ 已為你建立專屬聊天室：{new_ch.mention}\n點擊前往開始對話～",
+                ephemeral=True
+            )
+            print(f"🤖 AI 聊天室已建立：#{new_ch.name} (for {user.display_name}, ID:{user.id})")
+
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ Bot 沒有建立頻道的權限。請聯繫管理員確認 Bot 在目標分類有「管理頻道」權限。",
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"❌ AI 聊天室建立失敗：{e}")
+            await interaction.followup.send(f"❌ 建立失敗：{e}", ephemeral=True)
+
+
+class AIChatRoomCloseView(discord.ui.View):
+    """View with a close button for AI chat rooms."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="關閉聊天室",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+        custom_id="ai_chat_room:close"
+    )
+    async def close_room_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ch_id = str(interaction.channel.id)
+        room = ai_chat_rooms.get("rooms", {}).get(ch_id)
+
+        if not room:
+            await interaction.response.send_message("❌ 這不是 AI 聊天室。", ephemeral=True)
+            return
+
+        # Only room owner or bot owner can close
+        uid_str = str(interaction.user.id)
+        is_owner_close = uid_str == room.get("user_id")
+        is_bot_owner = str(interaction.user.id) == str(OWNER_ID)
+
+        if not (is_owner_close or is_bot_owner):
+            await interaction.response.send_message("❌ 只有聊天室主人或管理員可以關閉。", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        try:
+            # Clean up record
+            ai_chat_rooms["rooms"].pop(ch_id, None)
+            save_ai_chat_rooms()
+
+            # Delete the channel
+            await interaction.channel.delete(reason=f"AI 聊天室由 {interaction.user.display_name} 關閉")
+            print(f"🤖 AI 聊天室已關閉：#{interaction.channel.name} (by {interaction.user.display_name})")
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f"❌ AI 聊天室關閉失敗：{e}")
+
+
+# ── Generate AI reply for chat room (with full channel history) ──
+async def generate_chat_room_reply(message, settings: dict) -> tuple:
+    """Generate a reply for an AI chat room message, using full channel
+    conversation history (like ChatGPT/Gemini app). Returns (reply, model_info).
+
+    Unlike generate_chat_reply which only sends the current message + 4
+    recent turns, this fetches the last N messages from the channel and
+    sends them as actual conversation messages to the AI API — giving the
+    AI a continuous, app-like conversation context."""
+
+    user_id = str(message.author.id)
+    user_name = message.author.display_name
+    max_history = ai_chat_rooms.get("max_history_messages", 50)
+
+    # Build system prompt — similar to generate_chat_reply but tailored
+    # for 1-on-1 chat room experience
+    system_prompt = settings["system_prompt"]
+
+    # Inject current time
+    _now = datetime.now(GMT8)
+    _weekday_cn = ["一", "二", "三", "四", "五", "六", "日"][_now.weekday()]
+    system_prompt += (
+        f"\n\n─── 即時時間 ───\n"
+        f"現在時間：{_now.strftime('%Y年%m月%d日')}（星期{_weekday_cn}）"
+        f" {_now.strftime('%H:%M')}，GMT+8 台灣時間。"
+        f"你的訓練資料有截止日期，可能不知道最近發生的事。"
+        f"請使用 web_search 工具上網查證，不要憑訓練資料直接否定。"
+    )
+
+    # Chat room specific instruction
+    system_prompt += (
+        f"\n\n─── 專屬聊天室模式 ───\n"
+        f"你現在在「{user_name}」的專屬聊天室裡，這是 1 對 1 的對話空間。\n"
+        f"上方已經注入了你和 {user_name} 之前的完整對話歷史，請參考上下文回覆，\n"
+        f"就像 ChatGPT 或 Gemini 的 App 版一樣——記住之前聊過什麼，保持對話連貫性。\n"
+        f"這裡的對話比群組更自由，可以聊任何話題，不用局限在微國家事務。"
+    )
+
+    # Inject user memory (same as generate_chat_reply)
+    mem = user_memories.get(user_id, {})
+    facts = mem.get("facts", [])
+    if facts:
+        memory_lines = []
+        for f in facts[-10:]:
+            memory_lines.append(f"- {f.get('content', '')}")
+        system_prompt += (
+            f"\n\n─── 你對「{user_name}」的記憶 ───\n"
+            f"以下是之前互動中記住的關於這位使用者的事：\n"
+            + "\n".join(memory_lines)
+        )
+    else:
+        system_prompt += f"\n\n你目前對「{user_name}」沒有特別的記憶。"
+
+    # Inject per-user memory tag (same mechanism as regular chat)
+    if facts:
+        system_prompt += (
+            f"\n\n─── 記憶寫入規則 ───\n"
+            f"如果這次對話中有值得記住的事實（使用者告訴你關於他自己的事、偏好、"
+            f"重要日期、計畫等），請在回覆最後加上 [MEMORY: 簡短記憶內容] 標記。"
+            f"系統會自動將此存入你對這位使用者的長期記憶。只記真正值得記住的事。"
+        )
+
+    # ── Fetch channel history ──
+    history_messages = []
+    try:
+        async for msg in message.channel.history(limit=max_history, before=message):
+            if msg.author.bot and msg.author.id != bot.user.id:
+                continue
+            if not msg.content and not msg.attachments:
+                continue
+            # Skip bot's embed-only messages (welcome, etc.)
+            if msg.author.bot and msg.embeds and not msg.content:
+                continue
+
+            role = "assistant" if msg.author.id == bot.user.id else "user"
+            content_text = msg.content or ""
+            # Handle attachments (images) — describe them if vision model exists
+            if msg.attachments:
+                for att in msg.attachments:
+                    if att.content_type and "image" in att.content_type:
+                        vision_model = settings.get("vision_model", "")
+                        if vision_model:
+                            # Try to describe the image
+                            try:
+                                desc = await _describe_image(att.url, settings)
+                                if desc:
+                                    content_text += f"\n[圖片：{desc}]"
+                            except Exception:
+                                content_text += "\n[圖片]"
+                        else:
+                            content_text += "\n[圖片（未設定視覺模型，無法分析）]"
+            if content_text.strip():
+                history_messages.append({"role": role, "content": content_text[:2000]})
+
+        # Reverse to chronological order (oldest first)
+        history_messages.reverse()
+    except Exception as e:
+        print(f"⚠️ AI 聊天室歷史取得失敗：{e}")
+
+    # Build the messages array for the API
+    api_messages = [{"role": "system", "content": system_prompt}]
+    api_messages.extend(history_messages)
+    # The current message is already in history_messages since we fetched
+    # up to `before=message`... actually no, `before=message` EXCLUDES the
+    # current message. So we need to add the current message separately.
+    current_content = message.content or ""
+    if message.attachments:
+        for att in message.attachments:
+            if att.content_type and "image" in att.content_type:
+                vision_model = settings.get("vision_model", "")
+                if vision_model:
+                    try:
+                        desc = await _describe_image(att.url, settings)
+                        if desc:
+                            current_content += f"\n[圖片：{desc}]"
+                    except Exception:
+                        current_content += "\n[圖片]"
+                else:
+                    current_content += "\n[圖片（未設定視覺模型）]"
+    api_messages.append({"role": "user", "content": current_content[:2000]})
+
+    # Determine fallback mode — chat room uses rate_limited (same as regular chat)
+    _fb_mode = "rate_limited"
+    _fb_user = user_id
+
+    # Call the AI API — with tools for search capability
+    _norm = settings.get("api_url", "").rstrip("/")
+    if not _norm.endswith("/chat/completions"):
+        if _norm.endswith("/v1") or _norm.endswith("/v2"):
+            _norm += "/chat/completions"
+        else:
+            _norm += "/v1/chat/completions"
+    _tools_supported = _norm in _tools_supported_apis
+    _tools_unsup = _norm in _tools_unsupported_apis
+    tools_ok = _tools_supported and not _tools_unsup
+
+    tools = []
+    if tools_ok:
+        if settings.get("micropedia_enabled", True):
+            tools.append(_MICROPEDIA_TOOL_SCHEMA)
+        tools.append(_WEB_SEARCH_TOOL_SCHEMA)
+    elif not _tools_unsup and not _tools_supported:
+        if settings.get("micropedia_enabled", True):
+            tools.append(_MICROPEDIA_TOOL_SCHEMA)
+        tools.append(_WEB_SEARCH_TOOL_SCHEMA)
+    tools = tools if tools else None
+
+    _reply_model = None
+    _reply_fallback = False
+    _reply_diag = []
+
+    try:
+        result = await call_chat_api(
+            api_messages, settings,
+            tools=tools,
+            max_tokens=settings.get("ai_max_tokens", 800),
+            timeout_total=settings.get("ai_hard_ceiling", 45),
+            timeout_read=settings.get("ai_hard_ceiling", 45) - 5,
+            is_background=False,
+            fallback_mode=_fb_mode,
+            fallback_user_id=_fb_user,
+        )
+        if result.get("error") and not result.get("content"):
+            return None, {"model": "?", "fallback": False, "diag": result.get("_diag", [])}
+
+        raw_reply = result.get("content") or ""
+        _reply_model = result.get("_used_model", settings.get("model", "?"))
+        _reply_fallback = result.get("_used_fallback", False)
+        _reply_diag = result.get("_diag", [])
+
+        # Handle tool calls if present
+        if result.get("tool_calls") and tools:
+            # Process tool calls (simplified — single round)
+            assistant_msg = result
+            tool_results = await _process_tool_results_simple(
+                assistant_msg, message, settings, tools
+            )
+            if tool_results:
+                api_messages.append(assistant_msg)
+                api_messages.extend(tool_results)
+                # Force a final answer
+                api_messages.append({
+                    "role": "user",
+                    "content": "請根據以上搜尋結果回答我的問題。"
+                })
+                result2 = await call_chat_api(
+                    api_messages, settings, tools=None,
+                    max_tokens=settings.get("ai_max_tokens", 800),
+                    timeout_total=settings.get("ai_hard_ceiling", 45),
+                    timeout_read=settings.get("ai_hard_ceiling", 45) - 5,
+                    is_background=False,
+                    fallback_mode=_fb_mode,
+                    fallback_user_id=_fb_user,
+                )
+                if result2.get("content"):
+                    raw_reply = result2.get("content") or ""
+                    _reply_model = result2.get("_used_model", _reply_model)
+                    _reply_fallback = result2.get("_used_fallback", _reply_fallback)
+                    _reply_diag.extend(result2.get("_diag", []))
+
+    except Exception as e:
+        print(f"❌ AI 聊天室 API 呼叫失敗：{e}")
+        return None, {"model": "?", "fallback": False, "diag": [f"❌ 例外：{str(e)[:100]}"]}
+
+    # Clean up the reply — strip thinking tags, memory tags
+    actual_reply = _strip_thinking(raw_reply)
+
+    # Extract memory if present
+    new_facts = None
+    if "[MEMORY:" in actual_reply:
+        try:
+            mem_match = _re.search(r"\[MEMORY:\s*(.+?)\]", actual_reply)
+            if mem_match:
+                mem_content = mem_match.group(1).strip()
+                new_facts = [{"content": mem_content, "date": _now.strftime("%Y-%m-%d")}]
+                actual_reply = (actual_reply[:mem_match.start()] + actual_reply[mem_match.end():]).strip()
+        except Exception:
+            pass
+
+    # Extract moderation action if present
+    mod_action = None
+    if "[MOD:" in actual_reply:
+        try:
+            mod_match = _re.search(r"\[MOD:\s*(.+?)\]", actual_reply)
+            if mod_match:
+                mod_action = mod_match.group(1).strip()
+                actual_reply = (actual_reply[:mod_match.start()] + actual_reply[mod_match.end():]).strip()
+        except Exception:
+            pass
+
+    return actual_reply, {"model": _reply_model, "fallback": _reply_fallback, "diag": _reply_diag}, new_facts, mod_action
+
+
+async def _process_tool_results_simple(assistant_msg, message, settings, tools):
+    """Process tool calls from the AI in a simplified single-round way.
+    Returns a list of tool result messages to append to the conversation."""
+    tool_calls = assistant_msg.get("tool_calls", [])
+    if not tool_calls:
+        return []
+
+    results = []
+    for tc in tool_calls[:3]:  # max 3 tool calls
+        func_name = tc.get("function", {}).get("name", "")
+        func_args_str = tc.get("function", {}).get("arguments", "{}")
+        try:
+            func_args = json_module.loads(func_args_str)
+        except Exception:
+            func_args = {}
+
+        tool_content = ""
+        try:
+            if func_name == "search_micropedia":
+                search_q = func_args.get("query", message.content[:50])
+                tool_content = await _micropedia_auto_context(search_q, settings.get("micropedia_max_results", 5))
+                if not tool_content:
+                    tool_content = "未找到相關百科文章。"
+            elif func_name == "web_search":
+                search_q = func_args.get("query", message.content[:100])
+                tool_content = await _web_search(search_q)
+                if not tool_content:
+                    tool_content = "未找到相關網路搜尋結果。"
+            elif func_name == "search_discord":
+                search_q = func_args.get("query", message.content[:100])
+                if message.guild:
+                    tool_content = await _search_discord_history(message.guild, search_q, limit=15)
+                if not tool_content:
+                    tool_content = "未找到相關伺服器內容。"
+        except Exception as e:
+            tool_content = f"搜尋失敗：{e}"
+
+        results.append({
+            "role": "tool",
+            "tool_call_id": tc.get("id", "unknown"),
+            "content": tool_content[:2000],
+        })
+
+    return results
+
+
 def save_user_memories():
     try:
         os.makedirs(os.path.dirname(USER_MEMORIES_FILE), exist_ok=True)
