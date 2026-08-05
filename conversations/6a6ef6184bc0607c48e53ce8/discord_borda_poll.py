@@ -1562,6 +1562,22 @@ DEFAULT_CHAT_AI_PROMPT = """你是一個微國家組織的 Discord 成員，也�
 - 不要自行把兩個不同名稱/條目推論為同一個東西（例如「A 國家就是 B 國家的別稱」），
   除非資料裡明確這樣寫。但這不影響你回答其他有資料的問題。
 - 不要編造沒有出現在資料中的細節來讓回答看起來更完整。
+
+─── 「不確定」的使用邊界（重要）───
+「這個我不確定」/「資料沒有寫到這點」只能用在一種情況：使用者問的是一件
+微國家內部具體發生過的事實（人事、事件、數字、條文…），你查了上面注入的
+資料卻真的完全找不到答案。除此之外，下面這些狀況都「不准」回「不確定」，
+要用你自己的判斷正常回應：
+1. 使用者問題明顯是玩笑、惡搞、荒謬假設（例如比較「牛大便」和「豬大便」
+   誰比較貴這種根本不存在的東西）——這種問題本來就不會有「資料」，正確
+   反應是順著玩笑吐槽、講幹話、或用常識回一句，而不是正經地說「資料沒
+   有寫到這點」。把明顯的整人/搞笑問題當成資料查詢在跑，本身就是答錯。
+2. 使用者問的是跟微國家完全無關的一般知識、時事、生活問題——直接用你
+   自己的知識或上面注入的網路搜尋結果回答，不要因為百科查不到就卡住。
+3. 使用者問的是意見、看法、感受、閒聊——這些本來就沒有「資料」可查，
+   直接自然對話即可。
+先判斷「這是不是一個真的可能有官方記錄的具體事實問題」，只有這種情況
+才走「查資料→沒查到→誠實說不確定」的流程；其他情況一律當一般對話處理。
 ─── 回覆格式鐵律 ───
 - 直接給出答案，不要在回覆中展示你的思考過程、推理步驟、或分析邏輯
 - 不要寫「讓我想想」「我來分析一下」「首先」「好的，我來看看」等思考性開場白
@@ -1917,9 +1933,42 @@ def load_chat_ai_settings():
                 "- 可以開玩笑，但不要冒犯別人\n"
                 "- 如果對話涉及微國家相關知識，你會收到微國家百科的查詢資料，請優先參考這些資料回答"
             )
-            if loaded.get("system_prompt", "").strip() == _OLD_DEFAULT_CHAT_PROMPT.strip():
+            # V2 default — the version right before this migration was added
+            # to (i.e. has "資料使用原則" but NOT the "不確定的使用邊界" rule
+            # that stops the AI from saying "不確定" on obvious jokes/off-topic
+            # questions). Instances that already auto-upgraded once need a
+            # second upgrade to pick up this improvement too.
+            _OLD_DEFAULT_CHAT_PROMPT_V2 = (
+                "你是一個微國家組織的 Discord 成員，也是一個 AI 助手。你會參與頻道中的討論，提供有建設性的意見。\n\n"
+                "規則：\n"
+                "- 用繁體中文回覆\n"
+                "- 保持簡潔，通常 1-3 句話，最多不超過 5 句\n"
+                "- 有自己的觀點，不要只是附和或重複別人說的話\n"
+                "- 可以討論政策、法案、投票、組織運作等話題\n"
+                "- 語氣自然輕鬆，像群組裡的一個朋友\n"
+                "- 不要使用 markdown 標題（## ###）\n"
+                "- 不要每次都長篇大論，有時候一句話就夠了\n"
+                "- 可以開玩笑，但不要冒犯別人\n"
+                "- 如果對話涉及微國家相關知識，你會收到微國家百科的查詢資料，請優先參考這些資料回答\n\n"
+                "─── 資料使用原則 ───\n"
+                "- 上方注入的百科/Discord/知識庫資料都是可信的事實來源。如果資料裡有答案，就直接、自信地回答，不要猶豫。\n"
+                "- 只有當你「完全沒有相關資料」時，才說「這個我不確定」或「目前沒有查到相關資料」。\n"
+                "- 不要因為覺得資料「可能不夠完整」就退縮——有資料就回答，沒資料才說不知道。\n"
+                "- 不要自行把兩個不同名稱/條目推論為同一個東西（例如「A 國家就是 B 國家的別稱」），\n"
+                "  除非資料裡明確這樣寫。但這不影響你回答其他有資料的問題。\n"
+                "- 不要編造沒有出現在資料中的細節來讓回答看起來更完整。\n"
+                "─── 回覆格式鐵律 ───\n"
+                "- 直接給出答案，不要在回覆中展示你的思考過程、推理步驟、或分析邏輯\n"
+                "- 不要寫「讓我想想」「我來分析一下」「首先」「好的，我來看看」等思考性開場白\n"
+                "- 不要使用 <think> 或 <thinking> 標籤，不要輸出任何形式的 reasoning\n"
+                "- 你的回覆必須是一個自然的對話回應，不是思考筆記\n"
+                "- 違反以上規則的回覆會被直接刪除思考部分，只保留最終答案"
+            )
+            if loaded.get("system_prompt", "").strip() in (
+                _OLD_DEFAULT_CHAT_PROMPT.strip(), _OLD_DEFAULT_CHAT_PROMPT_V2.strip()
+            ):
                 loaded["system_prompt"] = DEFAULT_CHAT_AI_PROMPT
-                print("🔄 偵測到 system_prompt 仍是舊版預設值，已自動升級為新版（含強化反幻覺規則）")
+                print("🔄 偵測到 system_prompt 仍是舊版預設值，已自動升級為新版（含「不確定」使用邊界規則）")
             chat_ai_settings.update(loaded)
             print("✅ 載入 AI 聊天設定")
     except Exception as e:
@@ -3371,6 +3420,56 @@ def _fuzzy_match_titles(message: str, titles: list, top_n: int = 5) -> list:
     return [t for t, _, _, _ in scored[:top_n]]
 
 
+def _substring_match_titles(message: str, titles: list, top_n: int = 5) -> list:
+    """Catch named-entity mentions that bigram containment misses — e.g. a
+    short 2-3 char abbreviation/nickname ('厂万') that's a substring of a
+    LONGER title ('厂万自治區'), where the overlap-ratio in
+    _fuzzy_match_titles is too small to pass its containment threshold.
+
+    Uses TWO candidate sources:
+    1. _extract_search_keywords (filler-word-stripped chunks) — cheap, but
+       CJK has no word boundaries, so a message with no filler words in it
+       collapses to ONE giant chunk (the whole clause), which almost never
+       matches any title as a substring.
+    2. A raw sliding-window decomposition (2-4 char windows) of the message
+       itself — this is what actually recovers short entity names/nicknames
+       buried inside a run-on sentence with no natural split point (e.g.
+       "厂万有代表多少個國家" → window "厂万" is generated even though no
+       filler word ever separated it from the rest of the clause).
+
+    A hit counts if: the candidate is a substring of the title, OR the
+    title itself (if short, <=6 chars) is a substring of the raw message —
+    either direction can be the "real" name depending on which one is
+    longer (message might use a short nickname, or the full title name)."""
+    import re as _re
+    keywords = _extract_search_keywords(message)
+    _clean_msg = _re.sub(r"[\s？?！!，,。.、；;：:「」『』（）()]", "", message)[:80]
+    window_candidates = set()
+    for wlen in (2, 3, 4):
+        for i in range(len(_clean_msg) - wlen + 1):
+            window_candidates.add(_clean_msg[i:i + wlen])
+    all_candidates = set(keywords) | window_candidates
+    if not all_candidates:
+        return []
+    scored = []
+    for t in titles:
+        t_clean = t.strip()
+        if not t_clean:
+            continue
+        hit = False
+        best_len = 0
+        for kw in all_candidates:
+            if len(kw) >= 2 and (kw in t_clean or (len(t_clean) <= 6 and t_clean in message)):
+                hit = True
+                best_len = max(best_len, len(kw))
+        if hit:
+            # Prefer titles where the matched keyword covers more of the
+            # title (more specific match), then shorter titles (more precise).
+            scored.append((t, best_len / max(len(t_clean), 1), len(t_clean)))
+    scored.sort(key=lambda x: (-x[1], x[2]))
+    return [t for t, _, _ in scored[:top_n]]
+
+
 async def _fetch_all_micropedia_titles(session) -> list:
     """Fetch every page title on the wiki via the MediaWiki allpages API
     (paginated, ~4000+ pages as of writing — small enough to hold in memory).
@@ -3426,6 +3525,16 @@ async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> s
             session = _shared_session
             titles = await _get_micropedia_titles(session)
             matched = _fuzzy_match_titles(message_text, titles, top_n=max_results) if titles else []
+            # Also try direct substring matching — catches short named-entity
+            # mentions (e.g. a 2-3 char abbreviation like "厂万") that ARE a
+            # substring of a longer title but whose bigram-overlap ratio is
+            # too low to pass _fuzzy_match_titles' containment threshold.
+            if titles:
+                sub_matched = _substring_match_titles(message_text, titles, top_n=max_results)
+                for t in sub_matched:
+                    if t not in matched:
+                        matched.append(t)
+                matched = matched[:max_results]
             if not matched:
                 # FORCED real internet search fallback — local bigram
                 # matching against the cached title list is a heuristic and
@@ -3442,6 +3551,12 @@ async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> s
             async with aiohttp.ClientSession() as session:
                 titles = await _get_micropedia_titles(session)
                 matched = _fuzzy_match_titles(message_text, titles, top_n=max_results) if titles else []
+                if titles:
+                    sub_matched = _substring_match_titles(message_text, titles, top_n=max_results)
+                    for t in sub_matched:
+                        if t not in matched:
+                            matched.append(t)
+                    matched = matched[:max_results]
                 if not matched:
                     keywords = _extract_search_keywords(message_text)
                     search_q = keywords[0] if keywords else message_text[:30]
@@ -6196,7 +6311,13 @@ async def api_test_ai_connection(request):
                     content = ""
                     choices = data.get("choices", [])
                     if choices:
-                        content = choices[0].get("message", {}).get("content", "").strip()
+                        content = (choices[0].get("message", {}).get("content") or "").strip()
+                        if not content:
+                            # Model returned 200 but empty/None content (e.g. gpt-oss-120b
+                            # sometimes does this for trivial prompts) — not a real failure,
+                            # just note it so the test doesn't crash or look broken.
+                            finish_reason = choices[0].get("finish_reason", "?")
+                            content = f"（模型回應空白，finish_reason={finish_reason}）"
                     return {"label": label, "status": "ok", "latency_ms": elapsed,
                             "model": model or "gpt-4o-mini",
                             "response_snippet": content[:100]}
@@ -6340,7 +6461,10 @@ async def api_test_admin_functions(request):
                     content_text = ""
                     choices = data.get("choices", [])
                     if choices:
-                        content_text = choices[0].get("message", {}).get("content", "").strip()
+                        content_text = (choices[0].get("message", {}).get("content") or "").strip()
+                        if not content_text:
+                            finish_reason = choices[0].get("finish_reason", "?")
+                            content_text = f"（模型回應空白，finish_reason={finish_reason}）"
                     return {"label": label, "type": "text", "status": "ok", "latency_ms": elapsed,
                             "model": model, "response_snippet": content_text[:100]}
         except asyncio.TimeoutError:
@@ -6405,9 +6529,15 @@ async def api_test_admin_functions(request):
                     content_text = ""
                     choices = data.get("choices", [])
                     if choices:
-                        content_text = choices[0].get("message", {}).get("content", "").strip()
+                        content_text = (choices[0].get("message", {}).get("content") or "").strip()
                     vision_ok = False
                     desc = ""
+                    if not content_text:
+                        finish_reason = choices[0].get("finish_reason", "?") if choices else "?"
+                        return {"label": label, "type": "vision", "status": "error",
+                                "latency_ms": elapsed, "model": vision_model,
+                                "error": f"模型回應空白（finish_reason={finish_reason}），無法判讀圖片",
+                                "vision_ok": False}
                     try:
                         if content_text.startswith("```"):
                             content_text = content_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -12106,7 +12236,7 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
                 call_chat_api(val_messages, chat_ai_settings, tools=None, fallback_mode="disabled"),
                 timeout=20,
             )
-            val_text = val_result.get("content", "").strip()
+            val_text = (val_result.get("content") or "").strip()
             # Parse JSON from response (may be wrapped in ```json blocks)
             import re as _re
             json_match = _re.search(r'\{[^}]*\}', val_text)
