@@ -19386,63 +19386,43 @@ class TurtleSoupHintView(discord.ui.View):
         await self._give_hint(interaction, False)
 
 
-# ── Discord UI: 加時按鈕面板 ──
+# ── Discord UI: 加時投票面板 ──
 class TurtleSoupExtraTimeView(discord.ui.View):
+    """20秒加時投票面板。每人一票，時間到多數決。"""
     def __init__(self, game_id: int = 0):
-        super().__init__(timeout=300)  # 5 分鐘內有效
+        super().__init__(timeout=20)
         self._game_id = game_id
+        self._votes = {}  # {user_id: True|False}
+
+    def get_result(self) -> bool:
+        """回傳是否要加時。平手時不加時（直接公佈湯底）。"""
+        yes = sum(1 for v in self._votes.values() if v)
+        no = sum(1 for v in self._votes.values() if not v)
+        return yes > no
+
+    def get_summary(self) -> str:
+        yes = sum(1 for v in self._votes.values() if v)
+        no = sum(1 for v in self._votes.values() if not v)
+        return f"加時 {yes} 票 / 放棄 {no} 票"
 
     async def on_timeout(self):
-        """超時後自動放棄，公佈湯底。"""
-        global _turtle_soup_state
-        # 必須確認還是同一局遊戲，否則不加時也不結束
-        if (_turtle_soup_state.get("game_id") != self._game_id
-                or not _turtle_soup_state["active"]):
-            return
-        if not _turtle_soup_state["extra_time_used"]:
-            try:
-                if self.message:
-                    await self.message.edit(content="⏰ 加時時間已過，即將公佈湯底...", view=None)
-                ch_id = _turtle_soup_state.get("channel_id")
-                if ch_id:
-                    ch = bot.get_channel(ch_id)
-                    if ch:
-                        await _end_turtle_soup(ch, solved=False)
-            except Exception as e:
-                print(f"⚠️ Turtle soup extra time timeout error: {e}")
+        """超時後由 vote waiter 處理結果，這裡只禁用按鈕。"""
+        for child in self.children:
+            child.disabled = True
 
     @discord.ui.button(label="➕ 加時 +5 次", style=discord.ButtonStyle.success, custom_id="turtle_soup_extra_yes")
-    async def extra_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        global _turtle_soup_state
-        # 必須確認還是同一局遊戲
-        if _turtle_soup_state.get("game_id") != self._game_id:
-            await interaction.response.edit_message(content="⚠️ 這是上一局的加時面板，已失效。", view=None)
-            return
-        if not _turtle_soup_state["active"]:
-            await interaction.response.edit_message(content="⚠️ 遊戲已結束。", view=None)
-            return
-        if _turtle_soup_state["extra_time_used"]:
-            await interaction.response.edit_message(content="⚠️ 加時機會已使用過了！", view=None)
-            return
-        _turtle_soup_state["extra_time_used"] = True
-        _turtle_soup_state["max_questions"] += 5
-        new_remaining = _turtle_soup_state["max_questions"] - _turtle_soup_state["questions_used"]
-        await interaction.response.edit_message(
-            content=f"⏰ **加時成功！** 提問次數 +5，現在剩餘 {new_remaining} 次。繼續推理吧！", view=None,
+    async def vote_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._votes[interaction.user.id] = True
+        await interaction.response.send_message(
+            f"✅ {interaction.user.display_name} 投了：加時 +5 次", ephemeral=True
         )
-        print(f"🍜 Turtle soup extra time used: +5, new max={_turtle_soup_state['max_questions']}, game_id={self._game_id}")
 
-    @discord.ui.button(label="放棄，公佈湯底", style=discord.ButtonStyle.danger, custom_id="turtle_soup_extra_no")
-    async def extra_no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        global _turtle_soup_state
-        if _turtle_soup_state.get("game_id") != self._game_id:
-            await interaction.response.edit_message(content="⚠️ 這是上一局的加時面板，已失效。", view=None)
-            return
-        if not _turtle_soup_state["active"]:
-            await interaction.response.edit_message(content="⚠️ 遊戲已結束。", view=None)
-            return
-        await interaction.response.edit_message(content="👎 放棄了，即將公佈湯底...", view=None)
-        await _end_turtle_soup(interaction.channel, solved=False)
+    @discord.ui.button(label="👎 放棄，公佈湯底", style=discord.ButtonStyle.danger, custom_id="turtle_soup_extra_no")
+    async def vote_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._votes[interaction.user.id] = False
+        await interaction.response.send_message(
+            f"✅ {interaction.user.display_name} 投了：放棄", ephemeral=True
+        )
 
 
 # ── Discord UI: 邀請面板按鈕 ──
@@ -19627,6 +19607,46 @@ async def _turtle_soup_hint_vote_waiter(vote_view, vote_msg, hint_level, game_id
             pass
 
 
+async def _turtle_soup_extra_time_vote_waiter(vote_view, vote_msg, game_id, channel):
+    """等待20秒加時投票結束後，依結果加時或公佈湯底。"""
+    await asyncio.sleep(20)
+
+    # 確認還是同一局遊戲
+    if _turtle_soup_state.get("game_id") != game_id or not _turtle_soup_state["active"]:
+        return
+
+    result = vote_view.get_result()
+    summary = vote_view.get_summary()
+
+    # 禁用按鈕
+    for child in vote_view.children:
+        child.disabled = True
+
+    if result:
+        # 多數要加時
+        _turtle_soup_state["extra_time_used"] = True
+        _turtle_soup_state["max_questions"] += 5
+        new_remaining = _turtle_soup_state["max_questions"] - _turtle_soup_state["questions_used"]
+        try:
+            await vote_msg.edit(
+                content=f"🗳️ {summary}\n⏰ **加時成功！** 提問次數 +5，現在剩餘 {new_remaining} 次。繼續推理吧！",
+                view=vote_view,
+            )
+        except Exception:
+            pass
+        print(f"🍜 Turtle soup extra time used: +5, new max={_turtle_soup_state['max_questions']}, game_id={game_id}")
+    else:
+        # 多數放棄（或平手）
+        try:
+            await vote_msg.edit(
+                content=f"🗳️ {summary}\n👎 不加時，即將公佈湯底...",
+                view=vote_view,
+            )
+        except Exception:
+            pass
+        await _end_turtle_soup(channel, solved=False)
+
+
 # ── 發送/更新邀請面板 ──
 async def _post_turtle_soup_invite(channel):
     """在海龜湯頻道發送邀請面板。"""
@@ -19747,10 +19767,15 @@ async def _handle_turtle_soup_message(message):
             )
             await _end_turtle_soup(message.channel, solved=False)
         else:
-            await message.channel.send(
+            this_game_id = _turtle_soup_state.get("game_id", 0)
+            vote_view = TurtleSoupExtraTimeView(game_id=this_game_id)
+            vote_msg = await message.channel.send(
                 f"❌ 提問次數已用完（{_turtle_soup_state['max_questions']} 次）！\n"
-                f"要加時 +5 次嗎？（每人限一次）",
-                view=TurtleSoupExtraTimeView(game_id=_turtle_soup_state.get("game_id", 0)),
+                f"要加時 +5 次嗎？— **20 秒內投票，多數決！**",
+                view=vote_view,
+            )
+            asyncio.create_task(
+                _turtle_soup_extra_time_vote_waiter(vote_view, vote_msg, this_game_id, message.channel)
             )
         return True
 
