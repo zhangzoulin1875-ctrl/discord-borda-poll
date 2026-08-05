@@ -2068,7 +2068,7 @@ class AIChatRoomCloseView(discord.ui.View):
         # Only room owner or bot owner can close
         uid_str = str(interaction.user.id)
         is_owner_close = uid_str == room.get("user_id")
-        is_bot_owner = str(interaction.user.id) == str(OWNER_ID)
+        is_bot_owner = str(interaction.user.id) == str(BOT_OWNER_ID)
 
         if not (is_owner_close or is_bot_owner):
             await interaction.response.send_message("❌ 只有聊天室主人或管理員可以關閉。", ephemeral=True)
@@ -2301,7 +2301,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
     new_facts = None
     if "[MEMORY:" in actual_reply:
         try:
-            mem_match = _re.search(r"\[MEMORY:\s*(.+?)\]", actual_reply)
+            mem_match = re.search(r"\[MEMORY:\s*(.+?)\]", actual_reply)
             if mem_match:
                 mem_content = mem_match.group(1).strip()
                 new_facts = [{"content": mem_content, "date": _now.strftime("%Y-%m-%d")}]
@@ -2313,7 +2313,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
     mod_action = None
     if "[MOD:" in actual_reply:
         try:
-            mod_match = _re.search(r"\[MOD:\s*(.+?)\]", actual_reply)
+            mod_match = re.search(r"\[MOD:\s*(.+?)\]", actual_reply)
             if mod_match:
                 mod_action = mod_match.group(1).strip()
                 actual_reply = (actual_reply[:mod_match.start()] + actual_reply[mod_match.end():]).strip()
@@ -6718,6 +6718,12 @@ async def api_get_chat_ai_settings(request):
         "fallback_rate_limit_msg": chat_ai_settings.get("fallback_rate_limit_msg", ""),
         "entertainment_unavailable_msg": chat_ai_settings.get("entertainment_unavailable_msg", ""),
         "circuit_cooldown_msg": chat_ai_settings.get("circuit_cooldown_msg", ""),
+        "ai_room_enabled": ai_chat_rooms.get("enabled", True),
+        "ai_room_panel_channel_id": ai_chat_rooms.get("panel_channel_id"),
+        "ai_room_category_id": ai_chat_rooms.get("category_id"),
+        "ai_room_max_rooms": ai_chat_rooms.get("max_rooms", 50),
+        "ai_room_max_history": ai_chat_rooms.get("max_history_messages", 50),
+        "ai_room_count": len(ai_chat_rooms.get("rooms", {})),
     })
 
 
@@ -6774,6 +6780,16 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["drive_sync_interval"] = int(body["drive_sync_interval"])
     if "fallback_enabled" in body:
         chat_ai_settings["fallback_enabled"] = body["fallback_enabled"]
+    # AI chat room settings
+    if "ai_room_enabled" in body:
+        ai_chat_rooms["enabled"] = body["ai_room_enabled"]
+        save_ai_chat_rooms()
+    if "ai_room_max_rooms" in body:
+        ai_chat_rooms["max_rooms"] = int(body["ai_room_max_rooms"])
+        save_ai_chat_rooms()
+    if "ai_room_max_history" in body:
+        ai_chat_rooms["max_history_messages"] = int(body["ai_room_max_history"])
+        save_ai_chat_rooms()
     if "fallback_api_url" in body:
         chat_ai_settings["fallback_api_url"] = body["fallback_api_url"]
     if "fallback_api_key" in body and body["fallback_api_key"]:
@@ -7789,7 +7805,23 @@ async def setup_hook():
     load_token_usage()
     save_token_usage()  # Create file if not exists
     load_user_memories()
+    load_ai_chat_rooms()
     load_emoji_aliases()
+    # Clean up stale AI chat rooms (channels that no longer exist in Discord)
+    _stale_rooms = []
+    for ch_id_str, room in list(ai_chat_rooms.get("rooms", {}).items()):
+        ch_id = int(ch_id_str)
+        found = False
+        for guild in bot.guilds:
+            if guild.get_channel(ch_id):
+                found = True
+                break
+        if not found:
+            _stale_rooms.append(ch_id_str)
+            ai_chat_rooms["rooms"].pop(ch_id_str, None)
+    if _stale_rooms:
+        save_ai_chat_rooms()
+        print(f"🧹 AI 聊天室：清理了 {len(_stale_rooms)} 個已失效的頻道")
     load_tools_unsupported()
     load_tools_supported()
     asyncio.ensure_future(self_ping_loop())
@@ -8093,6 +8125,117 @@ async def on_message(message):
     is_mentioned = bot.user in message.mentions
     print(f"📩 on_message: #{message.channel} | {message.author.display_name}: {content_preview}")
     print(f"   enabled={chat_ai_settings.get('enabled')}, key={'✅' if chat_ai_settings.get('api_key') else '❌'}, mentioned={is_mentioned}, filter={chat_ai_settings.get('filter_strength', 'mention')}")
+
+    # ── 專屬 AI 聊天室處理（在所有 AI 聊天過濾之前）──
+    # If this message is in an AI chat room channel, bypass ALL the normal
+    # filters (mention, cooldown, whitelist, worthiness, abuse detection)
+    # and go straight to AI reply with full channel history.
+    if is_ai_chat_room(message.channel.id):
+        print(f"🤖 AI 聊天室訊息：#{message.channel.name} | {message.author.display_name}")
+        # Only the room owner can chat here (others can't see the channel anyway,
+        # but double-check in case permissions were misconfigured)
+        room_owner = get_ai_chat_room_owner(message.channel.id)
+        if room_owner and str(message.author.id) != room_owner:
+            print(f"   ⏭️ 非聊天室主人，跳過")
+            return
+
+        # Still need AI enabled and API key
+        if not chat_ai_settings.get("enabled"):
+            try:
+                await message.reply("AI 聊天功能目前未開啟。", mention_author=False)
+            except Exception:
+                pass
+            return
+        if not chat_ai_settings.get("api_key"):
+            try:
+                await message.reply("AI API Key 尚未設定，請聯繫管理員。", mention_author=False)
+            except Exception:
+                pass
+            return
+
+        # Skip empty messages (but allow if they have image attachments)
+        if not message.content or len(message.content.strip()) == 0:
+            if not message.attachments:
+                return
+
+        # Check if this user already has a reply being generated
+        uid_str = str(message.author.id)
+        if uid_str in _user_generating:
+            print(f"   ⏭️ Already generating for this user.")
+            return
+
+        # Global rate limit still applies (prevents anti-spam kick)
+        _global_interval = chat_ai_settings.get("min_response_interval", 0)
+        if _global_interval > 0:
+            _global_remaining = _global_interval - (_time.time() - _last_global_reply)
+            if _global_remaining > 0:
+                print(f"   ⏭️ 全域回應間隔：還需 {_global_remaining:.1f}s")
+                return
+
+        # Generate reply with full channel history
+        _user_generating.add(uid_str)
+        try:
+            sem = _chat_semaphore or asyncio.Semaphore(5)
+            async with sem:
+                async with message.channel.typing():
+                    result = await generate_chat_room_reply(message, chat_ai_settings)
+            # Unpack 4-tuple (like generate_chat_reply)
+            if len(result) == 4:
+                reply, model_info, new_facts, mod_action = result
+            else:
+                reply, model_info = result
+                new_facts = None
+                mod_action = None
+
+            # Save user memory if AI extracted facts
+            if new_facts:
+                _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
+                print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
+
+            # Update message count
+            room = ai_chat_rooms.get("rooms", {}).get(str(message.channel.id))
+            if room:
+                room["message_count"] = room.get("message_count", 0) + 1
+                save_ai_chat_rooms()
+
+            # Log to AI log channel if configured
+            log_cfg = chat_ai_settings.get("log_channel_id")
+            if log_cfg:
+                try:
+                    await _send_chat_log(message, message.content or "(圖片)", reply or "(空回覆)", model_info=model_info)
+                except Exception as log_exc:
+                    print(f"   ⚠️ _send_chat_log 例外：{log_exc}")
+
+            if reply and reply.strip():
+                _last_global_reply = _time.time()
+                # Strip raw tool dumps before sending (same safety net as regular chat)
+                reply = _strip_raw_tool_dump(reply)
+                try:
+                    view = CorrectionButtonView(
+                        question=message.content or "(圖片)",
+                        original_answer=reply[:500],
+                        user_id=str(message.author.id),
+                        user_name=message.author.display_name,
+                        guild_id=message.guild.id if message.guild else 0,
+                    )
+                    await message.reply(reply[:2000], mention_author=False, view=view)
+                    print(f"   ✅ AI 聊天室回覆已發送")
+                except discord.Forbidden:
+                    print(f"   ❌ 發送失敗：無權限")
+                except Exception as send_err:
+                    print(f"   ❌ 發送失敗：{send_err}")
+                    try:
+                        await message.reply(reply[:2000], mention_author=False)
+                    except Exception:
+                        pass
+            else:
+                if _ai_circuit_breaker["tripped"]:
+                    print(f"🚫 AI 熔斷器開啟中，不發送 fallback")
+                else:
+                    print(f"   ⚠️ AI 回覆為空")
+        finally:
+            _user_generating.discard(uid_str)
+        return  # AI chat room message fully handled
 
     # Check if chat AI is enabled and has API key
     if not chat_ai_settings.get("enabled"):
@@ -12081,6 +12224,119 @@ class ChatGroup(app_commands.Group):
         if len(text) > 1900:
             text = text[:1900] + "\n..."
         await interaction.response.send_message(text, ephemeral=True)
+
+    # ── 專屬 AI 聊天室指令 ──
+
+    @app_commands.command(name="room_setup", description="設定專屬 AI 聊天室面板頻道（機器人擁有者限定）")
+    @app_commands.describe(channel="要放置「開啟聊天室」按鈕面板的頻道")
+    async def chat_room_setup(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        ai_chat_rooms["panel_channel_id"] = channel.id
+        save_ai_chat_rooms()
+
+        # Send the panel embed with button
+        panel_embed = discord.Embed(
+            title="🤖 專屬 AI 聊天室",
+            description=(
+                "點擊下方按鈕，開啟你自己的專屬 AI 聊天室！\n\n"
+                "✅ 1 對 1 私人對話空間\n"
+                "✅ AI 記住整個頻道的對話歷史（像 ChatGPT/Gemini）\n"
+                "✅ 不需要 @，直接打字 AI 就會回\n"
+                "✅ 可以傳圖片讓 AI 分析\n\n"
+                "每人限開 1 間，不用時可以關閉。"
+            ),
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        panel_embed.set_footer(text="ICEA 專屬 AI 聊天室系統")
+        view = AIChatRoomPanelView()
+        await channel.send(embed=panel_embed, view=view)
+
+        await interaction.response.send_message(
+            f"✅ AI 聊天室面板已設定在 {channel.mention}\n"
+            f"用戶現在可以點擊按鈕建立自己的聊天室。\n"
+            f"記得用 `/chat room_category` 設定聊天室分類頻道。",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="room_category", description="設定 AI 聊天室建立的分類頻道（機器人擁有者限定）")
+    @app_commands.describe(category="新建聊天室會建立在這個分類下")
+    async def chat_room_category(self, interaction: discord.Interaction, category: discord.CategoryChannel):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        ai_chat_rooms["category_id"] = category.id
+        save_ai_chat_rooms()
+        await interaction.response.send_message(
+            f"✅ AI 聊天室分類已設為「{category.name}」\n"
+            f"新建的聊天室頻道會出現在這個分類下。",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="room_list", description="列出所有活躍的 AI 聊天室（機器人擁有者限定）")
+    async def chat_room_list(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        rooms = ai_chat_rooms.get("rooms", {})
+        if not rooms:
+            await interaction.response.send_message("目前沒有活躍的 AI 聊天室。", ephemeral=True)
+            return
+        lines = [f"📋 活躍 AI 聊天室（共 {len(rooms)} 間）："]
+        for ch_id, room in rooms.items():
+            user_name = room.get("user_name", "?")
+            msg_count = room.get("message_count", 0)
+            created = room.get("created_at", 0)
+            age_min = int((_time.time() - created) / 60) if created else 0
+            lines.append(f"• <#{ch_id}> — {user_name}（{msg_count} 則訊息，{age_min} 分鐘前建立）")
+        text = "\n".join(lines)
+        if len(text) > 1900:
+            text = text[:1900] + "\n..."
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @app_commands.command(name="room_max", description="設定 AI 聊天室數量上限（機器人擁有者限定）")
+    @app_commands.describe(max_rooms="最大聊天室數量（預設 50）")
+    async def chat_room_max(self, interaction: discord.Interaction, max_rooms: int):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        if max_rooms < 1:
+            max_rooms = 1
+        if max_rooms > 500:
+            max_rooms = 500
+        ai_chat_rooms["max_rooms"] = max_rooms
+        save_ai_chat_rooms()
+        await interaction.response.send_message(f"✅ AI 聊天室數量上限已設為 {max_rooms}", ephemeral=True)
+
+    @app_commands.command(name="room_history", description="設定 AI 聊天室歷史訊息數量（機器人擁有者限定）")
+    @app_commands.describe(messages="抓取最近幾則訊息作為 AI 上下文（預設 50，建議 20-100）")
+    async def chat_room_history(self, interaction: discord.Interaction, messages: int):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        if messages < 5:
+            messages = 5
+        if messages > 200:
+            messages = 200
+        ai_chat_rooms["max_history_messages"] = messages
+        save_ai_chat_rooms()
+        await interaction.response.send_message(
+            f"✅ AI 聊天室歷史訊息數量已設為 {messages}\n"
+            f"較多訊息 = AI 記得更多對話，但每次回覆會較慢、消耗較多 token。",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="room_toggle", description="開啟/關閉 AI 聊天室功能（機器人擁有者限定）")
+    async def chat_room_toggle(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        ai_chat_rooms["enabled"] = not ai_chat_rooms.get("enabled", True)
+        save_ai_chat_rooms()
+        status = "✅ 開啟" if ai_chat_rooms["enabled"] else "❌ 關閉"
+        await interaction.response.send_message(f"AI 聊天室功能已{status}", ephemeral=True)
 
 
 # ──────────────────────────────────────────────
@@ -17581,6 +17837,10 @@ def main():
 
 
 # Register setup_hook so discord.py calls it before connecting
+# Register persistent views for AI Chat Room buttons (survives bot restarts)
+bot.add_view(AIChatRoomPanelView())
+bot.add_view(AIChatRoomCloseView())
+
 bot.setup_hook = setup_hook
 
 
