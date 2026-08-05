@@ -328,6 +328,14 @@
         <p class="text-xs text-gray-500 mb-3">🔗 測試降級鏈：逐一測試主模型 + 降級鏈中的每個模型，查看哪些可用、哪些 401/503</p>
         <div id="ai-test-results" class="space-y-3"></div>
       </div>
+
+      <!-- 行政功能完整測試 -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">🛡️ 行政功能完整測試</h3>
+        <p class="text-xs text-gray-400 mb-4">逐一測試所有行政功能使用的模型（主模型、降級鏈全部、備援模型），並用預設假圖片測試識圖功能（主視覺模型 + 備援視覺模型）。不需要自己上傳圖片。</p>
+        <button onclick="testAdminFunctions()" class="w-full bg-[#ed4245] hover:bg-[#c2383a] px-4 py-3 rounded-lg font-semibold text-sm">🛡️ 開始行政功能完整測試</button>
+        <div id="admin-test-results" class="space-y-3 mt-4"></div>
+      </div>
     </div>
   </div>
 
@@ -818,6 +826,45 @@ async function testAIConnection(target) {
       html += '</div>';
       return html;
     }).join('');
+  } catch (e) {
+    resultsDiv.innerHTML = '<p class="text-sm text-red-400">❌ 請求失敗：' + escHtml(String(e)) + '</p>';
+  }
+}
+
+// ── Admin Functions Test ──
+async function testAdminFunctions() {
+  const resultsDiv = document.getElementById('admin-test-results');
+  resultsDiv.innerHTML = '<p class="text-sm text-gray-400">⏳ 測試中... 這會花一些時間（每個模型逐一測試，識圖模型需要較長時間）</p>';
+  try {
+    const data = await api('/api/test-admin-functions', 'POST', {});
+    if (data.error) { resultsDiv.innerHTML = '<p class="text-sm text-red-400">❌ ' + escHtml(data.error) + '</p>'; return; }
+    const summary = data.summary || {};
+    const results = data.results || [];
+    let html = '';
+    // Summary banner
+    if (summary.all_ok) {
+      html += '<div class="bg-green-900/30 border border-green-700 rounded-lg p-4 mb-4"><p class="text-sm text-green-400 font-semibold">✅ 全部通過！文字模型 ' + summary.text_ok + '/' + summary.text_total + '，識圖模型 ' + summary.vision_ok + '/' + summary.vision_total + '</p></div>';
+    } else {
+      html += '<div class="bg-red-900/30 border border-red-700 rounded-lg p-4 mb-4"><p class="text-sm text-red-400 font-semibold">⚠️ 有未通過的項目：文字模型 ' + summary.text_ok + '/' + summary.text_total + '，識圖模型 ' + summary.vision_ok + '/' + summary.vision_total + '</p></div>';
+    }
+    // Individual results
+    results.forEach(r => {
+      const statusIcon = r.status === 'ok' ? '✅' : r.status === 'timeout' ? '⏱️' : r.status === 'skipped' ? '⏭️' : '❌';
+      const statusColor = r.status === 'ok' ? 'text-green-400' : r.status === 'skipped' ? 'text-gray-500' : 'text-red-400';
+      const typeIcon = r.type === 'vision' ? '📷' : '💬';
+      let card = '<div class="bg-[#1e1f22] rounded-lg p-4">';
+      card += '<div class="flex items-center justify-between mb-2">';
+      card += '<span class="font-semibold text-sm">' + statusIcon + ' ' + typeIcon + ' ' + escHtml(r.label) + '</span>';
+      card += '<span class="' + statusColor + ' text-sm font-medium">' + r.status.toUpperCase() + (r.latency_ms ? ' · ' + r.latency_ms + 'ms' : '') + '</span>';
+      card += '</div>';
+      if (r.model) card += '<p class="text-xs text-gray-500 mb-1">模型：' + escHtml(r.model) + '</p>';
+      if (r.response_snippet) card += '<p class="text-sm text-gray-300 mb-1">回覆：' + escHtml(r.response_snippet) + '</p>';
+      if (r.vision_ok !== undefined) card += '<p class="text-xs ' + (r.vision_ok ? 'text-green-400' : 'text-red-400') + ' mb-1">識圖判定：' + (r.vision_ok ? '✅ 成功辨識圖片' : '❌ 未能辨識') + '</p>';
+      if (r.error) card += '<p class="text-xs text-red-400 mt-1 break-all">' + escHtml(r.error) + '</p>';
+      card += '</div>';
+      html += card;
+    });
+    resultsDiv.innerHTML = html;
   } catch (e) {
     resultsDiv.innerHTML = '<p class="text-sm text-red-400">❌ 請求失敗：' + escHtml(String(e)) + '</p>';
   }

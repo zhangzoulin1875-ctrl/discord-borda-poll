@@ -179,6 +179,7 @@ async def keep_alive_server():
     app.router.add_get("/api/chat-ai-settings", api_get_chat_ai_settings)
     app.router.add_put("/api/chat-ai-settings", api_set_chat_ai_settings)
     app.router.add_post("/api/test-ai-connection", api_test_ai_connection)
+    app.router.add_post("/api/test-admin-functions", api_test_admin_functions)
     # Dashboard routes
     app.router.add_get("/dashboard", dashboard_index)
     app.router.add_get("/login", dashboard_login)
@@ -6066,6 +6067,235 @@ async def api_test_ai_connection(request):
                 chat_ai_settings.get("fallback_model", ""),
                 "備援 API"))
     return web.json_response({"results": results})
+
+
+async def api_test_admin_functions(request):
+    """Comprehensive test of ALL AI models used by administrative functions:
+    1. Primary model (text) — the main model (e.g. deepseek-v4-pro)
+    2. Every model in the model_fallback_chain (text)
+    3. Backup/fallback model (text) — the owner's Gemini
+    4. Primary vision model (image recognition) — if vision_model is set
+    5. Backup vision model (image recognition) — fallback_model (assumed multimodal)
+
+    For vision tests, sends a preset test image (a simple colored flag-like
+    SVG generated as a data URI — no upload needed) and checks whether the
+    model returns a valid JSON response describing the image.
+
+    Returns per-test: label, status (ok/error/timeout), latency_ms, model,
+    response_snippet, error, and for vision tests: vision_ok (bool)."""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    import time as _time
+
+    # A simple SVG flag-like image as a data URI — red rectangle with a blue
+    # circle in the center, looks vaguely like a flag design. This avoids
+    # needing to host or upload any image file.
+    svg_flag = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120">'
+        '<rect width="200" height="120" fill="#cc0000"/>'
+        '<circle cx="100" cy="60" r="30" fill="#0033cc"/>'
+        '<rect x="0" y="0" width="200" height="10" fill="#ffcc00"/>'
+        '<rect x="0" y="110" width="200" height="10" fill="#ffcc00"/>'
+        '</svg>'
+    )
+    import base64 as _b64
+    test_image_url = "data:image/svg+xml;base64," + _b64.b64encode(svg_flag.encode()).decode()
+
+    async def _test_text(api_url, api_key, model, label):
+        if not api_url or not api_key:
+            return {"label": label, "type": "text", "status": "error", "error": "API URL 或 Key 未設定"}
+        if not model:
+            return {"label": label, "type": "text", "status": "error", "error": "模型名稱未設定"}
+        url = api_url.strip()
+        if not url.endswith("/chat/completions"):
+            if url.endswith("/v1") or url.endswith("/v2"):
+                url += "/chat/completions"
+            else:
+                url += "/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": "請回覆「連線正常」四個字，不要有其他內容。"}
+            ],
+            "max_tokens": 20,
+            "stream": False,
+        }
+        t0 = _time.monotonic()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, sock_read=20)) as sess:
+                async with sess.post(url, json=payload, headers=headers) as resp:
+                    elapsed = int((_time.monotonic() - t0) * 1000)
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        return {"label": label, "type": "text", "status": "error",
+                                "http_status": resp.status, "latency_ms": elapsed,
+                                "model": model, "error": f"HTTP {resp.status}: {err_text[:200]}"}
+                    data = await resp.json()
+                    content_text = ""
+                    choices = data.get("choices", [])
+                    if choices:
+                        content_text = choices[0].get("message", {}).get("content", "").strip()
+                    return {"label": label, "type": "text", "status": "ok", "latency_ms": elapsed,
+                            "model": model, "response_snippet": content_text[:100]}
+        except asyncio.TimeoutError:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "type": "text", "status": "timeout", "latency_ms": elapsed,
+                    "model": model, "error": "請求逾時（30 秒）"}
+        except Exception as e:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "type": "text", "status": "error", "latency_ms": elapsed,
+                    "model": model, "error": str(e)[:300]}
+
+    async def _test_vision(api_url, api_key, vision_model, label):
+        if not api_url or not api_key:
+            return {"label": label, "type": "vision", "status": "error", "error": "API URL 或 Key 未設定"}
+        if not vision_model:
+            return {"label": label, "type": "vision", "status": "skipped",
+                    "error": "視覺模型未設定，跳過"}
+        url = api_url.strip()
+        if not url.endswith("/chat/completions"):
+            if url.endswith("/v1") or url.endswith("/v2"):
+                url += "/chat/completions"
+            else:
+                url += "/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "這是一張測試用的圖片。請回答 JSON："
+                                '{"has_image": true/false, "description": "簡短描述圖片內容"}'
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": test_image_url},
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 200,
+            "temperature": 0.1,
+            "stream": False,
+        }
+        t0 = _time.monotonic()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60, sock_read=50)) as sess:
+                async with sess.post(url, json=payload, headers=headers) as resp:
+                    elapsed = int((_time.monotonic() - t0) * 1000)
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        return {"label": label, "type": "vision", "status": "error",
+                                "http_status": resp.status, "latency_ms": elapsed,
+                                "model": vision_model,
+                                "error": f"HTTP {resp.status}: {err_text[:200]}",
+                                "vision_ok": False}
+                    data = await resp.json()
+                    content_text = ""
+                    choices = data.get("choices", [])
+                    if choices:
+                        content_text = choices[0].get("message", {}).get("content", "").strip()
+                    vision_ok = False
+                    desc = ""
+                    try:
+                        if content_text.startswith("```"):
+                            content_text = content_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                        parsed = json_module.loads(content_text)
+                        vision_ok = bool(parsed.get("has_image", False))
+                        desc = parsed.get("description", "")
+                    except Exception:
+                        # If JSON parse fails, check if response mentions image
+                        if any(kw in content_text.lower() for kw in ["圖片", "image", "紅色", "藍色", "圓形", "flag"]):
+                            vision_ok = True
+                            desc = content_text[:100]
+                    return {"label": label, "type": "vision", "status": "ok", "latency_ms": elapsed,
+                            "model": vision_model, "response_snippet": (desc or content_text)[:150],
+                            "vision_ok": vision_ok}
+        except asyncio.TimeoutError:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "type": "vision", "status": "timeout", "latency_ms": elapsed,
+                    "model": vision_model, "error": "請求逾時（60 秒）", "vision_ok": False}
+        except Exception as e:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "type": "vision", "status": "error", "latency_ms": elapsed,
+                    "model": vision_model, "error": str(e)[:300], "vision_ok": False}
+
+    results = []
+
+    # ── Text models ──
+    # 1. Primary model
+    results.append(await _test_text(
+        chat_ai_settings.get("api_url", ""),
+        chat_ai_settings.get("api_key", ""),
+        chat_ai_settings.get("model", ""),
+        "主 API · 主模型"
+    ))
+
+    # 2. Every model in the fallback chain
+    chain_raw = chat_ai_settings.get("model_fallback_chain", "").strip()
+    if chain_raw:
+        for m in [m.strip() for m in chain_raw.split(",") if m.strip()]:
+            results.append(await _test_text(
+                chat_ai_settings.get("api_url", ""),
+                chat_ai_settings.get("api_key", ""),
+                m, f"主 API · 降級鏈 · {m}"
+            ))
+
+    # 3. Backup/fallback model
+    results.append(await _test_text(
+        chat_ai_settings.get("fallback_api_url", ""),
+        chat_ai_settings.get("fallback_api_key", ""),
+        chat_ai_settings.get("fallback_model", ""),
+        "備援 API · 備援模型"
+    ))
+
+    # ── Vision models ──
+    # 4. Primary vision model (uses primary API URL/Key with vision_model)
+    vision_model = chat_ai_settings.get("vision_model", "")
+    results.append(await _test_vision(
+        chat_ai_settings.get("api_url", ""),
+        chat_ai_settings.get("api_key", ""),
+        vision_model,
+        "主 API · 視覺模型（識圖）"
+    ))
+
+    # 5. Backup vision model (uses backup API URL/Key with fallback_model,
+    #    assumed to be multimodal like Gemini)
+    fallback_vision_model = (
+        chat_ai_settings.get("fallback_vision_model", "")
+        or chat_ai_settings.get("fallback_model", "")
+    )
+    results.append(await _test_vision(
+        chat_ai_settings.get("fallback_api_url", ""),
+        chat_ai_settings.get("fallback_api_key", ""),
+        fallback_vision_model,
+        "備援 API · 視覺模型（識圖）"
+    ))
+
+    # Summary
+    text_ok = sum(1 for r in results if r["type"] == "text" and r["status"] == "ok")
+    text_total = sum(1 for r in results if r["type"] == "text")
+    vision_ok = sum(1 for r in results if r["type"] == "vision" and r.get("vision_ok"))
+    vision_total = sum(1 for r in results if r["type"] == "vision")
+
+    return web.json_response({
+        "results": results,
+        "summary": {
+            "text_ok": text_ok,
+            "text_total": text_total,
+            "vision_ok": vision_ok,
+            "vision_total": vision_total,
+            "all_ok": text_ok == text_total and vision_ok == vision_total,
+        }
+    })
 
 
 ai_settings = {
