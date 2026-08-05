@@ -1623,6 +1623,11 @@ chat_ai_settings = {
     "vision_fallback_chain": "",  # 視覺模型降級鏈（逗號分隔，主視覺模型失敗時依序嘗試）
     "ai_hard_ceiling": 20,           # AI pipeline 硬上限（秒）
     "ai_soft_target": 16,            # AI 軟目標（秒）
+    "vision_extra_budget": 20,       # 訊息含圖片時，額外加給文字 AI 的預算（秒）——
+                                      # 圖片描述會塞進 system prompt，讓文字模型要處理的
+                                      # 內容變大變慢，固定 20s 硬上限對純文字聊天夠用，
+                                      # 但對含圖片的訊息常常不夠，導致「文字/視覺模型都已
+                                      # 成功回應，卻還是被判定逾時」。
     "ai_max_tokens": 2000,           # AI 回覆最大 token 數
     "preprocess_timeout": 6,         # 預處理（百科/Discord/網路）各路逾時（秒）
     "tool_skip_threshold": 12,       # 時間預算低於此值時關閉工具（秒）
@@ -6687,10 +6692,18 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # a hard ceiling, not a soft target.
     _AI_HARD_CEILING = settings.get("ai_hard_ceiling", 20)
     _AI_SOFT_TARGET = settings.get("ai_soft_target", 16)
+    # FIX：含圖片的訊息，視覺模型的圖片描述會塞進 system prompt，文字模型要
+    # 處理的內容量變大，生成時間本來就會比純文字聊天長——但硬上限之前是同一個
+    # 固定值，不管有沒有圖片。用戶反映「有圖片的訊息都等超久，文字和圖片模型
+    # 都已經成功輸出 token，卻還是回傳逾時」，就是這個固定上限對圖片訊息太緊。
+    # 現在偵測到本次有成功注入圖片描述（image_context 非空）就加開額外預算。
+    _vision_bonus = settings.get("vision_extra_budget", 20) if image_context else 0
+    if _vision_bonus:
+        print(f"📷 本次訊息含圖片描述，額外加開 {_vision_bonus}s AI 預算")
     _pipeline_elapsed = _time.time() - _t_pre
-    _ai_budget = max(10, _AI_HARD_CEILING - _pipeline_elapsed)
+    _ai_budget = max(10, _AI_HARD_CEILING + _vision_bonus - _pipeline_elapsed)
     print(f"⏱️ 預處理已花 {_pipeline_elapsed:.1f}s，AI 剩餘預算 {_ai_budget:.1f}s"
-          f"（硬上限 {_AI_HARD_CEILING}s，目標 {_AI_SOFT_TARGET}s 內完成）")
+          f"（硬上限 {_AI_HARD_CEILING}s{f'+{_vision_bonus}s(圖片)' if _vision_bonus else ''}，目標 {_AI_SOFT_TARGET}s 內完成）")
 
     # If the remaining budget is tight (<20s — not enough for a safe 2-round
     # tool loop), skip tools entirely so at least a single AI round can use

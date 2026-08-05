@@ -241,6 +241,11 @@
                 <p class="text-xs text-gray-500 mb-2">403 錯誤後暫停請求的時間</p>
                 <input id="ai-cb-cooldown" type="number" min="30" max="600" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="120">
               </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-1">圖片訊息額外預算（秒）</label>
+                <p class="text-xs text-gray-500 mb-2">訊息含圖片時，額外加開的 AI 回覆時間</p>
+                <input id="ai-vision-extra-budget" type="number" min="0" max="60" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="20">
+              </div>
             </div>
           </div>
           <!-- Background Task Intervals -->
@@ -913,6 +918,7 @@ async function showChatAIPanel() {
   document.getElementById('ai-tool-skip').value = s.tool_skip_threshold ?? 12;
   document.getElementById('ai-preprocess-timeout').value = s.preprocess_timeout ?? 6;
   document.getElementById('ai-cb-cooldown').value = s.circuit_breaker_cooldown ?? 120;
+  document.getElementById('ai-vision-extra-budget').value = s.vision_extra_budget ?? 20;
   document.getElementById('ai-forum-interval').value = s.forum_index_interval ?? 900;
   document.getElementById('ai-channel-interval').value = s.channel_index_interval ?? 1800;
   document.getElementById('ai-drive-interval').value = s.drive_sync_interval ?? 60;
@@ -975,6 +981,7 @@ async function saveChatAISettings() {
     tool_skip_threshold: parseInt(document.getElementById('ai-tool-skip').value) || 12,
     preprocess_timeout: parseInt(document.getElementById('ai-preprocess-timeout').value) || 6,
     circuit_breaker_cooldown: parseInt(document.getElementById('ai-cb-cooldown').value) || 120,
+    vision_extra_budget: parseInt(document.getElementById('ai-vision-extra-budget').value) || 20,
     forum_index_interval: parseInt(document.getElementById('ai-forum-interval').value) || 900,
     channel_index_interval: parseInt(document.getElementById('ai-channel-interval').value) || 1800,
     drive_sync_interval: parseInt(document.getElementById('ai-drive-interval').value) || 60,
