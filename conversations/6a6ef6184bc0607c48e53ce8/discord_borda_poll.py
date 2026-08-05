@@ -15304,6 +15304,36 @@ class ScheduleGroup(app_commands.Group):
         save_schedule_settings()
         await interaction.response.send_message(f"✅ 排程通知提及身分組已設為 {role.mention}", ephemeral=True)
 
+    @app_commands.command(name="clear_proposals", description="清除已排程的提案存檔（管理員限定）")
+    @app_commands.describe(action="清除方式")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="標記為已排程（保留記錄，下次不再列出）", value="mark_scheduled"),
+        app_commands.Choice(name="徹底刪除所有已受理提案", value="delete_all"),
+    ])
+    async def clear_proposals(self, interaction: discord.Interaction, action: str = "mark_scheduled"):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+
+        accepted = [p for p in _proposals.get("entries", []) if p.get("status") == "accepted"]
+        if not accepted:
+            await interaction.response.send_message("ℹ️ 目前沒有已受理的提案需要清除。", ephemeral=True)
+            return
+
+        count = len(accepted)
+        if action == "delete_all":
+            _proposals["entries"] = [p for p in _proposals.get("entries", []) if p.get("status") != "accepted"]
+            save_proposals()
+            await interaction.response.send_message(f"✅ 已徹底刪除 {count} 筆已受理提案。", ephemeral=True)
+        else:
+            for p in _proposals.get("entries", []):
+                if p.get("status") == "accepted":
+                    p["status"] = "scheduled"
+                    p["schedule_date"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M")
+            save_proposals()
+            await interaction.response.send_message(f"✅ 已將 {count} 筆提案標記為已排程，下次 /schedule generate 不會再列出。", ephemeral=True)
+
+
     @app_commands.command(name="set_review", description="設定排程預覽確認頻道（管理員限定）")
     @app_commands.describe(channel="秘書處確認排程圖的頻道")
     async def set_review(self, interaction: discord.Interaction, channel: discord.TextChannel):
