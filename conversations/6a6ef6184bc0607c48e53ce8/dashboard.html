@@ -38,6 +38,7 @@
       <div class="nav-tab" data-tab="nations" onclick="showNationsPanel()">🌍 會員國</div>
       <div class="nav-tab" data-tab="scan" onclick="showScanPanel()">🌐 關係譜圖</div>
       <div class="nav-tab" data-tab="ai-mod" onclick="showChatAIPanel(); setTimeout(() => { const el = document.getElementById('ai-mod-section'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 300);">🚨 AI 網警</div>
+      <div class="nav-tab" data-tab="schedule" onclick="showSchedulePanel()">📅 排程通知</div>
     </div>
   </div>
   <div id="nav-user" class="hidden flex items-center gap-3">
@@ -383,6 +384,65 @@
           <p class="text-xs text-orange-400">⚠️ 啟用後 AI 需有「管理訊息」權限才能刪除訊息。未刪除成功仍會記錄到網警頻道。</p>
         </div>
       </div>
+
+      <!-- 會議排程通知 -->
+      <div id="schedule-section" class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">📅 會議排程通知系統</h3>
+        <p class="text-xs text-gray-400 mb-4">將所有已受理提案自動彙整成會議排程通知圖。秘書處確認圖片後點擊「發送」即可發至指定頻道並 @ 指定身分組。發送成功後該批提案自動標記為已排程，下次不重複列出。</p>
+        <div class="grid grid-cols-2 gap-3 mb-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">發送頻道 ID</label>
+            <input id="sched-target-channel" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="頻道 ID">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">提及身分組 ID</label>
+            <input id="sched-mention-role" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="身分組 ID（留空=不@）">
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3 mb-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">確認頻道 ID（留空=用秘書處頻道）</label>
+            <input id="sched-review-channel" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="頻道 ID">
+          </div>
+          <div></div>
+        </div>
+        <p class="text-sm text-gray-400 mb-2">⏰ 會議時間表</p>
+        <div class="grid grid-cols-5 gap-2 mb-4">
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">簽到起</label>
+            <input id="sched-checkin-start" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-2 py-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="13:00">
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">簽到迄</label>
+            <input id="sched-checkin-end" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-2 py-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="21:00">
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">提案審理</label>
+            <input id="sched-review-time" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-2 py-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="15:00">
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">臨時動議</label>
+            <input id="sched-motion-time" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-2 py-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="20:00">
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">投票結算</label>
+            <input id="sched-vote-time" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-2 py-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="21:00">
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3 mb-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">下次例行會議編號</label>
+            <input id="sched-regular-no" type="number" min="1" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" value="1">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">下次簡務會議編號</label>
+            <input id="sched-briefing-no" type="number" min="1" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" value="1">
+          </div>
+        </div>
+        <p class="text-xs text-gray-400">使用方式：受理提案後，在 Discord 執行 <code class="bg-[#1e1f22] px-1 rounded">/schedule generate</code> 生成排程圖預覽 → 確認後點擊「發送」按鈕。</p>
+      </div>
+
+      <button onclick="saveScheduleSettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm mb-4">💾 儲存排程設定</button>
 
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
 
@@ -773,6 +833,50 @@ function escHtmlML(s) { return escHtml(s).replace(/\n/g, '<br>'); }
 function escAttr(s) { return String(s||'').replace(/'/g,"\\'"); }
 
 // ── Chat AI Settings ──
+// 會議排程通知系統
+function showSchedulePanel() {
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  // Reuse chat-ai-view since schedule section is inside it
+  document.getElementById('chat-ai-view').classList.remove('hidden');
+  showOnly('main-view');
+  setActiveTab('schedule');
+  setTimeout(() => { const el = document.getElementById('schedule-section'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 100);
+  loadScheduleSettings();
+}
+
+async function loadScheduleSettings() {
+  const s = await api('/api/schedule-settings');
+  if (s.error) { console.error('排程設定載入失敗', s.error); return; }
+  document.getElementById('sched-target-channel').value = s.target_channel_id || '';
+  document.getElementById('sched-mention-role').value = s.mention_role_id || '';
+  document.getElementById('sched-review-channel').value = s.review_channel_id || '';
+  document.getElementById('sched-checkin-start').value = s.checkin_start || '13:00';
+  document.getElementById('sched-checkin-end').value = s.checkin_end || '21:00';
+  document.getElementById('sched-review-time').value = s.review_time || '15:00';
+  document.getElementById('sched-motion-time').value = s.motion_time || '20:00';
+  document.getElementById('sched-vote-time').value = s.vote_time || '21:00';
+  document.getElementById('sched-regular-no').value = s.regular_meeting_no || 1;
+  document.getElementById('sched-briefing-no').value = s.briefing_meeting_no || 1;
+}
+
+async function saveScheduleSettings() {
+  const data = {
+    target_channel_id: document.getElementById('sched-target-channel').value.trim(),
+    mention_role_id: document.getElementById('sched-mention-role').value.trim(),
+    review_channel_id: document.getElementById('sched-review-channel').value.trim(),
+    checkin_start: document.getElementById('sched-checkin-start').value.trim(),
+    checkin_end: document.getElementById('sched-checkin-end').value.trim(),
+    review_time: document.getElementById('sched-review-time').value.trim(),
+    motion_time: document.getElementById('sched-motion-time').value.trim(),
+    vote_time: document.getElementById('sched-vote-time').value.trim(),
+    regular_meeting_no: parseInt(document.getElementById('sched-regular-no').value) || 1,
+    briefing_meeting_no: parseInt(document.getElementById('sched-briefing-no').value) || 1,
+  };
+  const r = await api('/api/schedule-settings', { method: 'PUT', body: JSON.stringify(data) });
+  if (r.ok) alert('✅ 排程設定已儲存');
+  else alert('❌ 儲存失敗');
+}
+
 async function showChatAIPanel() {
   ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   document.getElementById('chat-ai-view').classList.remove('hidden');

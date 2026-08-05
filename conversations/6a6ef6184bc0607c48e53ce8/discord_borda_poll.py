@@ -194,6 +194,8 @@ async def keep_alive_server():
     # Chat AI settings API
     app.router.add_get("/api/chat-ai-settings", api_get_chat_ai_settings)
     app.router.add_put("/api/chat-ai-settings", api_set_chat_ai_settings)
+    app.router.add_get("/api/schedule-settings", api_get_schedule_settings)
+    app.router.add_put("/api/schedule-settings", api_set_schedule_settings)
     app.router.add_post("/api/test-ai-connection", api_test_ai_connection)
     app.router.add_post("/api/test-admin-functions", api_test_admin_functions)
     # Dashboard routes
@@ -7206,6 +7208,55 @@ async def api_set_chat_ai_settings(request):
     return web.json_response({"ok": True})
 
 
+# ── Schedule settings API ──
+async def api_get_schedule_settings(request):
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({
+        "enabled": schedule_settings.get("enabled", True),
+        "review_channel_id": schedule_settings.get("review_channel_id"),
+        "target_channel_id": schedule_settings.get("target_channel_id"),
+        "mention_role_id": schedule_settings.get("mention_role_id"),
+        "checkin_start": schedule_settings.get("checkin_start", "13:00"),
+        "checkin_end": schedule_settings.get("checkin_end", "21:00"),
+        "review_time": schedule_settings.get("review_time", "15:00"),
+        "motion_time": schedule_settings.get("motion_time", "20:00"),
+        "vote_time": schedule_settings.get("vote_time", "21:00"),
+        "regular_meeting_no": schedule_settings.get("regular_meeting_no", 1),
+        "briefing_meeting_no": schedule_settings.get("briefing_meeting_no", 1),
+    })
+
+
+async def api_set_schedule_settings(request):
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await request.json()
+    if "target_channel_id" in body:
+        schedule_settings["target_channel_id"] = body["target_channel_id"] or None
+    if "mention_role_id" in body:
+        schedule_settings["mention_role_id"] = body["mention_role_id"] or None
+    if "review_channel_id" in body:
+        schedule_settings["review_channel_id"] = body["review_channel_id"] or None
+    if "checkin_start" in body:
+        schedule_settings["checkin_start"] = body["checkin_start"]
+    if "checkin_end" in body:
+        schedule_settings["checkin_end"] = body["checkin_end"]
+    if "review_time" in body:
+        schedule_settings["review_time"] = body["review_time"]
+    if "motion_time" in body:
+        schedule_settings["motion_time"] = body["motion_time"]
+    if "vote_time" in body:
+        schedule_settings["vote_time"] = body["vote_time"]
+    if "regular_meeting_no" in body:
+        schedule_settings["regular_meeting_no"] = int(body["regular_meeting_no"])
+    if "briefing_meeting_no" in body:
+        schedule_settings["briefing_meeting_no"] = int(body["briefing_meeting_no"])
+    save_schedule_settings()
+    return web.json_response({"ok": True})
+
+
 async def api_test_ai_connection(request):
     """Test primary and/or fallback API connection with a minimal request.
     POST body: {"target": "primary" | "fallback" | "both" | "chain"}
@@ -8165,7 +8216,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -14241,6 +14292,605 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
             print(f"❌ 頻道 {orig_ch} 不支援 send，無法通知提案人")
     except Exception as e:
         print(f"❌ 通知提案人失敗：{e}")
+
+
+# ════════════════════════════════════════════════════════════
+# 自動排程／會議通知系統 — 渲染引擎 + 指令 + 確認按鈕
+# ════════════════════════════════════════════════════════════
+
+def _find_cjk_font():
+    """Find a CJK-capable font on the system (Render/Linux)."""
+    candidates = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    ]
+    # Also glob for any noto CJK font
+    for pat in [
+        "/usr/share/fonts/**/NotoSansCJK*",
+        "/usr/share/fonts/**/NotoSansCJKjp*",
+        "/usr/share/fonts/**/NotoSansSC*",
+        "/usr/share/fonts/**/*CJK*",
+    ]:
+        try:
+            import glob as _glob
+            candidates.extend(_glob.glob(pat, recursive=True))
+        except Exception:
+            pass
+    # Also check for other CJK fonts
+    for pat in [
+        "/usr/share/fonts/**/*WenQuanYi*",
+        "/usr/share/fonts/**/*wqy*",
+        "/usr/share/fonts/**/*DroidSansFallback*",
+    ]:
+        try:
+            import glob as _glob
+            candidates.extend(_glob.glob(pat, recursive=True))
+        except Exception:
+            pass
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _load_font(size: int):
+    """Load a CJK font at the given size, with fallbacks."""
+    font_path = _find_cjk_font()
+    if font_path:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except Exception as e:
+            print(f"⚠️ 字體載入失敗 {font_path}: {e}")
+    # Last resort: try Pillow's default
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+async def _ai_summarize_for_schedule(entries: list) -> list:
+    """Use AI to summarize accepted proposals into concise schedule-display text.
+    Returns a list of {proposal_type, summary, proposer_name} dicts."""
+    if not entries:
+        return []
+    # Build a combined prompt for all proposals
+    proposal_list = []
+    for i, e in enumerate(entries):
+        proposal_list.append(
+            f"提案{i+1}：\n"
+            f"  種類：{e.get('proposal_type', '?')}\n"
+            f"  摘要：{e.get('summary', '')}\n"
+            f"  提案人：{e.get('proposer_name', '?')}\n"
+            f"  原文：{e.get('raw_content', '')[:300]}"
+        )
+    combined = "\n\n".join(proposal_list)
+    
+    prompt = (
+        "你是微國家組織的秘書助理。以下是本次會議排程中所有已受理的提案。"
+        "請將每個提案整理成適合放在會議通知圖片上的精簡顯示文字。\n\n"
+        "要求：\n"
+        "- 每個提案一行，不超過40字\n"
+        "- 格式：[提案種類] 精簡內容描述\n"
+        "- 去除冗餘資訊，只留核心議題\n"
+        "- 保持原文意思，不竄改內容\n\n"
+        f"提案清單：\n{combined}\n\n"
+        "請以 JSON 陣列格式回覆（不要加 markdown code block）：\n"
+        '[{"type": "提案種類", "text": "精簡顯示文字"}, ...]\n'
+        "只回覆 JSON，不要加其他文字。"
+    )
+    
+    ps_ai = proposal_settings.get("ai_settings", {})
+    settings = {
+        "api_url": ps_ai.get("api_url") or chat_ai_settings.get("api_url", ""),
+        "api_key": ps_ai.get("api_key") or chat_ai_settings.get("api_key", ""),
+        "model": ps_ai.get("model") or chat_ai_settings.get("model", "gpt-4o-mini"),
+        "system_prompt": "你是秘書助理，負責精簡整理提案內容。",
+    }
+    
+    if not settings["api_url"] or not settings["api_key"]:
+        # Fallback: use raw summaries
+        return [{"type": e.get("proposal_type", "?"), "text": e.get("summary", "")[:40]} for e in entries]
+    
+    try:
+        result = await call_ai_api(prompt, settings)
+        result = result.strip()
+        if result.startswith("```"):
+            result = result.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = json_module.loads(result)
+        if isinstance(parsed, list):
+            # Merge with original entries for proposer_name
+            return [
+                {
+                    "type": item.get("type", entries[i].get("proposal_type", "?") if i < len(entries) else "?"),
+                    "text": item.get("text", "")[:60],
+                    "proposer_name": entries[i].get("proposer_name", "?") if i < len(entries) else "?",
+                }
+                for i, item in enumerate(parsed)
+            ]
+    except Exception as e:
+        print(f"⚠️ 排程 AI 整理失敗，使用原始摘要：{e}")
+    
+    # Fallback
+    return [{"type": e.get("proposal_type", "?"), "text": e.get("summary", "")[:40], "proposer_name": e.get("proposer_name", "?")} for e in entries]
+
+
+def _render_schedule_image(
+    meeting_type: str,
+    meeting_no: int,
+    proposals: list,
+    settings: dict,
+) -> bytes:
+    """Render the meeting schedule notification image using Pillow.
+    
+    meeting_type: "例行會議" or "簡務會議"
+    meeting_no: meeting number
+    proposals: list of {type, text, proposer_name}
+    settings: schedule_settings dict
+    
+    Returns PNG bytes.
+    """
+    if not _PIL_AVAILABLE:
+        raise RuntimeError("Pillow 未安裝，無法渲染排程圖")
+    
+    # ── Layout constants ──
+    IMG_W = 800
+    # Colors (matching the dark Discord theme from the reference images)
+    BG_COLOR = (43, 45, 49)        # #2b2d31
+    CARD_COLOR = (54, 57, 63)      # #36393f
+    HEADER_COLOR = (88, 101, 242)  # #5865f2
+    TEXT_PRIMARY = (255, 255, 255)
+    TEXT_SECONDARY = (185, 187, 190)
+    TEXT_MUTED = (120, 124, 130)
+    ACCENT_GOLD = (250, 168, 50)
+    ACCENT_GREEN = (87, 181, 96)
+    DIVIDER_COLOR = (65, 68, 73)
+    
+    today = datetime.now(GMT8)
+    date_str = today.strftime("%Y年%m月%d日")
+    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    weekday_str = f"星期{weekdays[today.weekday()]}"
+    
+    # ── Fonts ──
+    font_title = _load_font(28)
+    font_subtitle = _load_font(16)
+    font_section = _load_font(18)
+    font_body = _load_font(14)
+    font_small = _load_font(12)
+    font_time = _load_font(15)
+    
+    # ── Calculate height dynamically ──
+    # Header: 90px
+    # Date row: 30px
+    # Each section header: 35px
+    # Each proposal line: 28px (estimated, may wrap)
+    # Footer: 40px
+    
+    # Pre-calculate proposal section height (account for text wrapping)
+    proposal_lines = []
+    for p in proposals:
+        text = f"[{p.get('type', '?')}] {p.get('text', '')}"
+        # Estimate wrapping: ~35 chars per line at font_body size
+        max_chars = 38
+        lines = []
+        temp = text
+        while len(temp) > max_chars:
+            lines.append(temp[:max_chars])
+            temp = temp[max_chars:]
+        lines.append(temp)
+        proposal_lines.extend(lines)
+    
+    # Schedule sections
+    sections = [
+        ("📋 提案審理", proposals),
+        ("🗳️ 投票與決議", []),  # placeholder
+    ]
+    
+    total_proposal_height = max(len(proposal_lines) * 22, 30) if proposal_lines else 30
+    # Fixed sections: checkin, review time, motion, vote, adjourn
+    fixed_sections_height = 6 * 30  # 6 time-schedule rows
+    
+    img_h = 90 + 35 + 35 + total_proposal_height + 20 + fixed_sections_height + 20 + 40
+    img_h = max(img_h, 350)
+    
+    # ── Draw ──
+    img = Image.new("RGB", (IMG_W, img_h), BG_COLOR)
+    draw = ImageDraw.Draw(img)
+    
+    y = 0
+    
+    # ── Header bar ──
+    draw.rectangle([0, 0, IMG_W, 70], fill=HEADER_COLOR)
+    title_text = f"📢 {meeting_type}第{meeting_no}次"
+    # Center title
+    try:
+        bbox = draw.textbbox((0, 0), title_text, font=font_title)
+        tw = bbox[2] - bbox[0]
+    except Exception:
+        tw = 400
+    draw.text(((IMG_W - tw) / 2, 18), title_text, fill=TEXT_PRIMARY, font=font_title)
+    
+    y = 80
+    
+    # ── Date / weekday ──
+    date_text = f"📅 {date_str} {weekday_str}"
+    draw.text((30, y), date_text, fill=TEXT_SECONDARY, font=font_subtitle)
+    y += 30
+    
+    # ── Divider ──
+    draw.line([(30, y), (IMG_W - 30, y)], fill=DIVIDER_COLOR, width=1)
+    y += 12
+    
+    # ── Time schedule block ──
+    checkin_start = settings.get("checkin_start", "13:00")
+    checkin_end = settings.get("checkin_end", "21:00")
+    review_time = settings.get("review_time", "15:00")
+    motion_time = settings.get("motion_time", "20:00")
+    vote_time = settings.get("vote_time", "21:00")
+    
+    schedule_items = [
+        (f"🕐 {checkin_start} — {checkin_end}", "簽到時間", ACCENT_GREEN),
+        (f"🔍 {review_time}", "提案審理", ACCENT_GOLD),
+        (f"📝 {motion_time}", "臨時動議", ACCENT_GOLD),
+        (f"🗳️ {vote_time}", "投票結算", ACCENT_GOLD),
+        (f"📢 {vote_time}", "散會公告", ACCENT_GREEN),
+    ]
+    
+    # Section: 時間表
+    draw.text((30, y), "⏰ 會議時間表", fill=TEXT_PRIMARY, font=font_section)
+    y += 28
+    
+    for time_text, label, color in schedule_items:
+        # Time
+        draw.text((50, y), time_text, fill=color, font=font_time)
+        # Label
+        draw.text((280, y), label, fill=TEXT_SECONDARY, font=font_body)
+        y += 26
+    
+    y += 8
+    draw.line([(30, y), (IMG_W - 30, y)], fill=DIVIDER_COLOR, width=1)
+    y += 12
+    
+    # ── Proposals section ──
+    draw.text((30, y), "📋 本次議案清單", fill=TEXT_PRIMARY, font=font_section)
+    y += 28
+    
+    if proposal_lines:
+        for i, line in enumerate(proposal_lines):
+            # Number badge
+            draw.text((50, y), f"{i+1}.", fill=TEXT_MUTED, font=font_body)
+            draw.text((75, y), line, fill=TEXT_PRIMARY, font=font_body)
+            y += 22
+    else:
+        draw.text((50, y), "本次無待審議案", fill=TEXT_MUTED, font=font_body)
+        y += 22
+    
+    y += 8
+    draw.line([(30, y), (IMG_W - 30, y)], fill=DIVIDER_COLOR, width=1)
+    y += 12
+    
+    # ── Notes section ──
+    draw.text((30, y), "📌 注意事項", fill=TEXT_PRIMARY, font=font_section)
+    y += 28
+    
+    notes = [
+        "• 請各會員國代表準時簽到並參與表決",
+        "• 提案審理期間歡迎各國代表發表意見",
+        "• 投票將使用 Borda 計票制進行",
+    ]
+    for note in notes:
+        draw.text((50, y), note, fill=TEXT_SECONDARY, font=font_body)
+        y += 22
+    
+    # ── Footer ──
+    y += 8
+    draw.line([(30, y), (IMG_W - 30, y)], fill=DIVIDER_COLOR, width=1)
+    y += 10
+    footer = f"ICEA 微國家聯合組織 | {date_str}"
+    try:
+        bbox = draw.textbbox((0, 0), footer, font=font_small)
+        fw = bbox[2] - bbox[0]
+    except Exception:
+        fw = 300
+    draw.text(((IMG_W - fw) / 2, y), footer, fill=TEXT_MUTED, font=font_small)
+    
+    # ── Save to bytes ──
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+# ── Schedule confirm/send button ──
+class ScheduleSendView(discord.ui.View):
+    """Button view shown alongside the schedule preview image.
+    Secretariat clicks '發送' to push the image to the target channel."""
+
+    def __init__(self, schedule_id: str):
+        super().__init__(timeout=600)
+        self.schedule_id = schedule_id
+
+    @discord.ui.button(label="📤 發送排程通知", style=discord.ButtonStyle.success, custom_id="schedule_send")
+    async def send_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+            return
+        
+        sched = _pending_schedules.get(self.schedule_id)
+        if not sched:
+            await interaction.response.send_message("❌ 找不到排程資料（可能已過期，請重新 /schedule generate）。", ephemeral=True)
+            return
+        
+        target_ch_id = sched.get("target_channel_id")
+        mention_role_id = sched.get("mention_role_id")
+        
+        # Find target channel
+        target_ch = None
+        for g in bot.guilds:
+            ch = g.get_channel(int(target_ch_id)) if target_ch_id else None
+            if ch:
+                target_ch = ch
+                break
+        
+        if not target_ch:
+            await interaction.response.send_message("❌ 找不到目標發送頻道，請至 Dashboard 檢查設定。", ephemeral=True)
+            return
+        
+        # Send the image + mention
+        png_bytes = sched.get("png")
+        if not png_bytes:
+            await interaction.response.send_message("❌ 排程圖資料遺失，請重新 /schedule generate。", ephemeral=True)
+            return
+        
+        content = ""
+        if mention_role_id:
+            content = f"<@&{mention_role_id}>"
+        
+        embed = discord.Embed(
+            title=f"📢 {sched.get('meeting_type', '會議')}第{sched.get('meeting_no', '?')}次 — 會議排程通知",
+            description=(
+                f"📅 **{datetime.now(GMT8).strftime('%Y年%m月%d日')}**\n"
+                f"請各會員國代表留意會議時間表及待審議案，準時出席。"
+            ),
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_image(url="attachment://schedule.png")
+        embed.set_footer(text="ICEA 微國家聯合組織 | 會議排程自動通知系統")
+        
+        try:
+            await target_ch.send(
+                content=content,
+                embed=embed,
+                file=discord.File(io.BytesIO(png_bytes), filename="schedule.png"),
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(f"❌ 無權限在頻道 #{target_ch.name} 發送訊息。", ephemeral=True)
+            return
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 發送失敗：{e}", ephemeral=True)
+            return
+        
+        # ── After successful send: remove accepted proposals that were included ──
+        proposal_ids = sched.get("proposal_ids", [])
+        if proposal_ids:
+            removed = 0
+            for pid in proposal_ids:
+                for p in _proposals.get("entries", []):
+                    if p.get("id") == pid:
+                        p["status"] = "scheduled"
+                        p["schedule_date"] = datetime.now(GMT8).strftime("%Y-%m-%d %H:%M")
+                        removed += 1
+                        break
+            save_proposals()
+            print(f"📅 排程通知已發送，{removed} 筆提案標記為已排程")
+        
+        # ── Increment meeting number ──
+        if sched.get("meeting_type") == "例行會議":
+            schedule_settings["regular_meeting_no"] += 1
+        else:
+            schedule_settings["briefing_meeting_no"] += 1
+        save_schedule_settings()
+        
+        # ── Clear pending schedule ──
+        del _pending_schedules[self.schedule_id]
+        
+        # Update the confirmation message
+        try:
+            await interaction.response.edit_message(
+                content=f"✅ 排程通知已成功發送至 #{target_ch.name}" + (f" 並 @ 了身分組" if mention_role_id else ""),
+                embed=None,
+                view=None,
+                attachments=[],
+            )
+        except Exception:
+            try:
+                await interaction.followup.send(f"✅ 排程通知已成功發送至 #{target_ch.name}", ephemeral=True)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="🔄 重新生成", style=discord.ButtonStyle.secondary, custom_id="schedule_regen")
+    async def regen_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+            return
+        await interaction.response.send_message("請重新使用 `/schedule generate` 指令。", ephemeral=True)
+
+
+class ScheduleGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="schedule", description="會議排程通知系統")
+
+    @app_commands.command(name="generate", description="生成會議排程通知圖（管理員限定）")
+    @app_commands.describe(
+        meeting_type="會議種類",
+    )
+    @app_commands.choices(meeting_type=[
+        app_commands.Choice(name="例行會議", value="例行會議"),
+        app_commands.Choice(name="簡務會議", value="簡務會議"),
+    ])
+    async def generate(self, interaction: discord.Interaction, meeting_type: str = "例行會議"):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        
+        if not _PIL_AVAILABLE:
+            await interaction.response.send_message("❌ Pillow 未安裝，無法渲染排程圖。請聯繫管理員安裝 Pillow。", ephemeral=True)
+            return
+        
+        await interaction.response.defer(thinking=True)
+        
+        # Get all accepted proposals that haven't been scheduled yet
+        accepted = [
+            p for p in _proposals.get("entries", [])
+            if p.get("status") == "accepted"
+        ]
+        
+        if not accepted:
+            await interaction.followup.send("ℹ️ 目前沒有已受理待排程的提案。先在提案區受理提案後再執行此指令。", ephemeral=True)
+            return
+        
+        # AI summarize
+        summarized = await _ai_summarize_for_schedule(accepted)
+        
+        # Determine meeting number
+        if meeting_type == "例行會議":
+            meeting_no = schedule_settings.get("regular_meeting_no", 1)
+        else:
+            meeting_no = schedule_settings.get("briefing_meeting_no", 1)
+        
+        # Render image
+        try:
+            png_bytes = _render_schedule_image(meeting_type, meeting_no, summarized, schedule_settings)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 排程圖渲染失敗：{e}", ephemeral=True)
+            return
+        
+        # Determine review channel (fallback to proposal secretariat channel)
+        review_ch_id = schedule_settings.get("review_channel_id") or proposal_settings.get("secretariat_channel")
+        target_ch_id = schedule_settings.get("target_channel_id")
+        mention_role_id = schedule_settings.get("mention_role_id")
+        
+        # Store pending schedule
+        schedule_id = str(int(_time.time() * 1000))
+        _pending_schedules[schedule_id] = {
+            "png": png_bytes,
+            "meeting_type": meeting_type,
+            "meeting_no": meeting_no,
+            "proposal_ids": [p.get("id") for p in accepted],
+            "target_channel_id": target_ch_id,
+            "mention_role_id": mention_role_id,
+            "created_at": _time.time(),
+        }
+        
+        # Build preview embed
+        preview_embed = discord.Embed(
+            title=f"📅 {meeting_type}第{meeting_no}次 — 排程通知預覽",
+            description=(
+                f"共 {len(accepted)} 件已受理提案\n"
+                f"目標頻道：{'<#' + str(target_ch_id) + '>' if target_ch_id else '⚠️ 未設定'}\n"
+                f"提及身分組：{'<@&' + str(mention_role_id) + '>' if mention_role_id else '無'}\n\n"
+                f"請確認後點擊「📤 發送排程通知」按鈕。\n"
+                f"發送成功後，本批提案將標記為已排程，下次不會重複列出。"
+            ),
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        preview_embed.set_image(url="attachment://schedule_preview.png")
+        preview_embed.set_footer(text="確認排程 | 發送後提案自動標記為已排程")
+        
+        view = ScheduleSendView(schedule_id)
+        
+        try:
+            await interaction.followup.send(
+                embed=preview_embed,
+                file=discord.File(io.BytesIO(png_bytes), filename="schedule_preview.png"),
+                view=view,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ 預覽發送失敗：{e}", ephemeral=True)
+            return
+        
+        print(f"📅 排程預覽已生成：{meeting_type}#{meeting_no}，{len(accepted)} 件提案")
+
+    @app_commands.command(name="set_target", description="設定排程通知發送頻道（管理員限定）")
+    @app_commands.describe(channel="排程圖最終發送的頻道")
+    async def set_target(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        schedule_settings["target_channel_id"] = channel.id
+        save_schedule_settings()
+        await interaction.response.send_message(f"✅ 排程通知發送頻道已設為 #{channel.name}", ephemeral=True)
+
+    @app_commands.command(name="set_mention", description="設定排程通知 @ 的身分組（管理員限定）")
+    @app_commands.describe(role="發送排程通知時 @ 提及的身分組")
+    async def set_mention(self, interaction: discord.Interaction, role: discord.Role):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        schedule_settings["mention_role_id"] = role.id
+        save_schedule_settings()
+        await interaction.response.send_message(f"✅ 排程通知提及身分組已設為 {role.mention}", ephemeral=True)
+
+    @app_commands.command(name="set_review", description="設定排程預覽確認頻道（管理員限定）")
+    @app_commands.describe(channel="秘書處確認排程圖的頻道")
+    async def set_review(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        schedule_settings["review_channel_id"] = channel.id
+        save_schedule_settings()
+        await interaction.response.send_message(f"✅ 排程預覽確認頻道已設為 #{channel.name}", ephemeral=True)
+
+    @app_commands.command(name="set_time", description="設定會議時間表（管理員限定）")
+    @app_commands.describe(
+        checkin_start="簽到開始 HH:MM",
+        checkin_end="簽到結束 HH:MM",
+        review_time="提案審理時間 HH:MM",
+        motion_time="臨時動議時間 HH:MM",
+        vote_time="投票結算時間 HH:MM",
+    )
+    async def set_time(self, interaction: discord.Interaction,
+                       checkin_start: str = None,
+                       checkin_end: str = None,
+                       review_time: str = None,
+                       motion_time: str = None,
+                       vote_time: str = None):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        if checkin_start: schedule_settings["checkin_start"] = checkin_start
+        if checkin_end: schedule_settings["checkin_end"] = checkin_end
+        if review_time: schedule_settings["review_time"] = review_time
+        if motion_time: schedule_settings["motion_time"] = motion_time
+        if vote_time: schedule_settings["vote_time"] = vote_time
+        save_schedule_settings()
+        await interaction.response.send_message(
+            f"✅ 會議時間表已更新：\n"
+            f"簽到 {schedule_settings['checkin_start']}~{schedule_settings['checkin_end']} / "
+            f"審理 {schedule_settings['review_time']} / 動議 {schedule_settings['motion_time']} / "
+            f"投票 {schedule_settings['vote_time']}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="status", description="查看排程系統設定狀態")
+    async def status(self, interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
+            return
+        accepted = [p for p in _proposals.get("entries", []) if p.get("status") == "accepted"]
+        embed = discord.Embed(title="📅 會議排程系統狀態", color=discord.Color.blue())
+        embed.add_field(name="下次例行會議", value=f"第{schedule_settings.get('regular_meeting_no', 1)}次", inline=True)
+        embed.add_field(name="下次簡務會議", value=f"第{schedule_settings.get('briefing_meeting_no', 1)}次", inline=True)
+        embed.add_field(name="待排程提案數", value=str(len(accepted)), inline=True)
+        embed.add_field(name="發送頻道", value=f"<#{schedule_settings.get('target_channel_id', 0)}>" if schedule_settings.get("target_channel_id") else "未設定", inline=True)
+        embed.add_field(name="提及身分組", value=f"<@&{schedule_settings.get('mention_role_id', 0)}>" if schedule_settings.get("mention_role_id") else "未設定", inline=True)
+        embed.add_field(name="確認頻道", value=f"<#{schedule_settings.get('review_channel_id', 0)}>" if schedule_settings.get("review_channel_id") else "未設定", inline=True)
+        embed.add_field(name="時間表", value=f"簽到 {schedule_settings.get('checkin_start','?')}~{schedule_settings.get('checkin_end','?')}\n審理 {schedule_settings.get('review_time','?')} / 動議 {schedule_settings.get('motion_time','?')} / 投票 {schedule_settings.get('vote_time','?')}", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ════════════════════════════════════════════════════════════
