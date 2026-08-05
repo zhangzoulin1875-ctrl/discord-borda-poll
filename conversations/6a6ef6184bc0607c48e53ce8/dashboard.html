@@ -271,7 +271,35 @@
           </div>
         </div>
       </div>
-      <!-- Fallback API -->
+      <!-- AI Turtle Soup -->
+  <div class="bg-[#2b2d31] rounded-xl p-5">
+    <h3 class="font-semibold mb-1">🍜 AI 海龜湯</h3>
+    <p class="text-xs text-gray-400 mb-4">自動出題、玩家問是/否問題推理真相的小遊戲</p>
+    <div class="space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm">啟用海龜湯</p>
+          <p class="text-xs text-gray-400">開啟後可在指定頻道自動發送遊戲邀請面板</p>
+        </div>
+        <label class="toggle"><input type="checkbox" id="ai-turtle-soup-enabled"><span class="toggle-slider"></span></label>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">海龜湯頻道 ID</label>
+        <p class="text-xs text-gray-500 mb-2">玩家在此頻道提問，面板也會發在這裡</p>
+        <input id="ai-turtle-soup-channel" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="頻道 ID">
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">預設難度</label>
+        <p class="text-xs text-gray-500 mb-2">easy=25次提問 / medium=18次 / hard=12次</p>
+        <select id="ai-turtle-soup-difficulty" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+          <option value="easy">簡單（25次提問）</option>
+          <option value="medium">中等（18次提問）</option>
+          <option value="hard">困難（12次提問）</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <!-- Fallback API -->
       <div class="bg-[#2b2d31] rounded-xl p-5">
         <h3 class="font-semibold mb-1">🔁 備援 API</h3>
         <p class="text-xs text-gray-400 mb-4">當主要 API 回報 503/502/500 等供應商錯誤時，自動切換到備援 API</p>
@@ -922,6 +950,10 @@ async function showChatAIPanel() {
   document.getElementById('ai-forum-interval').value = s.forum_index_interval ?? 900;
   document.getElementById('ai-channel-interval').value = s.channel_index_interval ?? 1800;
   document.getElementById('ai-drive-interval').value = s.drive_sync_interval ?? 60;
+  // Turtle Soup
+  document.getElementById('ai-turtle-soup-enabled').checked = s.turtle_soup_enabled || false;
+  document.getElementById('ai-turtle-soup-channel').value = s.turtle_soup_channel_id || '';
+  document.getElementById('ai-turtle-soup-difficulty').value = s.turtle_soup_difficulty || 'medium';
   // Fallback API
   document.getElementById('ai-fallback-enabled').checked = s.fallback_enabled || false;
   document.getElementById('ai-fallback-url').value = s.fallback_api_url || '';
@@ -985,6 +1017,10 @@ async function saveChatAISettings() {
     forum_index_interval: parseInt(document.getElementById('ai-forum-interval').value) || 900,
     channel_index_interval: parseInt(document.getElementById('ai-channel-interval').value) || 1800,
     drive_sync_interval: parseInt(document.getElementById('ai-drive-interval').value) || 60,
+    // Turtle Soup
+    turtle_soup_enabled: document.getElementById('ai-turtle-soup-enabled').checked,
+    turtle_soup_channel_id: document.getElementById('ai-turtle-soup-channel').value.trim(),
+    turtle_soup_difficulty: document.getElementById('ai-turtle-soup-difficulty').value,
     // Fallback API
     fallback_enabled: document.getElementById('ai-fallback-enabled').checked,
     fallback_api_url: document.getElementById('ai-fallback-url').value.trim(),
