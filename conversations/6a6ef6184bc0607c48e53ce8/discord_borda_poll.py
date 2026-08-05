@@ -18383,11 +18383,21 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
     legend_keys = set(legend.keys())
 
     # 2. 掃描回覆訊息，蒐集每位使用者的最後一筆有效投票
+    # ── 排序投票（波達計數法）的「完整性」規則 ──
+    # 論壇雜訊很多：有投錯代碼的、只填了一部分選項就沒填完（變成廢票）的、
+    # 直接發圖片投票（完全沒有可解析文字）的。人工計票時，沒有把所有候選人
+    # 都排完序的票會直接視為廢票不計分——但先前 AI 自動計票只要抓到幾個合法
+    # 代碼就照樣給部分分數，等於讓不完整/投錯的票混進正式計票，跟人工結果
+    # 兜不起來。修正：ranked 模式下，一則回覆必須「剛好包含全部 n 個候選人
+    # 代碼」才算有效票；只包含一部分（無論是因為投錯代碼、故意放棄、還是
+    # 只填了 7/12 個）都算廢票，整張不計分，不給部分分數。
+    n_candidates = len(legend_keys)
     ballots = {}          # author_id -> ordered token list
     voter_labels = {}      # author_id -> (display_name, raw_country_text)
     voter_last_time = {}   # author_id -> created_at（用於「取最後一筆」判斷)
-    skipped_count = 0
+    skipped_count = 0      # 完全沒有偵測到任何合法代碼（閒聊、純圖片等）
     disputed = []          # 有爭議的投票（單選卻填多個選項等）
+    spoiled = []           # 排序投票但沒填完整/代碼有誤的廢票
 
     async for msg in thread.history(limit=None, oldest_first=True):
         if starter is not None and msg.id == starter.id:
@@ -18405,6 +18415,14 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
                 "author": msg.author.display_name,
                 "content": content[:80],
                 "reason": f"單選投票卻偵測到 {len(found)} 個選項",
+            })
+            continue
+
+        if final_mode == "ranked" and n_candidates > 0 and len(found) < n_candidates:
+            spoiled.append({
+                "author": msg.author.display_name,
+                "content": content[:80],
+                "reason": f"只排了 {len(found)}/{n_candidates} 個選項，未完整排序視為廢票",
             })
             continue
 
@@ -18432,6 +18450,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
         "valid_vote_count": len(ballots),
         "skipped_count": skipped_count,
         "disputed": disputed,
+        "spoiled": spoiled,
         "thread_id": thread.id,
         "thread_name": thread.name,
     }
@@ -18468,13 +18487,24 @@ def _build_tally_embed(result: dict) -> discord.Embed:
     else:
         embed.add_field(name="計票結果", value="（沒有偵測到任何選項）", inline=False)
 
+    spoiled = result.get("spoiled", [])
     stats_lines = [
         f"✅ 有效投票：{result['valid_vote_count']} 筆",
-        f"🚫 已過濾閒聊/無效訊息：{result['skipped_count']} 筆",
+        f"🚫 已過濾閒聊/圖片/無效訊息：{result['skipped_count']} 筆",
     ]
+    if spoiled:
+        stats_lines.append(f"🗑️ 廢票（未完整排序/代碼有誤）：{len(spoiled)} 筆")
     if result["disputed"]:
         stats_lines.append(f"⚠️ 有爭議訊息：{len(result['disputed'])} 筆（需人工複核）")
     embed.add_field(name="統計", value="\n".join(stats_lines), inline=False)
+
+    if spoiled:
+        spoiled_lines = [
+            f"• {d['author']}：{d['reason']}（「{d['content']}」）" for d in spoiled[:8]
+        ]
+        if len(spoiled) > 8:
+            spoiled_lines.append(f"…等共 {len(spoiled)} 筆")
+        embed.add_field(name="🗑️ 廢票明細（已排除，不計分）", value="\n".join(spoiled_lines)[:1024], inline=False)
 
     if result["disputed"]:
         dispute_lines = [
