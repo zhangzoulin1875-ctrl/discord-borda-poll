@@ -19254,6 +19254,9 @@ class TurtleSoupHintView(discord.ui.View):
             await interaction.response.edit_message(content="⚠️ 遊戲已結束。", view=None)
             return
         if want_hint:
+            # 先立刻回應（3秒內），避免等待AI生成提示時互動逾時導致「此交互失敗」，
+            # 之後用 edit_original_response 更新內容就沒有3秒限制了
+            await interaction.response.edit_message(content="🤔 正在生成提示...", view=None)
             try:
                 hint = await _generate_turtle_soup_hint(
                     _turtle_soup_state["truth"], _turtle_soup_state["qa_history"],
@@ -19261,12 +19264,15 @@ class TurtleSoupHintView(discord.ui.View):
                 )
                 _turtle_soup_state["hints_given"] += 1
                 level_desc = {1: "模糊", 2: "中等", 3: "明顯", 4: "直白"}.get(self._level, "直白")
-                await interaction.response.edit_message(
-                    content=f"💡 **線索（{level_desc}）：** {hint}", view=None,
+                await interaction.edit_original_response(
+                    content=f"💡 **線索（{level_desc}）：** {hint}",
                 )
             except Exception as e:
                 print(f"⚠️ Turtle soup hint generation failed: {e}")
-                await interaction.response.edit_message(content="⚠️ 線索生成失敗。", view=None)
+                try:
+                    await interaction.edit_original_response(content="⚠️ 線索生成失敗。")
+                except Exception:
+                    pass
         else:
             next_milestone = (
                 (_turtle_soup_state["questions_used"] // 5 + 1) * 5
