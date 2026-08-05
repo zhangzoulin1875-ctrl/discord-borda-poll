@@ -3160,11 +3160,129 @@ async def _micropedia_auto_context(message_text: str, max_results: int = 5) -> s
         return ""
 
 
-def _clean_wikitext(text: str) -> str:
-    """Remove MediaWiki markup to get clean text."""
+def _wikitext_template_to_text(inner: str) -> str:
+    """Convert the content of a resolved (innermost, no nested braces)
+    MediaWiki template {{...}} into readable '【Name】key：value；...' text.
+    Infobox-style templates (name=value parameters) carry real facts —
+    e.g. an Infobox political party's founding date, leader, seat count —
+    that must NOT be silently discarded. Pure citation/reference/formatting
+    templates carry no standalone facts and are dropped to avoid noise."""
+    parts = inner.split("|")
+    name = parts[0].strip()
+    name_lower = name.lower()
+    if any(k in name_lower for k in ["cite", "citation", "ref", "來源", "reflist",
+                                       "notelist", "convert", "lang-", "efn"]):
+        return ""
+    if len(parts) <= 1:
+        return ""  # no parameters at all — nothing to extract
+    kv_pairs = []
+    for p in parts[1:]:
+        p = p.strip()
+        if not p:
+            continue
+        if "=" in p:
+            k, v = p.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if v:
+                kv_pairs.append(f"{k}：{v}")
+        elif p:
+            kv_pairs.append(p)
+    if not kv_pairs:
+        return ""
+    return f"【{name}】" + "；".join(kv_pairs)
+
+
+def _wikitable_to_text(table_body: str) -> str:
+    """Convert the content of a MediaWiki table {| ... |} (exclusive of the
+    {| and |} delimiters) into readable text — one line per row, formatted
+    as 'header：value；header2：value2' when a header row is detected,
+    otherwise pipe-joined cell values. Previously tables were deleted
+    outright, so any fact that only existed in tabular form (e.g. a list of
+    political parties with their status columns) was invisible to the AI."""
     import re as _re
-    # Remove templates {{...}} (non-nested)
-    text = _re.sub(r"\{\{[^}]*\}\}", "", text)
+    lines = table_body.split("\n")
+    headers = []
+    rows = []
+    current_row = []
+
+    def _strip_cell_attrs(cell: str) -> str:
+        # Wikitext cells can carry attributes before a final "|", e.g.
+        # 'style="background:red" | 是' -> keep only the text after the
+        # last "|" when the part before it looks like an attribute list.
+        if "|" in cell:
+            maybe_attr, maybe_text = cell.rsplit("|", 1)
+            if "=" in maybe_attr or "style" in maybe_attr.lower() or "align" in maybe_attr.lower():
+                return maybe_text.strip()
+        return cell.strip()
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("|-"):
+            if current_row:
+                rows.append(current_row)
+                current_row = []
+            continue
+        if line.startswith("|+"):
+            continue  # caption — skip
+        if line.startswith("!"):
+            for c in _re.split(r"!!", line[1:]):
+                headers.append(_strip_cell_attrs(c))
+            continue
+        if line.startswith("|"):
+            for c in _re.split(r"\|\|", line[1:]):
+                current_row.append(_strip_cell_attrs(c))
+            continue
+    if current_row:
+        rows.append(current_row)
+
+    out_lines = []
+    for row in rows:
+        # Compare against the RAW cell count (including now-empty cells,
+        # e.g. an icon cell whose [[File:...]] link was already stripped)
+        # so header alignment isn't lost just because some cells are blank —
+        # only filter empties out when building the final display text.
+        if headers and len(row) == len(headers):
+            pairs = [f"{h}：{v}" for h, v in zip(headers, row) if v]
+            if pairs:
+                out_lines.append("；".join(pairs))
+        else:
+            non_empty = [v for v in row if v]
+            if non_empty:
+                out_lines.append(" | ".join(non_empty))
+    return "\n".join(out_lines)
+
+
+def _clean_wikitext(text: str) -> str:
+    """Remove MediaWiki markup to get clean text — CONVERTS tables and
+    infobox/parameter templates into readable text instead of deleting them.
+    Previously both were stripped outright, so any fact that only existed
+    in a table (e.g. 現有黨派 list) or an Infobox (founding date, leader,
+    seat count, etc.) was completely invisible to the AI, even though the
+    article visibly contained the data on the website."""
+    import re as _re
+
+    # Drop pure icon/image links first — they carry no textual info and
+    # otherwise leave junk like "50px|thumb" behind after link cleanup.
+    text = _re.sub(r"\[\[(?:File|Image|檔案|文件):[^\]]*\]\]", "", text, flags=_re.IGNORECASE)
+
+    # Templates {{...}} — repeatedly resolve INNERMOST templates first (no
+    # nested braces inside), converting each into readable
+    # "【Name】key：value；..." text instead of deleting. Looping until
+    # stable also fixes the old non-nested-regex limitation where an outer
+    # template's true closing "}}" was left dangling after a naive single pass.
+    _tpl_re = _re.compile(r"\{\{([^{}]*)\}\}")
+    _prev = None
+    while _prev != text:
+        _prev = text
+        text = _tpl_re.sub(lambda m: _wikitext_template_to_text(m.group(1)), text)
+
+    # Tables {| ... |} — convert to readable "header：value；..." lines
+    # instead of deleting.
+    _tbl_re = _re.compile(r"\{\|(.*?)\|\}", _re.DOTALL)
+    text = _tbl_re.sub(lambda m: _wikitable_to_text(m.group(1)), text)
+
     # Remove wiki links [[link|display]] -> display
     text = _re.sub(r"\[\[[^]]*?\|([^]]*)\]\]", r"\1", text)
     text = _re.sub(r"\[\[([^]]*)\]\]", r"\1", text)
@@ -3173,8 +3291,6 @@ def _clean_wikitext(text: str) -> str:
     text = _re.sub(r"\[https?://\S+\]", "", text)
     # Remove HTML tags
     text = _re.sub(r"<[^>]+>", "", text)
-    # Remove wiki tables {| ... |}
-    text = _re.sub(r"\{\|.*?\|\}", "", text, flags=_re.DOTALL)
     # Remove headings markup =...=
     text = _re.sub(r"^=+\s*(.*?)\s*=+$", r"\1", text, flags=_re.MULTILINE)
     # Remove list markers
@@ -3303,8 +3419,12 @@ async def _micropedia_fetch_content(session, titles: list) -> str:
         clean = _clean_wikitext(wikitext)
         if clean and len(clean) > 10:
             title = page.get("title", "?")
-            if len(clean) > 2000:
-                clean = clean[:2000] + "..."
+            # Bumped from 2000 to 3000 chars — tables/infoboxes are now
+            # converted to readable text instead of being deleted outright,
+            # so articles with rich tabular data (e.g. a party list, a
+            # cabinet roster) need more budget to not get cut off mid-table.
+            if len(clean) > 3000:
+                clean = clean[:3000] + "..."
             content_parts.append(f"【{title}】\n{clean}")
 
     return "\n\n".join(content_parts)
@@ -4227,6 +4347,19 @@ def _strip_thinking(text: str) -> str:
                 # Only strip if there's real content after the separator
                 if len(remainder) > 5:
                     text = remainder
+                else:
+                    # Stalling preamble followed by nothing substantial —
+                    # the model said e.g. "讓我想想...\n\n" and stopped.
+                    # Blank it out entirely rather than sending a
+                    # non-committal filler as the "final answer".
+                    text = ""
+            else:
+                # The model's ENTIRE reply is just a stalling phrase like
+                # "讓我想想..." with no follow-up at all — this is a lazy
+                # non-answer, not a real reply. Treat it as empty so the
+                # caller's safety net substitutes an honest fallback
+                # message instead of showing this to the user verbatim.
+                text = ""
             break
 
     return text.strip()
@@ -6640,7 +6773,7 @@ async def on_message(message):
             else:
                 print(f"⚠️ AI 回覆為空，發送 fallback 訊息")
                 try:
-                    await message.reply("🤔 讓我想想...", mention_author=False)
+                    await message.reply("🤔 這個問題我目前查不到明確資料，你可以換個問法或補充更多細節，我再幫你查一次看看？", mention_author=False)
                 except Exception as e:
                     print(f"⚠️ fallback 回覆發送失敗: {e}")
         # ── Abuse detection: AI path (after AI call) ──
@@ -9006,8 +9139,11 @@ async def _run_global_micropedia_scan():
                                 clean = _clean_wikitext(wikitext)
                                 if clean and len(clean) > 10:
                                     p_title = page.get("title", "?")
-                                    if len(clean) > 2000:
-                                        clean = clean[:2000] + "..."
+                                    # Same 2000->3000 bump as above — tables/
+                                    # infoboxes now produce real text instead
+                                    # of being deleted.
+                                    if len(clean) > 3000:
+                                        clean = clean[:3000] + "..."
                                     content_parts.append(f"【{p_title}】\n{clean}")
                 except Exception as fe:
                     print(f"⚠️ 全球掃描取得內文失敗 (批次 {b_idx + 1}): {fe}")
