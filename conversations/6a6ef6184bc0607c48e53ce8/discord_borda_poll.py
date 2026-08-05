@@ -1543,6 +1543,7 @@ chat_ai_settings = {
     "fallback_daily_limit": 10,    # 備援模式下每位用戶每日對話上限
     "fallback_rate_per_min": 6,    # 備援 API 每分鐘聊天請求上限
     "fallback_owner_exempt": True,  # 機器人擁有者豁免備援限速與每日配額
+    "owner_skip_model_chain": True,  # 擁有者跳過模型降級鏈：主模型不可用時直接調用備援 API（不逐一嘗試降級鏈中的其他模型），因為備援模型通常比降級鏈裡的免費模型更強
     "fallback_daily_limit_msg": "⚠️ 你的今日備援 API 用量已達上限，為了節省備援資源給重要的行政功能，聊天備援暫時關閉。主要 API 恢復後即可正常使用～",
     "fallback_rate_limit_msg": "⚠️ 備援 API 請求過於頻繁，請稍等一下再試～",
     "entertainment_unavailable_msg": "🔧 AI 系統暫時維護中，娛樂功能暫時關閉，請稍後再試～",
@@ -2371,7 +2372,24 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             # picky about the status code: any non-200 just means "this
             # particular model didn't work", so always try the rest of the
             # chain (bounded by the remaining time-budget check below anyway).
-            _model_retryable = len(_model_chain) > 1
+            #
+            # ── Skip the chain entirely in two cases ──
+            # 1. Administrative calls (fallback_mode == "full", e.g. proposal
+            #    review, membership application checks) — these can't afford
+            #    to burn time cycling through weak free models one by one;
+            #    go straight to the (stronger) backup API on the first failure.
+            # 2. Owner calls, when owner_skip_model_chain is enabled — the
+            #    owner's own backup API (e.g. their personal Gemini) is
+            #    typically much stronger than anything in the free-model
+            #    degradation chain, so there's no point trying those first.
+            _is_owner_call = bool(fallback_user_id) and str(fallback_user_id) == str(BOT_OWNER_ID)
+            _skip_chain_for_admin = (fallback_mode == "full")
+            _skip_chain_for_owner = _is_owner_call and settings.get("owner_skip_model_chain", True)
+            _skip_model_chain = _skip_chain_for_admin or _skip_chain_for_owner
+            if _skip_model_chain and len(_model_chain) > 1:
+                _why = "行政功能" if _skip_chain_for_admin else "擁有者跳過降級"
+                print(f"⏭️ 跳過模型降級鏈（{_why}），直接交由備援 API 處理（HTTP {status}）")
+            _model_retryable = (not _skip_model_chain) and len(_model_chain) > 1
             if _model_retryable:
                 for _mi in range(1, len(_model_chain)):
                     if _remaining() < 2:
@@ -5866,6 +5884,7 @@ async def api_get_chat_ai_settings(request):
         "fallback_daily_limit": chat_ai_settings.get("fallback_daily_limit", 10),
         "fallback_rate_per_min": chat_ai_settings.get("fallback_rate_per_min", 6),
         "fallback_owner_exempt": chat_ai_settings.get("fallback_owner_exempt", True),
+        "owner_skip_model_chain": chat_ai_settings.get("owner_skip_model_chain", True),
         "fallback_daily_limit_msg": chat_ai_settings.get("fallback_daily_limit_msg", ""),
         "fallback_rate_limit_msg": chat_ai_settings.get("fallback_rate_limit_msg", ""),
         "entertainment_unavailable_msg": chat_ai_settings.get("entertainment_unavailable_msg", ""),
@@ -5940,6 +5959,8 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["fallback_rate_per_min"] = int(body["fallback_rate_per_min"])
     if "fallback_owner_exempt" in body:
         chat_ai_settings["fallback_owner_exempt"] = bool(body["fallback_owner_exempt"])
+    if "owner_skip_model_chain" in body:
+        chat_ai_settings["owner_skip_model_chain"] = bool(body["owner_skip_model_chain"])
     if "fallback_daily_limit_msg" in body:
         chat_ai_settings["fallback_daily_limit_msg"] = body["fallback_daily_limit_msg"]
     if "fallback_rate_limit_msg" in body:
@@ -12269,6 +12290,23 @@ async def _verify_application_essays(content: str) -> dict:
             "profile": _essay_fallback_check(content, "國家簡介", "Country Profile"),
         }
 
+    # 帶入完整備援設定：這裡以前只建立 {api_url, api_key, model} 三個欄位，
+    # 完全沒有 fallback_enabled/fallback_api_url 等鍵——所以即使這個呼叫預設
+    # fallback_mode="full"（行政優先），call_chat_api 內部備援邏輯讀取的是
+    # 這個 settings dict，缺少這些鍵就永遠不會真正切換到備援 API。入盟審核
+    # 是行政功能，不容許因為缺設定而悄悄失敗，這裡把真正的備援設定帶進來。
+    ai_call_settings = {
+        "api_url": ai_url,
+        "api_key": ai_key,
+        "model": ai_model,
+        "model_fallback_chain": ps_ai.get("model_fallback_chain") or chat_ai_settings.get("model_fallback_chain", ""),
+        "fallback_enabled": chat_ai_settings.get("fallback_enabled", False),
+        "fallback_api_url": chat_ai_settings.get("fallback_api_url", ""),
+        "fallback_api_key": chat_ai_settings.get("fallback_api_key", ""),
+        "fallback_model": chat_ai_settings.get("fallback_model", ""),
+        "owner_skip_model_chain": chat_ai_settings.get("owner_skip_model_chain", True),
+    }
+
     prompt = (
         "以下是一份微國家組織的入盟申請書全文。申請書中有兩個「小作文」欄位：\n"
         "1. 申請目的與願景（Desired goals and vision）\n"
@@ -12290,8 +12328,9 @@ async def _verify_application_essays(content: str) -> dict:
     try:
         result = await call_chat_api(
             [{"role": "user", "content": prompt}],
-            {"api_url": ai_url, "api_key": ai_key, "model": ai_model},
+            ai_call_settings,
             max_tokens=200,
+            fallback_mode="full",  # administrative — never leave applications unverified
         )
         text = result.get("content", "") if isinstance(result, dict) else ""
         text = text.strip()
@@ -12312,101 +12351,108 @@ async def _verify_application_essays(content: str) -> dict:
 
 async def _verify_flag_image(image_url: str) -> bool:
     """Use vision AI to verify the flag image is actually a flag (or flag-like).
-    Returns True if it looks like a flag, False otherwise."""
+    Returns True if it looks like a flag, False otherwise.
+
+    Administrative function — membership applications can't afford to
+    silently skip verification just because the primary vision model is
+    down. Routed through call_chat_api (instead of a raw one-off POST) so
+    it gets the full treatment: model-fallback-chain, and — since this is
+    fallback_mode="full" — an immediate switch to the backup API (the
+    owner's Gemini, which also supports vision) on ANY primary failure,
+    bypassing the free-model degradation chain entirely for reliability."""
     # Use application AI settings, falling back to chat AI settings
     ps_ai = application_settings.get("ai_settings", {})
     ai_url = ps_ai.get("api_url") or chat_ai_settings.get("api_url", "")
     ai_key = ps_ai.get("api_key") or chat_ai_settings.get("api_key", "")
     vision_model = ps_ai.get("vision_model") or chat_ai_settings.get("vision_model", "")
 
+    # The backup API's vision-capable model — falls back to fallback_model
+    # (assumed multimodal, e.g. Gemini) if no dedicated fallback_vision_model
+    # is configured separately.
+    fallback_vision_model = (
+        chat_ai_settings.get("fallback_vision_model", "")
+        or chat_ai_settings.get("fallback_model", "")
+    )
+
     if not ai_url or not ai_key or not vision_model:
-        # No vision AI configured — accept any image as valid
-        print("📝 國旗檢查：未設定視覺模型，跳過 AI 驗證（接受任何圖片）")
-        return True
+        # No primary vision AI configured. If a backup vision-capable model
+        # IS configured, use it directly instead of skipping verification.
+        if chat_ai_settings.get("fallback_enabled") and chat_ai_settings.get("fallback_api_url") and fallback_vision_model:
+            print("📝 國旗檢查：未設定主要視覺模型，直接使用備援視覺模型")
+            ai_url = chat_ai_settings.get("fallback_api_url", "")
+            ai_key = chat_ai_settings.get("fallback_api_key", "")
+            vision_model = fallback_vision_model
+        else:
+            print("📝 國旗檢查：未設定視覺模型，跳過 AI 驗證（接受任何圖片）")
+            return True
 
     settings = {
         "api_url": ai_url,
         "api_key": ai_key,
-        "vision_model": vision_model,
-    }
-
-    # Normalize URL
-    norm_url = ai_url.rstrip("/")
-    if not norm_url.endswith("/chat/completions"):
-        if norm_url.endswith("/v1") or norm_url.endswith("/v2"):
-            norm_url += "/chat/completions"
-        else:
-            norm_url += "/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {ai_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
         "model": vision_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "這是一張入盟申請書中附上的「國旗」圖片，申請者是微國家（micronation）組織的成員。\n"
-                            "請注意：微國家的國旗設計非常自由多元，完全不需要和真實國家的旗幟相似，"
-                            "可以是任何形狀、任何配色、幾何圖形、像素風格、抽象圖案、圓形/方形/不規則構圖、"
-                            "卡通風格、極簡風格等——只要是「申請者當作代表自己國家的旗幟圖案」上傳的圖片，都應該視為有效。\n\n"
-                            "你只需要排除明顯「不是旗幟設計、而是完全無關內容」的圖片，例如：\n"
-                            "- 真人或動物的照片\n"
-                            "- 聊天截圖、文字文件截圖、程式碼截圖\n"
-                            "- 迷因圖（meme）、網路梗圖\n"
-                            "- 空白圖片、純雜訊、看不出任何設計意圖的圖片\n"
-                            "- 與旗幟完全無關的隨機照片（風景照、商品照等）\n\n"
-                            "只要圖片看起來是「有意設計的圖案/色塊/符號組合」，即使抽象、簡單、或不像傳統國旗，"
-                            "一律判定為有效（true）。如果不確定，請傾向判定為 true。\n\n"
-                            "只需要回答 JSON：{\"is_flag\": true/false, \"description\": \"簡短描述\"}"
-                        ),
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_url},
-                    },
-                ],
-            }
-        ],
-        "max_tokens": 200,
-        "temperature": 0.1,
+        "fallback_enabled": chat_ai_settings.get("fallback_enabled", False),
+        "fallback_api_url": chat_ai_settings.get("fallback_api_url", ""),
+        "fallback_api_key": chat_ai_settings.get("fallback_api_key", ""),
+        "fallback_model": fallback_vision_model,
+        "owner_skip_model_chain": chat_ai_settings.get("owner_skip_model_chain", True),
     }
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "這是一張入盟申請書中附上的「國旗」圖片，申請者是微國家（micronation）組織的成員。\n"
+                        "請注意：微國家的國旗設計非常自由多元，完全不需要和真實國家的旗幟相似，"
+                        "可以是任何形狀、任何配色、幾何圖形、像素風格、抽象圖案、圓形/方形/不規則構圖、"
+                        "卡通風格、極簡風格等——只要是「申請者當作代表自己國家的旗幟圖案」上傳的圖片，都應該視為有效。\n\n"
+                        "你只需要排除明顯「不是旗幟設計、而是完全無關內容」的圖片，例如：\n"
+                        "- 真人或動物的照片\n"
+                        "- 聊天截圖、文字文件截圖、程式碼截圖\n"
+                        "- 迷因圖（meme）、網路梗圖\n"
+                        "- 空白圖片、純雜訊、看不出任何設計意圖的圖片\n"
+                        "- 與旗幟完全無關的隨機照片（風景照、商品照等）\n\n"
+                        "只要圖片看起來是「有意設計的圖案/色塊/符號組合」，即使抽象、簡單、或不像傳統國旗，"
+                        "一律判定為有效（true）。如果不確定，請傾向判定為 true。\n\n"
+                        "只需要回答 JSON：{\"is_flag\": true/false, \"description\": \"簡短描述\"}"
+                    ),
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+            ],
+        }
+    ]
 
     try:
         t0 = _time.time()
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                norm_url, json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60, connect=10, sock_read=50),
-            ) as resp:
-                if resp.status != 200:
-                    print(f"⚠️ 國旗視覺檢查 API 返回 {resp.status}")
-                    return True  # Fail open — don't block on API errors
-                data = json_module.loads(await resp.text())
-                choices = data.get("choices", [])
-                if choices:
-                    text = choices[0].get("message", {}).get("content", "").strip()
-                    if text.startswith("```"):
-                        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-                    try:
-                        parsed = json_module.loads(text)
-                        is_flag = parsed.get("is_flag", True)
-                        desc = parsed.get("description", "")
-                        print(f"🚩 國旗視覺檢查完成（{_time.time()-t0:.1f}s）：is_flag={is_flag}, desc={desc[:50]}")
-                        return bool(is_flag)
-                    except Exception:
-                        # If JSON parse fails, check for true/false in text
-                        if "true" in text.lower():
-                            return True
-                        elif "false" in text.lower():
-                            return False
-                        return True  # Fail open
-        return True
+        result = await call_chat_api(
+            messages, settings, max_tokens=200,
+            timeout_total=90, timeout_read=80,
+            fallback_mode="full",  # administrative — skip chain, go straight to backup on failure
+        )
+        text = (result.get("content") or "").strip() if isinstance(result, dict) else ""
+        if not text:
+            print(f"⚠️ 國旗視覺檢查無回應內容（{result.get('error', 'unknown') if isinstance(result, dict) else 'unknown'}），接受圖片")
+            return True  # Fail open — don't block on total AI failure
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        try:
+            parsed = json_module.loads(text)
+            is_flag = parsed.get("is_flag", True)
+            desc = parsed.get("description", "")
+            print(f"🚩 國旗視覺檢查完成（{_time.time()-t0:.1f}s）：is_flag={is_flag}, desc={desc[:50]}")
+            return bool(is_flag)
+        except Exception:
+            # If JSON parse fails, check for true/false in text
+            if "true" in text.lower():
+                return True
+            elif "false" in text.lower():
+                return False
+            return True  # Fail open
     except Exception as e:
         print(f"⚠️ 國旗視覺檢查失敗：{e}（接受圖片）")
         return True

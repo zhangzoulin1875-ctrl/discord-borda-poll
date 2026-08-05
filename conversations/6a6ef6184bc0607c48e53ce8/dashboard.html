@@ -295,6 +295,13 @@
               </div>
               <label class="toggle"><input type="checkbox" id="ai-fallback-owner-exempt"><span class="toggle-slider"></span></label>
             </div>
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <p class="text-sm">擁有者跳過模型降級鏈</p>
+                <p class="text-xs text-gray-400">開啟時，擁有者觸發的請求若主模型失敗，直接切換到備援 API（不逐一嘗試降級鏈中的其他模型）——因為備援模型通常比降級鏈裡的免費模型更強</p>
+              </div>
+              <label class="toggle"><input type="checkbox" id="ai-owner-skip-chain"><span class="toggle-slider"></span></label>
+            </div>
             <label class="block text-sm text-gray-400 mb-1">每日用量上限罐頭訊息</label>
             <textarea id="ai-fallback-daily-limit-msg" rows="2" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm resize-none" placeholder="⚠️ 你的今日備援 API 用量已達上限..."></textarea>
             <label class="block text-sm text-gray-400 mb-1">速率限制罐頭訊息</label>
@@ -736,6 +743,7 @@ async function showChatAIPanel() {
   document.getElementById('ai-fallback-daily-limit').value = s.fallback_daily_limit || 10;
   document.getElementById('ai-fallback-rate-per-min').value = s.fallback_rate_per_min || 6;
   document.getElementById('ai-fallback-owner-exempt').checked = s.fallback_owner_exempt ?? true;
+  document.getElementById('ai-owner-skip-chain').checked = s.owner_skip_model_chain ?? true;
   document.getElementById('ai-fallback-daily-limit-msg').value = s.fallback_daily_limit_msg || '';
   document.getElementById('ai-fallback-rate-limit-msg').value = s.fallback_rate_limit_msg || '';
   document.getElementById('ai-entertainment-unavailable-msg').value = s.entertainment_unavailable_msg || '';
@@ -774,6 +782,7 @@ async function saveChatAISettings() {
     fallback_daily_limit: parseInt(document.getElementById('ai-fallback-daily-limit').value) || 10,
     fallback_rate_per_min: parseInt(document.getElementById('ai-fallback-rate-per-min').value) || 6,
     fallback_owner_exempt: document.getElementById('ai-fallback-owner-exempt').checked,
+    owner_skip_model_chain: document.getElementById('ai-owner-skip-chain').checked,
     fallback_daily_limit_msg: document.getElementById('ai-fallback-daily-limit-msg').value.trim(),
     fallback_rate_limit_msg: document.getElementById('ai-fallback-rate-limit-msg').value.trim(),
     entertainment_unavailable_msg: document.getElementById('ai-entertainment-unavailable-msg').value.trim(),
