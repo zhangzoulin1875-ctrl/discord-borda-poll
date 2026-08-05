@@ -19024,8 +19024,16 @@ TURTLE_SOUP_GEN_PROMPT = """你是一個海龜湯（情境猜謎）出題大師�
 - 提問次數上限會由系統自動計算為 key_questions × 2 + 10，不需要你設定。
 """
 
-async def _generate_turtle_soup(difficulty: str) -> dict:
-    """呼叫 AI 生成海龜湯題目，回傳 {surface, truth, difficulty, max_questions, key_questions}。"""
+async def _generate_turtle_soup(difficulty: str) -> tuple:
+    """呼叫 AI 生成海龜湯題目，回傳 (data_dict_or_None, error_reason)。
+    error_reason: "circuit_open" | "timeout_or_parse" | None（成功時）。
+
+    修正：原本 timeout_total=30s 對「生成 800 tokens 完整 JSON（含100-300字
+    湯底）」這種大輸出來說太緊——deepseek 系列模型在共享/免費額度下常常
+    需要更長時間才能吐完整段中文長文字，30s 經常在非串流+串流備援都還沒
+    吐完就被切斷，導致 text="" → json.loads 拋錨 → 100% 顯示「生成失敗」。
+    現在放寬到 50s + 提高 max_tokens，並加一次自動重試，同時把失敗原因
+    往上傳，讓使用者看到的訊息更精確（是熔斷器封鎖還是單純逾時）。"""
     prompt = TURTLE_SOUP_GEN_PROMPT.format(difficulty=difficulty)
 
     settings = {
@@ -19039,37 +19047,50 @@ async def _generate_turtle_soup(difficulty: str) -> dict:
         settings["fallback_model"] = chat_ai_settings.get("fallback_model", "")
 
     messages = [{"role": "user", "content": prompt}]
-    try:
-        result = await call_chat_api(
-            messages, settings,
-            max_tokens=800,
-            timeout_total=30,
-            timeout_read=25,
-            is_background=True,
-            fallback_mode="full",
-            fallback_user_id="turtle_soup",
-        )
-        text = result.get("content", "").strip()
-        # Strip markdown code block if present
-        if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-        # Parse JSON
-        data = json_module.loads(text)
-        if "surface" in data and "truth" in data:
-            key_q = int(data.get("key_questions", 6))
-            key_q = max(3, min(key_q, 15))
-            max_q = key_q * 2 + 10
-            return {
-                "surface": data["surface"],
-                "truth": data["truth"],
-                "difficulty": data.get("difficulty", difficulty),
-                "max_questions": max_q,
-                "key_questions": key_q,
-            }
-    except Exception as e:
-        print(f"⚠️ Turtle soup generation failed: {e}")
-    return None
+
+    for attempt in range(2):  # 最多重試一次
+        text = ""
+        try:
+            result = await call_chat_api(
+                messages, settings,
+                max_tokens=1200,
+                timeout_total=50,
+                timeout_read=40,
+                is_background=True,
+                fallback_mode="full",
+                fallback_user_id="turtle_soup",
+            )
+            if result.get("circuit_open"):
+                print(f"⚠️ Turtle soup generation blocked: circuit breaker open")
+                return None, "circuit_open"
+            text = result.get("content", "").strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            if not text:
+                print(f"⚠️ Turtle soup generation attempt {attempt+1}: empty content, error={result.get('error')}")
+                if attempt == 0:
+                    await asyncio.sleep(2)
+                    continue
+                return None, "timeout_or_parse"
+            data = json_module.loads(text)
+            if "surface" in data and "truth" in data:
+                key_q = int(data.get("key_questions", 6))
+                key_q = max(3, min(key_q, 15))
+                max_q = key_q * 2 + 10
+                return {
+                    "surface": data["surface"],
+                    "truth": data["truth"],
+                    "difficulty": data.get("difficulty", difficulty),
+                    "max_questions": max_q,
+                    "key_questions": key_q,
+                }, None
+            print(f"⚠️ Turtle soup generation attempt {attempt+1}: missing surface/truth in parsed JSON: {text[:300]}")
+        except Exception as e:
+            print(f"⚠️ Turtle soup generation attempt {attempt+1} failed: {e} | raw_text={text[:300]}")
+        if attempt == 0:
+            await asyncio.sleep(2)
+    return None, "timeout_or_parse"
 
 # ── AI 回答判定 ──
 TURTLE_SOUP_JUDGE_PROMPT = """你是一個海龜湯遊戲的主持人（法官）。你手上有這局遊戲的湯底（真相）。
@@ -19507,10 +19528,17 @@ class TurtleSoupStartView(discord.ui.View):
             return
 
         # 生成湯底
-        soup_data = await _generate_turtle_soup(difficulty)
+        soup_data, gen_error = await _generate_turtle_soup(difficulty)
         if not soup_data:
             _turtle_soup_state["active"] = False
-            await interaction.channel.send("⚠️ 湯底生成失敗，請稍後再試。")
+            if gen_error == "circuit_open":
+                await interaction.channel.send(
+                    f"⚠️ AI 服務目前被供應商暫時封鎖（熔斷保護中），請約 2 分鐘後再試一次。"
+                )
+            else:
+                await interaction.channel.send(
+                    "⚠️ 湯底生成失敗（AI 回應逾時或格式異常，已自動重試一次仍失敗），請稍後再試。"
+                )
             return
 
         # 再次確認（AI 生成期間可能被取消）
