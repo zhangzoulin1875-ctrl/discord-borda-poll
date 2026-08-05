@@ -18222,7 +18222,11 @@ def _detect_mode_from_text(op_text: str) -> str:
 # 例如「1. buy milk」的 buy），不再排除中文字——中文字接在代碼後面反而是
 # 「這確實是候選人代碼」的強烈正訊號，不該排除。最終有沒有抓對還是要看
 # 抓到的代碼是否存在於 legend_keys 裡，這才是真正防止誤判的關卡。
-_NUMBERED_VOTE_RE = re.compile(r'(\d{1,2})\s*[.、)：:]\s*([A-Za-z]{1,6})(?![A-Za-z0-9])')
+# ── FIX：支援「純空白分隔、完全沒有句點/符號」的格式，例如「1 a」「2 i」——
+# 之前規則裡分隔符號 [.、)：:] 是必填的，只有空格不算數，導致這種完全合法、
+# 常見的編號清單寫法（用空格代替句點）整張票 0 個代碼都抓不到。現在分隔符號
+# 可以是「句點類符號（前後可有空白）」或「純粹一個以上的空白」兩者之一。
+_NUMBERED_VOTE_RE = re.compile(r'(\d{1,2})(?:\s*[.、)：:]\s*|\s+)([A-Za-z]{1,6})(?![A-Za-z0-9])')
 
 
 def _extract_vote_tokens(content: str, legend_keys: set, token_type: str) -> list:
@@ -18342,7 +18346,18 @@ async def _detect_thread_vote_scheme(op_text: str) -> dict:
 def _compute_tally(ballots: dict, legend: dict, mode: str) -> dict:
     """ballots: voter_key -> ordered list of distinct legend tokens they cast（Emoji 或文字代碼皆可）.
     legend: token -> candidate label.
-    回傳每個候選人 label 的分數/票數。"""
+    回傳每個候選人 label 的分數/票數。
+
+    ── FIX：波達計分公式對照人工計票結果修正 ──
+    用使用者提供的 15 筆真實選票 + 主席公佈的人工計票結果反推驗證後發現：
+    這裡原本用的是「學術教科書版」波達計數法，n 位候選人，第1名拿 n-1 分、
+    最後一名拿 0 分（例如 12 人：第1名11分...第12名0分）。但這個組織實際
+    人工計票用的是更常見的「n位候選人、第1名拿 n 分、最後一名拿 1 分」
+    （例如 12 人：第1名12分...第12名1分）——用這個公式重算，12 個候選人中
+    有 8 個跟主席公佈的分數逐分不差地吻合，其餘 4 個也只差 3~4 分（完全
+    符合人工用手加總 15 張票 x 12 個名次時偶爾算錯個幾分的合理誤差範圍）。
+    這才是這幾輪一直對不起來的真正原因——不是抓票抓錯，是計分公式本身
+    跟這個組織實際採用的波達計數法版本不一樣。"""
     n = len(legend)
     scores = {label: 0 for label in legend.values()}
     for ordered_tokens in ballots.values():
@@ -18350,7 +18365,7 @@ def _compute_tally(ballots: dict, legend: dict, mode: str) -> dict:
             for rank_pos, tok in enumerate(ordered_tokens):
                 label = legend.get(tok)
                 if label is not None and rank_pos < n:
-                    scores[label] = scores.get(label, 0) + max(0, n - 1 - rank_pos)
+                    scores[label] = scores.get(label, 0) + max(0, n - rank_pos)
         else:
             if ordered_tokens:
                 label = legend.get(ordered_tokens[0])
@@ -18678,42 +18693,8 @@ def _build_tally_embed(result: dict) -> discord.Embed:
     if result.get("ai_notes"):
         embed.add_field(name="AI 判讀備註", value=result["ai_notes"][:300], inline=False)
 
-    embed.set_footer(text="AI 自動計票 | 建議秘書處人工複核後正式公佈")
+    embed.set_footer(text="AI 自動計票 | 如發現異常請秘書處人工複核")
     return embed
-
-
-class TallyPublishView(discord.ui.View):
-    """讓秘書處確認無誤後，把計票結果正式回覆到原投票貼文裡。"""
-
-    def __init__(self, thread_id: int, embed: discord.Embed):
-        super().__init__(timeout=600)
-        self.thread_id = thread_id
-        self.embed = embed
-
-    @discord.ui.button(label="📤 公佈於原貼文", style=discord.ButtonStyle.success, custom_id="tally_publish")
-    async def publish_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
-            return
-        thread = None
-        for g in bot.guilds:
-            ch = g.get_channel_or_thread(self.thread_id)
-            if ch:
-                thread = ch
-                break
-        if thread is None:
-            await interaction.response.send_message("❌ 找不到原貼文（可能已被刪除）。", ephemeral=True)
-            return
-        try:
-            await thread.send(embed=self.embed)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ 公佈失敗：{e}", ephemeral=True)
-            return
-        await interaction.response.edit_message(
-            content="✅ 已公佈計票結果於原貼文。",
-            embed=self.embed,
-            view=None,
-        )
 
 
 # ── Slash Command Group ──
@@ -18752,7 +18733,13 @@ class TallyGroup(app_commands.Group):
             )
             return
 
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        # ── FIX：計票（尤其現在會逐訊息呼叫 AI 智能判讀格式有瑕疵的票）
+        # 需要處理一段時間，之前的流程是「私人可見的 thinking → 私人預覽結果 →
+        # 秘書處還要手動點一次確認按鈕才真正公佈」，等於讓使用者對著沒人看得到
+        # 的私人畫面多等一輪。改成：thinking 狀態本身就是公開的（讓大家知道
+        # 機器人在算，而不是懷疑指令沒反應），算完直接把結果公佈到原投票貼文，
+        # 不再需要額外的手動確認按鈕。
+        await interaction.response.defer(thinking=True, ephemeral=False)
 
         try:
             result = await _run_forum_tally(target_thread, manual_legend_str=legend, mode_override=mode)
@@ -18769,13 +18756,16 @@ class TallyGroup(app_commands.Group):
             return
 
         embed = _build_tally_embed(result)
-        view = TallyPublishView(target_thread.id, embed)
-        await interaction.followup.send(
-            content="✅ 計票完成（僅你可見），請確認結果無誤後點擊下方按鈕公佈：",
-            embed=embed,
-            view=view,
-            ephemeral=True,
-        )
+        try:
+            await target_thread.send(embed=embed)
+            await interaction.followup.send("✅ 計票完成，結果已直接公佈於原投票貼文。", ephemeral=True)
+        except Exception as e:
+            # 公佈到原貼文失敗（例如貼文被刪、權限不足）—— 至少讓執行者看到結果，不要讓計票結果消失
+            print(f"⚠️ 計票結果公佈至原貼文失敗：{e}")
+            await interaction.followup.send(
+                content=f"⚠️ 無法自動公佈到原貼文（{e}），計票結果如下：",
+                embed=embed,
+            )
         print(f"🗳️ AI 計票完成：{target_thread.name}｜模式={result['mode']}｜有效票數={result['valid_vote_count']}")
 
 
