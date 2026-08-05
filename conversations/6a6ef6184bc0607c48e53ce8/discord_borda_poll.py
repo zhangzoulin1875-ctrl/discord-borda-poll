@@ -18925,6 +18925,8 @@ class TallyGroup(app_commands.Group):
 # ════════════════════════════════════════════════════════════════════
 
 # ── 全域狀態 ──
+_turtle_soup_game_id = 0  # 每局遞增，用於防止舊面板影響新遊戲
+
 _turtle_soup_state = {
     "active": False,        # 是否有遊戲正在進行
     "surface": "",          # 湯面（故事題目，公開）
@@ -18942,6 +18944,7 @@ _turtle_soup_state = {
     "started_at": 0,        # 遊戲開始時間
     "starter_user_id": None,  # 發起遊戲的用戶
     "hints_given": 0,       # 已「接受」過幾次提示（僅供統計，不影響等級判定）
+    "game_id": 0,           # 本局遊戲 ID（與 _turtle_soup_game_id 同步）
 }
 
 _turtle_soup_invite_msg_id = None  # 當前邀請面板的訊息 ID
@@ -19230,7 +19233,96 @@ async def _generate_turtle_soup_hint(truth: str, qa_history: list, level: int = 
         print(f"⚠️ Turtle soup hint failed: {e}")
         return "試著從時間線的角度想一想？"
 
-# ── Discord UI: 提示按鈕面板 ──
+# ── Discord UI: 難度投票面板 ──
+class TurtleSoupDifficultyVoteView(discord.ui.View):
+    """60秒難度投票面板。每人一票，時間到多數決。"""
+    def __init__(self):
+        super().__init__(timeout=60)
+        self._votes = {}  # {user_id: "easy"|"medium"|"hard"}
+        self._result = None
+
+    def get_result(self) -> str:
+        """回傳勝出的難度。平手時取較高難度。"""
+        counts = {"easy": 0, "medium": 0, "hard": 0}
+        for v in self._votes.values():
+            if v in counts:
+                counts[v] += 1
+        # 多數決；平手時取較高難度
+        if counts["hard"] >= counts["medium"] and counts["hard"] >= counts["easy"]:
+            self._result = "hard"
+        elif counts["medium"] >= counts["easy"]:
+            self._result = "medium"
+        else:
+            self._result = "easy"
+        return self._result
+
+    def get_summary(self) -> str:
+        counts = {"easy": 0, "medium": 0, "hard": 0}
+        for v in self._votes.values():
+            if v in counts:
+                counts[v] += 1
+        total = sum(counts.values())
+        return (
+            f"參與人數：{total}｜"
+            f"簡單 {counts['easy']} 票 / 中等 {counts['medium']} 票 / 困難 {counts['hard']} 票"
+        )
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="🟢 簡單（15題）", style=discord.ButtonStyle.success, custom_id="turtle_soup_diff_easy")
+    async def vote_easy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._votes[interaction.user.id] = "easy"
+        await interaction.response.send_message(f"✅ {interaction.user.display_name} 已投票：簡單", ephemeral=True)
+
+    @discord.ui.button(label="🟡 中等（20題）", style=discord.ButtonStyle.primary, custom_id="turtle_soup_diff_medium")
+    async def vote_medium(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._votes[interaction.user.id] = "medium"
+        await interaction.response.send_message(f"✅ {interaction.user.display_name} 已投票：中等", ephemeral=True)
+
+    @discord.ui.button(label="🔴 困難（25題）", style=discord.ButtonStyle.danger, custom_id="turtle_soup_diff_hard")
+    async def vote_hard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._votes[interaction.user.id] = "hard"
+        await interaction.response.send_message(f"✅ {interaction.user.display_name} 已投票：困難", ephemeral=True)
+
+
+# ── Discord UI: 提示投票面板 ──
+class TurtleSoupHintVoteView(discord.ui.View):
+    """10秒提示投票面板。每人一票，時間到多數決。"""
+    def __init__(self, level: int = 1):
+        super().__init__(timeout=10)
+        self._level = level
+        self._votes = {}  # {user_id: True|False}
+
+    def get_result(self) -> bool:
+        """回傳是否要提示。平手時不給提示。"""
+        yes = sum(1 for v in self._votes.values() if v)
+        no = sum(1 for v in self._votes.values() if not v)
+        return yes > no
+
+    def get_summary(self) -> str:
+        yes = sum(1 for v in self._votes.values() if v)
+        no = sum(1 for v in self._votes.values() if not v)
+        return f"要提示 {yes} 票 / 不要提示 {no} 票"
+
+    async def on_timeout(self):
+        """超時後禁用按鈕。"""
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="💡 要提示", style=discord.ButtonStyle.success, custom_id="turtle_soup_hint_vote_yes")
+    async def vote_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._votes[interaction.user.id] = True
+        await interaction.response.send_message(f"✅ {interaction.user.display_name} 投了：要提示", ephemeral=True)
+
+    @discord.ui.button(label="🚫 不要提示", style=discord.ButtonStyle.secondary, custom_id="turtle_soup_hint_vote_no")
+    async def vote_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._votes[interaction.user.id] = False
+        await interaction.response.send_message(f"✅ {interaction.user.display_name} 投了：不要提示", ephemeral=True)
+
+
+# ── Discord UI: 提示按鈕面板（舊，保留給投票後生成提示用）──
 class TurtleSoupHintView(discord.ui.View):
     def __init__(self, level: int = 1):
         super().__init__(timeout=300)  # 5 分鐘內有效
@@ -19296,17 +19388,21 @@ class TurtleSoupHintView(discord.ui.View):
 
 # ── Discord UI: 加時按鈕面板 ──
 class TurtleSoupExtraTimeView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, game_id: int = 0):
         super().__init__(timeout=300)  # 5 分鐘內有效
+        self._game_id = game_id
 
     async def on_timeout(self):
         """超時後自動放棄，公佈湯底。"""
         global _turtle_soup_state
-        if _turtle_soup_state["active"] and not _turtle_soup_state["extra_time_used"]:
+        # 必須確認還是同一局遊戲，否則不加時也不結束
+        if (_turtle_soup_state.get("game_id") != self._game_id
+                or not _turtle_soup_state["active"]):
+            return
+        if not _turtle_soup_state["extra_time_used"]:
             try:
                 if self.message:
                     await self.message.edit(content="⏰ 加時時間已過，即將公佈湯底...", view=None)
-                # 找到遊戲頻道
                 ch_id = _turtle_soup_state.get("channel_id")
                 if ch_id:
                     ch = bot.get_channel(ch_id)
@@ -19318,6 +19414,10 @@ class TurtleSoupExtraTimeView(discord.ui.View):
     @discord.ui.button(label="➕ 加時 +5 次", style=discord.ButtonStyle.success, custom_id="turtle_soup_extra_yes")
     async def extra_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
         global _turtle_soup_state
+        # 必須確認還是同一局遊戲
+        if _turtle_soup_state.get("game_id") != self._game_id:
+            await interaction.response.edit_message(content="⚠️ 這是上一局的加時面板，已失效。", view=None)
+            return
         if not _turtle_soup_state["active"]:
             await interaction.response.edit_message(content="⚠️ 遊戲已結束。", view=None)
             return
@@ -19330,11 +19430,14 @@ class TurtleSoupExtraTimeView(discord.ui.View):
         await interaction.response.edit_message(
             content=f"⏰ **加時成功！** 提問次數 +5，現在剩餘 {new_remaining} 次。繼續推理吧！", view=None,
         )
-        print(f"🍜 Turtle soup extra time used: +5, new max={_turtle_soup_state['max_questions']}")
+        print(f"🍜 Turtle soup extra time used: +5, new max={_turtle_soup_state['max_questions']}, game_id={self._game_id}")
 
     @discord.ui.button(label="放棄，公佈湯底", style=discord.ButtonStyle.danger, custom_id="turtle_soup_extra_no")
     async def extra_no(self, interaction: discord.Interaction, button: discord.ui.Button):
         global _turtle_soup_state
+        if _turtle_soup_state.get("game_id") != self._game_id:
+            await interaction.response.edit_message(content="⚠️ 這是上一局的加時面板，已失效。", view=None)
+            return
         if not _turtle_soup_state["active"]:
             await interaction.response.edit_message(content="⚠️ 遊戲已結束。", view=None)
             return
@@ -19349,26 +19452,25 @@ class TurtleSoupStartView(discord.ui.View):
 
     @discord.ui.button(label="🍜 開始海龜湯", style=discord.ButtonStyle.primary, custom_id="turtle_soup_start")
     async def start_game(self, interaction: discord.Interaction, button: discord.ui.Button):
-        global _turtle_soup_state, _turtle_soup_invite_msg_id
+        global _turtle_soup_state, _turtle_soup_invite_msg_id, _turtle_soup_game_id
 
-        # 同步鎖：第一個人按下就立刻標記 active=True，
-        # 後面的人即使同時按下也會看到「正在進行中」
         if _turtle_soup_state["active"]:
             await interaction.response.send_message(
                 "⚠️ 已經有一局海龜湯正在進行中！", ephemeral=True,
             )
             return
 
-        # 立刻佔位，防止併發雙開
+        # 先佔位防止併發雙開，但標記為「難度投票中」
+        _turtle_soup_game_id += 1
         _turtle_soup_state.update({
             "active": True,
             "surface": "",
             "truth": "",
-            "difficulty": chat_ai_settings.get("turtle_soup_difficulty", "medium"),
+            "difficulty": "medium",
             "max_questions": 0,
             "questions_used": 0,
             "qa_history": [],
-                        "game_msg_id": None,
+            "game_msg_id": None,
             "channel_id": interaction.channel.id,
             "processing": False,
             "queue": [],
@@ -19377,22 +19479,64 @@ class TurtleSoupStartView(discord.ui.View):
             "hints_given": 0,
             "extra_time_used": False,
             "hint_panel_active": False,
+            "game_id": _turtle_soup_game_id,
         })
+        this_game_id = _turtle_soup_game_id
 
-        difficulty = _turtle_soup_state["difficulty"]
-        await interaction.response.send_message(
-            f"🍜 AI 正在熬湯中（難度：{difficulty}）... 請稍等～", ephemeral=True,
+        # 刪除舊的邀請面板
+        if _turtle_soup_invite_msg_id:
+            try:
+                old_msg = await interaction.channel.fetch_message(_turtle_soup_invite_msg_id)
+                await old_msg.delete()
+            except Exception:
+                pass
+            _turtle_soup_invite_msg_id = None
+
+        # ── 難度投票階段（60秒）──
+        vote_view = TurtleSoupDifficultyVoteView()
+        vote_msg = await interaction.channel.send(
+            "🗳️ **難度投票開始！**\n"
+            f"由 {interaction.user.mention} 發起，請大家在 **60 秒內**投票選擇本局難度。\n"
+            "簡單=15題 / 中等=20題 / 困難=25題",
+            view=vote_view,
         )
+        await interaction.response.send_message("✅ 已發起難度投票，等待大家投票中...", ephemeral=True)
+
+        # 等待 60 秒
+        await asyncio.sleep(60)
+
+        # 確認還是同一局（防止被中途取消）
+        if _turtle_soup_state.get("game_id") != this_game_id or not _turtle_soup_state["active"]:
+            return
+
+        # 結算投票
+        votes = vote_view._votes
+        difficulty = vote_view.get_result()
+        vote_text = vote_view.get_summary()
+
+        # 禁用按鈕
+        for child in vote_view.children:
+            child.disabled = True
+        try:
+            await vote_msg.edit(content=f"🗳️ **投票結束！**\n{vote_text}\n🍜 難度：**{difficulty}**，正在熬湯中...", view=vote_view)
+        except Exception:
+            pass
+
+        # 確認還是同一局
+        if _turtle_soup_state.get("game_id") != this_game_id or not _turtle_soup_state["active"]:
+            return
 
         # 生成湯底
         soup_data = await _generate_turtle_soup(difficulty)
         if not soup_data:
-            # 生成失敗，回滾狀態
             _turtle_soup_state["active"] = False
-            await interaction.followup.send("⚠️ 湯底生成失敗，請稍後再試。", ephemeral=True)
+            await interaction.channel.send("⚠️ 湯底生成失敗，請稍後再試。")
             return
 
-        # 填入生成的題目
+        # 再次確認（AI 生成期間可能被取消）
+        if _turtle_soup_state.get("game_id") != this_game_id or not _turtle_soup_state["active"]:
+            return
+
         _turtle_soup_state.update({
             "surface": soup_data["surface"],
             "truth": soup_data["truth"],
@@ -19424,17 +19568,64 @@ class TurtleSoupStartView(discord.ui.View):
         game_msg = await interaction.channel.send(embed=embed)
         _turtle_soup_state["game_msg_id"] = game_msg.id
 
-        # 刪除舊的邀請面板
-        global _turtle_soup_invite_msg_id
-        if _turtle_soup_invite_msg_id:
+        print(f"🍜 Turtle soup started: difficulty={soup_data['difficulty']}, max_q={soup_data['max_questions']}, game_id={this_game_id}")
+
+async def _turtle_soup_hint_vote_waiter(vote_view, vote_msg, hint_level, game_id, channel):
+    """等待10秒提示投票結束後，依結果生成提示或跳過。"""
+    await asyncio.sleep(10)
+
+    # 確認還是同一局遊戲
+    if _turtle_soup_state.get("game_id") != game_id or not _turtle_soup_state["active"]:
+        return
+
+    _turtle_soup_state["hint_panel_active"] = False
+    result = vote_view.get_result()
+    summary = vote_view.get_summary()
+    level_desc = {1: "模糊", 2: "中等", 3: "明顯", 4: "直白"}.get(hint_level, "直白")
+
+    # 禁用按鈕
+    for child in vote_view.children:
+        child.disabled = True
+
+    if result:
+        try:
+            await vote_msg.edit(
+                content=f"🗳️ {summary}\n🤔 正在生成提示（{level_desc}）...",
+                view=vote_view,
+            )
+        except Exception:
+            pass
+        try:
+            hint = await _generate_turtle_soup_hint(
+                _turtle_soup_state["truth"], _turtle_soup_state["qa_history"],
+                level=hint_level,
+            )
+            _turtle_soup_state["hints_given"] += 1
+            await vote_msg.edit(
+                content=f"🗳️ {summary}\n💡 **線索（{level_desc}）：** {hint}",
+            )
+        except Exception as e:
+            print(f"⚠️ Turtle soup hint generation failed: {e}")
             try:
-                old_msg = await interaction.channel.fetch_message(_turtle_soup_invite_msg_id)
-                await old_msg.delete()
+                await vote_msg.edit(content=f"🗳️ {summary}\n⚠️ 線索生成失敗。")
             except Exception:
                 pass
-            _turtle_soup_invite_msg_id = None
+    else:
+        next_milestone = (
+            (_turtle_soup_state["questions_used"] // 5 + 1) * 5
+        )
+        extra = (
+            f"\n（下次提問到第 {next_milestone} 次時還會再問一次）"
+            if next_milestone < _turtle_soup_state["max_questions"] else ""
+        )
+        try:
+            await vote_msg.edit(
+                content=f"🗳️ {summary}\n👍 不給提示，繼續推理！{extra}",
+                view=vote_view,
+            )
+        except Exception:
+            pass
 
-        print(f"🍜 Turtle soup started: difficulty={soup_data['difficulty']}, max_q={soup_data['max_questions']}")
 
 # ── 發送/更新邀請面板 ──
 async def _post_turtle_soup_invite(channel):
@@ -19559,7 +19750,7 @@ async def _handle_turtle_soup_message(message):
             await message.channel.send(
                 f"❌ 提問次數已用完（{_turtle_soup_state['max_questions']} 次）！\n"
                 f"要加時 +5 次嗎？（每人限一次）",
-                view=TurtleSoupExtraTimeView(),
+                view=TurtleSoupExtraTimeView(game_id=_turtle_soup_state.get("game_id", 0)),
             )
         return True
 
@@ -19614,7 +19805,7 @@ async def _process_turtle_soup_question(message, question, user_id, user_name):
 
         reply_text = f"{answer_emoji} **{answer}**\n📝 提問者：{user_name}｜剩餘提問：{remaining} 次"
 
-        # 每 5 次提問就詢問是否需要提示
+        # 每 5 次提問就詢問是否需要提示（改為10秒投票制）
         # 提示等級依「已用/總提問次數」比例決定，越接近尾聲提示越明顯，
         # 不受玩家是否接受過提示影響（避免跳級或level跟次數脫節的問題）
         if (_turtle_soup_state["questions_used"] % 5 == 0
@@ -19622,12 +19813,18 @@ async def _process_turtle_soup_question(message, question, user_id, user_name):
                 and answer != "答對了！恭喜破案！"
                 and _turtle_soup_state["questions_used"] < _turtle_soup_state["max_questions"]):
             _turtle_soup_state["hint_panel_active"] = True
+            this_game_id = _turtle_soup_state.get("game_id", 0)
             hint_level = _turtle_soup_hint_level()
             level_desc = {1: "模糊", 2: "中等", 3: "明顯", 4: "直白"}.get(hint_level, "直白")
-            await message.channel.send(
+            vote_view = TurtleSoupHintVoteView(level=hint_level)
+            vote_msg = await message.channel.send(
                 f"🤔 已用 {_turtle_soup_state['questions_used']} 次提問，需要提示嗎？\n"
-                f"（本次提示等級：{level_desc}）",
-                view=TurtleSoupHintView(level=hint_level),
+                f"（提示等級：{level_desc}）— **10 秒內投票，多數決！**",
+                view=vote_view,
+            )
+            # 啟動背景任務等待投票結果
+            asyncio.create_task(
+                _turtle_soup_hint_vote_waiter(vote_view, vote_msg, hint_level, this_game_id, message.channel)
             )
 
         await message.reply(reply_text, mention_author=False)
@@ -19650,7 +19847,7 @@ async def _process_turtle_soup_question(message, question, user_id, user_name):
                 await message.channel.send(
                     f"❌ 提問次數已用完（{_turtle_soup_state['max_questions']} 次）！\n"
                     f"要加時 +5 次嗎？（每人限一次）",
-                    view=TurtleSoupExtraTimeView(),
+                    view=TurtleSoupExtraTimeView(game_id=_turtle_soup_state.get("game_id", 0)),
                 )
             return
 
@@ -19733,6 +19930,7 @@ async def _end_turtle_soup(channel, solved: bool, winner: str = None):
         "hints_given": 0,
         "extra_time_used": False,
         "hint_panel_active": False,
+        "game_id": _turtle_soup_state.get("game_id", 0),
     }
 
     print(f"🍜 Turtle soup ended: solved={solved}, winner={winner}")
