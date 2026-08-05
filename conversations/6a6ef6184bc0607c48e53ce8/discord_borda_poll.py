@@ -2143,17 +2143,44 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     def _remaining(floor=0.5):
         return max(floor, _deadline - _time.time())
 
+    # ── Fix: reserve real time for the backup API, don't just hope leftovers
+    # exist ──
+    # Under concurrent load (many users chatting at once), the PRIMARY API is
+    # exactly what gets slow — its shared free-tier capacity is being split
+    # across everyone's simultaneous requests. Before this fix, every
+    # internal call (first attempt, retry, model-downgrade chain) defaulted
+    # to `_remaining()` — the ENTIRE budget still left — so a slow primary
+    # could burn the whole clock before ever reaching the backup API branch,
+    # which then either got started with near-zero time left (guaranteed to
+    # be cancelled by the caller's own outer deadline) or got skipped
+    # outright. That's the exact "偶爾還是逾時" pattern under load.
+    # Fix: carve off a fixed RESERVE at the tail of the deadline that only
+    # the backup-API branch is allowed to spend — the primary phase (first
+    # attempt + retry + model chain) is confined to everything BEFORE that
+    # reserve, and within that phase, no single attempt may claim more than
+    # half of what's left there either, so a retry/second model always gets
+    # a real shot too.
+    _fallback_reserve = min(8, max(3, timeout_total * 0.3))
+    _primary_deadline = _deadline - _fallback_reserve
+
+    def _remaining_primary(floor=0.5):
+        return max(floor, _primary_deadline - _time.time())
+
+    _max_single_attempt = max(5, (timeout_total - _fallback_reserve) * 0.6)
+
     async def _post(payload, _tt=None, _tr=None):
         """Streaming-aware POST: always uses stream=True to keep the
         connection alive on slow endpoints. Creates a FRESH session per
         call (like the briefing function does) to avoid any session-level
         timeout interference from _shared_session. The sock_read timeout
         only applies BETWEEN chunks — once the first chunk arrives, the
-        timer resets. Defaults to whatever time is LEFT until the absolute
-        deadline (not a fresh full timeout_total) so retries/fallbacks
-        can't each claim their own full budget."""
+        timer resets. Defaults to whatever time is left in the PRIMARY
+        phase (deadline minus the reserved backup-API slice), capped to
+        _max_single_attempt, so retries/model-downgrades can't each claim
+        the whole remaining budget for themselves and starve both each
+        other and the backup API reserved after them."""
         payload = {**payload, "stream": True}
-        _budget = _tt if _tt is not None else _remaining()
+        _budget = _tt if _tt is not None else min(_remaining_primary(), _max_single_attempt)
         _read_budget = _tr if _tr is not None else min(timeout_read, _budget)
         t = aiohttp.ClientTimeout(total=_budget, connect=min(10, _budget), sock_read=_read_budget)
         # Always create a fresh session — no session-level timeout to interfere.
@@ -2454,8 +2481,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             _model_retryable = (not _skip_model_chain) and len(_model_chain) > 1
             if _model_retryable:
                 for _mi in range(1, len(_model_chain)):
-                    if _remaining() < 2:
-                        print(f"⏱️ 模型降級鏈：剩餘時間不足，跳過 {_model_chain[_mi]}")
+                    if _remaining_primary() < 2:
+                        print(f"⏱️ 模型降級鏈：剩餘時間不足（已進入備援 API 保留時段），跳過 {_model_chain[_mi]}")
                         break
                     _alt_model = _model_chain[_mi]
                     print(f"🔄 模型降級：{payload['model']} → {_alt_model}（HTTP {status}）")
@@ -2473,11 +2500,13 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                                         print(f"✅ 模型降級成功：{_alt_model}")
                                         break
                                     # Empty content but 200 — try non-streaming
-                                    _fb_budget = _remaining()
-                                    if _fb_budget >= 2:
+                                    # (primary phase — must not dip into the
+                                    # reserved backup-API slice)
+                                    _ns_budget = min(_remaining_primary(), _max_single_attempt)
+                                    if _ns_budget >= 2:
                                         payload_ns = dict(payload)
                                         payload_ns.pop("stream", None)
-                                        t2 = aiohttp.ClientTimeout(total=_fb_budget, connect=min(10, _fb_budget), sock_read=_fb_budget)
+                                        t2 = aiohttp.ClientTimeout(total=_ns_budget, connect=min(10, _ns_budget), sock_read=_ns_budget)
                                         if is_background:
                                             async with _AI_BG_SEMAPHORE:
                                                 async with aiohttp.ClientSession() as sess:
@@ -2520,8 +2549,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # what actually caps total wall-clock time at ~timeout_total — without
         # it, a retry always fired regardless of how much budget the FIRST
         # attempt already burned, routinely doubling total latency.
-        if _attempt_i > 0 and _remaining() < 1.5:
-            print(f"⏱️ 剩餘時間不足（{_remaining():.1f}s），放棄重試，直接回傳目前結果")
+        if _attempt_i > 0 and _remaining_primary() < 1.5:
+            print(f"⏱️ 剩餘時間不足（已進入備援 API 保留時段），放棄重試，直接回傳目前結果")
             break
         try:
             msg = await _attempt()
@@ -2531,14 +2560,14 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             if _ai_circuit_breaker["tripped"]:
                 print(f"🚫 AI 熔斷器因 403 觸發，停止重試")
                 return {"content": "", "error": _get_circuit_cooldown_msg(), "circuit_open": True}
-            if _attempt_i == 0 and _remaining() >= 1.5:
-                print(f"⚠️ Chat AI 呼叫失敗（{e}），重試一次（剩餘 {_remaining():.1f}s）...")
+            if _attempt_i == 0 and _remaining_primary() >= 1.5:
+                print(f"⚠️ Chat AI 呼叫失敗（{e}），重試一次（primary 剩餘 {_remaining_primary():.1f}s）...")
                 continue
             print(f"⚠️ Chat AI 呼叫失敗且無剩餘時間重試（{e}）")
             msg = {"content": "", "error": f"AI 回應逾時或失敗：{e}"}
             break
-        if not msg.get("content") and not msg.get("tool_calls") and _attempt_i == 0 and _remaining() >= 1.5:
-            print(f"⚠️ AI 回應為空（finish_reason=stop 但沒有實際內容），重試一次（剩餘 {_remaining():.1f}s）...")
+        if not msg.get("content") and not msg.get("tool_calls") and _attempt_i == 0 and _remaining_primary() >= 1.5:
+            print(f"⚠️ AI 回應為空（finish_reason=stop 但沒有實際內容），重試一次（primary 剩餘 {_remaining_primary():.1f}s）...")
             continue
         if msg.get("content") or msg.get("tool_calls"):
             return msg
@@ -2602,23 +2631,37 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         "model": _fb_model or settings.get("model", "gpt-4o-mini"),
                         "fallback_enabled": False,  # prevent infinite recursion
                     }
-                    _fb_budget = max(5, int(_remaining()))
-                    try:
-                        _fb_msg = await call_chat_api(
-                            messages, _fb_settings, tools=tools,
-                            max_tokens=max_tokens,
-                            timeout_total=_fb_budget,
-                            timeout_read=max(3, _fb_budget - 2),
-                            is_background=is_background,
-                            fallback_mode="disabled",  # fallback of fallback = no
-                        )
-                        if _fb_msg.get("content") or _fb_msg.get("tool_calls"):
-                            print(f"✅ 備援 API 成功！({_fb_msg.get('content', '')[:60]}...)")
-                            return _fb_msg
-                        else:
-                            print(f"⚠️ 備援 API 也失敗：{_fb_msg.get('error', 'unknown')}")
-                    except Exception as _fb_exc:
-                        print(f"⚠️ 備援 API 例外：{_fb_exc}")
+                    # Bug fix: this used to be `max(5, int(_remaining()))` —
+                    # since `_remaining()` never drops below its 0.5 floor,
+                    # that ALWAYS forced at least a 5s fallback attempt no
+                    # matter how little time was truly left, guaranteeing it
+                    # blew past the outer generate_chat_reply deadline and got
+                    # hard-cancelled mid-request — burning a real network call
+                    # for nothing and still surfacing "⏰ 回覆逾時" to the user.
+                    # Now: only attempt the fallback if there's genuinely
+                    # enough time left for a real round-trip (>=3s); otherwise
+                    # skip cleanly and let the caller's own timeout messaging
+                    # handle it, rather than starting a doomed request.
+                    _fb_budget = int(_remaining())
+                    if _fb_budget < 3:
+                        print(f"⏱️ 剩餘時間不足（{_remaining():.1f}s），放棄備援 API，避免發出注定被取消的請求")
+                    else:
+                        try:
+                            _fb_msg = await call_chat_api(
+                                messages, _fb_settings, tools=tools,
+                                max_tokens=max_tokens,
+                                timeout_total=_fb_budget,
+                                timeout_read=max(2, _fb_budget - 1),
+                                is_background=is_background,
+                                fallback_mode="disabled",  # fallback of fallback = no
+                            )
+                            if _fb_msg.get("content") or _fb_msg.get("tool_calls"):
+                                print(f"✅ 備援 API 成功！({_fb_msg.get('content', '')[:60]}...)")
+                                return _fb_msg
+                            else:
+                                print(f"⚠️ 備援 API 也失敗：{_fb_msg.get('error', 'unknown')}")
+                        except Exception as _fb_exc:
+                            print(f"⚠️ 備援 API 例外：{_fb_exc}")
                 else:
                     print(f"⚠️ 備援 API 已啟用但未設定 URL/Key，跳過")
 
