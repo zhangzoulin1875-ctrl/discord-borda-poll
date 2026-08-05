@@ -19271,6 +19271,7 @@ async def _post_turtle_soup_invite(channel):
 # ── 海龜湯背景循環 ──
 async def turtle_soup_loop():
     """背景任務：管理海龜湯邀請面板，遊戲結束後自動重發。"""
+    global _turtle_soup_invite_msg_id
     await asyncio.sleep(30)  # 等待 bot 就緒
     while True:
         try:
