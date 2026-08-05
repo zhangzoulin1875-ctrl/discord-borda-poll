@@ -1602,6 +1602,8 @@ chat_ai_settings = {
     "micropedia_max_results": 5,  # max articles to fetch per query
     "min_response_interval": 0,  # 全域最短回應間隔（秒），0=不限。防止機器人被防炸系統踢
     "vision_model": "",  # 視覺模型名稱（用於識圖，留空=停用識圖功能。使用同一個 API URL/Key，只是模型名不同）
+    "vision_fallback_chain": "",  # 視覺模型降級鏈（逗號分隔，主視覺模型失敗時依序嘗試）
+    "vision_use_fallback_api": False,  # 視覺模型失敗時是否也嘗試備援 API 端點
     "ai_hard_ceiling": 20,           # AI pipeline 硬上限（秒）
     "ai_soft_target": 16,            # AI 軟目標（秒）
     "ai_max_tokens": 2000,           # AI 回覆最大 token 數
@@ -2246,6 +2248,8 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
                 + "\n".join(knowledge_lines)
             )
 
+    _room_vision_diag = []  # diagnostics from vision API calls (for AI log embed)
+
     # ── Fetch channel history ──
     history_messages = []
     try:
@@ -2268,7 +2272,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
                         if vision_model:
                             # Try to describe the image
                             try:
-                                desc = await _describe_image(att.url, settings)
+                                desc = await _describe_image(att.url, settings, _vision_diag=_room_vision_diag)
                                 if desc:
                                     content_text += f"\n[圖片：{desc}]"
                             except Exception:
@@ -2296,7 +2300,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
                 vision_model = settings.get("vision_model", "")
                 if vision_model:
                     try:
-                        desc = await _describe_image(att.url, settings)
+                        desc = await _describe_image(att.url, settings, _vision_diag=_room_vision_diag)
                         if desc:
                             current_content += f"\n[圖片：{desc}]"
                     except Exception:
@@ -2426,7 +2430,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
         except Exception:
             pass
 
-    return actual_reply, {"model": _reply_model, "fallback": _reply_fallback, "diag": _reply_diag}, new_facts, mod_action
+    return actual_reply, {"model": _reply_model, "fallback": _reply_fallback, "diag": _reply_diag, "vision_diag": _room_vision_diag if _room_vision_diag else []}, new_facts, mod_action
 
 
 async def _process_tool_results_simple(assistant_msg, message, settings, tools):
@@ -3751,8 +3755,22 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
                 inline=False
             )
 
+        # ── 視覺模型診斷 field ──
+        # Show vision API status: which model was used, latency, degradation, errors
+        _vision_lines = model_info.get("vision_diag", []) if model_info else []
+        if _vision_lines:
+            _vdiag_text = "\n".join(_vision_lines)
+            if len(_vdiag_text) > 1020:
+                _vdiag_text = _vdiag_text[:1020] + "..."
+            embed.add_field(
+                name="📷 識圖診斷",
+                value="```\n" + _vdiag_text + "\n```",
+                inline=False
+            )
+
         ch_name = channel_name or (message.channel.name if hasattr(message.channel, "name") else "?")
-        embed.set_footer(text=f"#{ch_name} | {_api_label} | 模型: {_model_name} | User ID: {author.id}")
+        _vision_tag = " | 識圖: 有" if _vision_lines else (" | 識圖: 無圖片" if not message.attachments else " | 識圖: 失敗")
+        embed.set_footer(text=f"#{ch_name} | {_api_label} | 模型: {_model_name}{_vision_tag} | User ID: {author.id}")
         await log_ch.send(embed=embed)
         print(f"📝 對話紀錄已發送到 #{log_ch.name}（模型={_model_name}, {_api_label}, 診斷={len(_diag_lines)}筆）")
     except discord.Forbidden:
@@ -5496,12 +5514,20 @@ def _strip_raw_tool_dump(text: str) -> str:
     return cleaned
 
 
-async def _describe_image(image_url: str, settings: dict) -> str:
+async def _describe_image(image_url: str, settings: dict, _vision_diag: list = None) -> str:
     """Call a vision-capable model to describe an image. Uses the same API
     URL/Key as the chat AI, but with a different model name (settings["vision_model"]).
-    Returns a text description of the image, or empty string on failure."""
+    Returns a text description of the image, or empty string on failure.
+
+    _vision_diag: optional list to append diagnostic events to (for AI log embed).
+    Supports a degradation chain: if the primary vision model fails, try
+    models in settings["vision_fallback_chain"] in order, then optionally the
+    fallback API endpoint with the fallback model."""
+    if _vision_diag is None:
+        _vision_diag = []
     vision_model = settings.get("vision_model", "")
     if not vision_model:
+        _vision_diag.append("📷 視覺模型未設定，跳過識圖")
         return ""
 
     api_url = settings.get("api_url", "").rstrip("/")
@@ -5515,68 +5541,104 @@ async def _describe_image(image_url: str, settings: dict) -> str:
         "Authorization": f"Bearer {settings['api_key']}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": vision_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "請詳細描述這張圖片的內容。包括：\n"
-                            "- 圖片的主題和場景\n"
-                            "- 可見的文字（完整轉錄）\n"
-                            "- 人物、物體、顏色、動作等細節\n"
-                            "- 如果是截圖，說明是什麼應用/網頁的截圖\n"
-                            "- 如果是迷因或梗圖，解釋其含義\n"
-                            "用繁體中文回答，簡潔但完整。"
-                        ),
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_url},
-                    },
-                ],
-            }
-        ],
-        "max_tokens": 500,
-        "temperature": 0.3,
-    }
 
-    try:
-        t0 = _time.time()
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                api_url, json=payload, headers=headers,
-                # Vision models are noticeably slower and MUCH more variable than
-                # text models — observed real-world latency ranges from ~4s to
-                # ~49s for the same endpoint/model depending on load. A short
-                # timeout here silently drops legitimate in-flight calls (the
-                # API finishes the call successfully server-side, but we've
-                # already given up waiting, so the image is treated as if it
-                # was never analyzed). Give it a generous budget instead.
-                timeout=aiohttp.ClientTimeout(total=90, connect=10, sock_read=80),
-            ) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    print(f"⚠️ 視覺模型 API 返回 {resp.status}: {error_text[:200]}")
-                    return ""
-                data = json_module.loads(await resp.text())
-                choices = data.get("choices", [])
-                if choices:
-                    desc = choices[0].get("message", {}).get("content", "")
-                    if desc:
-                        print(f"📷 視覺模型識圖完成（{_time.time()-t0:.1f}s, {len(desc)} chars）")
-                        return desc.strip()
-        print(f"⚠️ 視覺模型回應為空")
-        return ""
-    except asyncio.TimeoutError:
-        print(f"⚠️ 視覺模型識圖逾時（>30s）")
-        return ""
-    except Exception as e:
-        print(f"⚠️ 視覺模型識圖失敗：{e}")
-        return ""
+    _prompt_text = (
+        "請詳細描述這張圖片的內容。包括：\n"
+        "- 圖片的主題和場景\n"
+        "- 可見的文字（完整轉錄）\n"
+        "- 人物、物體、顏色、動作等細節\n"
+        "- 如果是截圖，說明是什麼應用/網頁的截圖\n"
+        "- 如果是迷因或梗圖，解釋其含義\n"
+        "用繁體中文回答，簡潔但完整。"
+    )
+
+    async def _try_vision(model_name, url, key, label, diag_list):
+        """Single attempt to call a vision model. Returns (description, success)."""
+        _payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": _prompt_text},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ],
+            "max_tokens": 500,
+            "temperature": 0.3,
+        }
+        _hdrs = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        try:
+            _t0 = _time.time()
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=_payload, headers=_hdrs,
+                    timeout=aiohttp.ClientTimeout(total=90, connect=10, sock_read=80),
+                ) as resp:
+                    if resp.status != 200:
+                        _err = await resp.text()
+                        _short = _err[:150].replace("\n", " ")
+                        diag_list.append(f"📷 {label}（{model_name}）HTTP {resp.status}：{_short}")
+                        print(f"⚠️ 視覺模型 {label}（{model_name}）API 返回 {resp.status}: {_err[:200]}")
+                        return "", False
+                    data = json_module.loads(await resp.text())
+                    choices = data.get("choices", [])
+                    if choices:
+                        desc = choices[0].get("message", {}).get("content", "")
+                        if desc:
+                            _elapsed = _time.time() - _t0
+                            diag_list.append(f"📷 {label}（{model_name}）✅ {_elapsed:.1f}s, {len(desc)} chars")
+                            print(f"📷 視覺模型 {label}（{model_name}）識圖完成（{_elapsed:.1f}s, {len(desc)} chars）")
+                            return desc.strip(), True
+            diag_list.append(f"📷 {label}（{model_name}）回應為空")
+            print(f"⚠️ 視覺模型 {label}（{model_name}）回應為空")
+            return "", False
+        except asyncio.TimeoutError:
+            diag_list.append(f"📷 {label}（{model_name}）逾時（>90s）")
+            print(f"⚠️ 視覺模型 {label}（{model_name}）識圖逾時（>90s）")
+            return "", False
+        except Exception as e:
+            _short = str(e)[:100]
+            diag_list.append(f"📷 {label}（{model_name}）例外：{_short}")
+            print(f"⚠️ 視覺模型 {label}（{model_name}）識圖失敗：{e}")
+            return "", False
+
+    # ── Build the model attempt list (degradation chain) ──
+    _attempt_list = [(vision_model, api_url, settings["api_key"], "主視覺模型")]
+
+    # Parse vision_fallback_chain (comma-separated model names, same API endpoint)
+    _chain_raw = settings.get("vision_fallback_chain", "").strip()
+    if _chain_raw:
+        for _m in _chain_raw.split(","):
+            _m = _m.strip()
+            if _m and _m != vision_model:
+                _attempt_list.append((_m, api_url, settings["api_key"], f"降級視覺({_m})"))
+
+    # Optionally try the fallback API endpoint with its model
+    if settings.get("vision_use_fallback_api", False) and settings.get("fallback_enabled", False):
+        _fb_url = settings.get("fallback_api_url", "").strip()
+        _fb_key = settings.get("fallback_api_key", "").strip()
+        _fb_model = settings.get("fallback_model", "").strip()
+        if _fb_url and _fb_key and _fb_model:
+            _fb_url_norm = _fb_url.rstrip("/")
+            if not _fb_url_norm.endswith("/chat/completions"):
+                if _fb_url_norm.endswith("/v1") or _fb_url_norm.endswith("/v2"):
+                    _fb_url_norm += "/chat/completions"
+                else:
+                    _fb_url_norm += "/v1/chat/completions"
+            _attempt_list.append((_fb_model, _fb_url_norm, _fb_key, "備援API識圖"))
+
+    # ── Try each model in order ──
+    for i, (model_name, url, key, label) in enumerate(_attempt_list):
+        if i > 0:
+            print(f"📷 視覺模型降級：嘗試 {label}（{model_name}）...")
+        desc, ok = await _try_vision(model_name, url, key, label, _vision_diag)
+        if ok and desc:
+            return desc
+
+    _vision_diag.append("📷 所有視覺模型均失敗，識圖跳過")
+    return ""
 
 
 _NATION_CATEGORY_LABELS = {"member": "成員國", "council": "理事國", "observer": "觀察國", "removed": "已除籍"}
@@ -5771,6 +5833,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # 如果訊息有圖片附件，且設定了 vision_model，就先用視覺模型描述圖片，
     # 再把描述注入 system prompt，讓主 AI 可以「看到」圖片內容來回答。
     image_context = ""
+    _vision_diag = []  # diagnostics from vision API calls (for AI log embed)
     vision_model = settings.get("vision_model", "")
     image_atts = [
         att for att in message.attachments[:2]  # 最多處理 2 張圖
@@ -5784,11 +5847,13 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                 # Matches _describe_image's own 90s internal budget, plus a
                 # small margin — the inner aiohttp timeout should fire first
                 # in normal cases, this is just a hard outer safety net.
-                return await asyncio.wait_for(_describe_image(att.url, settings), timeout=95)
+                return await asyncio.wait_for(_describe_image(att.url, settings, _vision_diag=_vision_diag), timeout=95)
             except asyncio.TimeoutError:
+                _vision_diag.append(f"📷 譖覺模型識圖逾時（>95s）")
                 print(f"⚠️ 視覺模型識圖逾時（>95s），此圖片將略過")
                 return ""
             except Exception as e:
+                _vision_diag.append(f"📷 識圖子流程例外：{str(e)[:80]}")
                 print(f"⚠️ 識圖子流程錯誤：{e}")
                 return ""
 
@@ -5803,6 +5868,8 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             print(f"📷 識圖完成，注入 {len(image_context)} chars 到上下文")
         else:
             print(f"⚠️ 識圖流程跑完但沒有拿到任何描述（可能全部逾時或失敗）")
+    elif image_atts and not vision_model:
+        _vision_diag.append("📷 有圖片但視覺模型未設定，無法識圖")
 
     # ── Discord 連結解析 ──
     # If the user's message contains Discord jump URLs, fetch the actual
@@ -6396,7 +6463,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     if not actual_reply:
         actual_reply = None
 
-    return actual_reply, new_facts, mod_action, {"model": _reply_model, "fallback": _reply_fallback, "diag": _reply_diag}
+    return actual_reply, new_facts, mod_action, {"model": _reply_model, "fallback": _reply_fallback, "diag": _reply_diag, "vision_diag": _vision_diag if _vision_diag else []}
 
 
 # ──────────────────────────────────────────────
@@ -6824,6 +6891,9 @@ async def api_get_chat_ai_settings(request):
         "fallback_rate_limit_msg": chat_ai_settings.get("fallback_rate_limit_msg", ""),
         "entertainment_unavailable_msg": chat_ai_settings.get("entertainment_unavailable_msg", ""),
         "circuit_cooldown_msg": chat_ai_settings.get("circuit_cooldown_msg", ""),
+        "vision_model": chat_ai_settings.get("vision_model", ""),
+        "vision_fallback_chain": chat_ai_settings.get("vision_fallback_chain", ""),
+        "vision_use_fallback_api": chat_ai_settings.get("vision_use_fallback_api", False),
         "ai_room_enabled": ai_chat_rooms.get("enabled", True),
         "ai_room_panel_channel_id": ai_chat_rooms.get("panel_channel_id"),
         "ai_room_category_id": ai_chat_rooms.get("category_id"),
@@ -6920,6 +6990,10 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["entertainment_unavailable_msg"] = body["entertainment_unavailable_msg"]
     if "circuit_cooldown_msg" in body:
         chat_ai_settings["circuit_cooldown_msg"] = body["circuit_cooldown_msg"]
+    if "vision_fallback_chain" in body:
+        chat_ai_settings["vision_fallback_chain"] = body["vision_fallback_chain"]
+    if "vision_use_fallback_api" in body:
+        chat_ai_settings["vision_use_fallback_api"] = bool(body["vision_use_fallback_api"])
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
