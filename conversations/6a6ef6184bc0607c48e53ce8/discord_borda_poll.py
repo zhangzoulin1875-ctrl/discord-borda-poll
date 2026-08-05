@@ -2984,7 +2984,12 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     def _remaining_primary(floor=0.5):
         return max(floor, _primary_deadline - _time.time())
 
-    _max_single_attempt = max(5, (timeout_total - _fallback_reserve) * 0.6)
+    # FIX：原本 0.6（60%）太保守——主模型明明正在正常串流生成 token，
+    # 卻因為要「替降級鏈預留時間」而在只生成十幾個 token 後就被 total
+    # timeout 硬切斷，然後觸發降級鏈/備援 API，等於「為了降級而降級」。
+    # 主模型成功時根本不需要降級，所以把上限提高到 85%，讓正在工作的
+    # 主模型有足夠時間完成回應。
+    _max_single_attempt = max(5, (timeout_total - _fallback_reserve) * 0.85)
     _used_model = None        # which model actually answered (for logging)
     _used_fallback = False    # whether the backup API was used
     _diag = []                # diagnostic events for AI log embed
@@ -3003,7 +3008,15 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         payload = {**payload, "stream": True}
         _budget = _tt if _tt is not None else min(_remaining_primary(), _max_single_attempt)
         _read_budget = _tr if _tr is not None else min(timeout_read, _budget)
-        t = aiohttp.ClientTimeout(total=_budget, connect=min(10, _budget), sock_read=_read_budget)
+        # FIX：串流模式下不要用 aiohttp 的 total timeout——它會在 _budget
+        # 秒後硬殺連線，即使串流正在正常逐 chunk 生成 token 也照殺不誤，
+        # 導致「主模型明明有回應、只生成十幾個 token 就被切斷」的問題。
+        # 改用 total=None（不設總時限），只靠 sock_read 做斷線偵測：
+        # sock_read 是「兩次 chunk 之間的等待上限」，只要 chunk 持續到達
+        # 就不會觸發。把 sock_read 至少給 8 秒——reasoning 模型（如
+        # deepseek-r1 風格）在生成途中會有思考停頓，4 秒太短會誤殺。
+        # 整體時限由 _read_stream 裡的 _deadline 顯式檢查來控制。
+        t = aiohttp.ClientTimeout(total=None, connect=min(10, _budget), sock_read=max(8, _read_budget))
         # Always create a fresh session — no session-level timeout to interfere.
         # Background callers queue behind the shared throttle so they can't
         # pile onto the provider alongside a live chat request; live chat
@@ -3035,9 +3048,24 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         finish_reason = None
         _first_chunk_time = None
         _chunk_count = 0
+        _deadline_hit = False
 
         stream_usage = None  # some APIs send usage in the final chunk
         async for raw_line in resp.content:
+            # FIX：取代原本由 aiohttp total timeout 控制整體時限的做法。
+            # 如果已經超過整體截止時間（_deadline），就中斷串流——但如果
+            # 串流正在產出內容（content_parts 已有東西），不直接丟棄，
+            # 而是帶著已收到的部分內容返回（部分回應遠比「全部丟掉再花
+            # 時間走降級鏈/備援 API 重來」更有效率且使用者體驗更好）。
+            if _time.time() > _deadline:
+                _content_so_far = sum(len(p) for p in content_parts)
+                if _content_so_far > 0:
+                    print(f"⏱️ 串流已超過整體截止時間（已收到 {_content_so_far} chars），帶部分內容返回")
+                    _deadline_hit = True
+                    break
+                else:
+                    print(f"⏱️ 串流已超過整體截止時間且尚無內容，中斷以走降級/備援")
+                    break
             _chunk_count += 1
             if _first_chunk_time is None:
                 _first_chunk_time = _time.time()
@@ -3122,7 +3150,10 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         _elapsed = _first_chunk_time - _time.time() if _first_chunk_time else 0
         _total_chars = sum(len(p) for p in content_parts)
         _reasoning_chars = sum(len(p) for p in reasoning_parts)
-        print(f"📦 串流完成：{_chunk_count} chunks, content={_total_chars} chars, reasoning={_reasoning_chars} chars, tool_calls={len(tool_calls_acc)}")
+        if _deadline_hit:
+            print(f"📦 串流因截止時間中斷（部分內容）：{_chunk_count} chunks, content={_total_chars} chars")
+        else:
+            print(f"📦 串流完成：{_chunk_count} chunks, content={_total_chars} chars, reasoning={_reasoning_chars} chars, tool_calls={len(tool_calls_acc)}")
         if _total_chars == 0 and _reasoning_chars > 0:
             print(f"⚠️ 模型只輸出了 reasoning_content（思考過程）但最終 content 完全空白——"
                   f"這是模型/API 本身「只想不答」，不是我們的串流解析漏抓")
