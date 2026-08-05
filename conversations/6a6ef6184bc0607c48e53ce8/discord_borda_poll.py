@@ -1603,7 +1603,6 @@ chat_ai_settings = {
     "min_response_interval": 0,  # 全域最短回應間隔（秒），0=不限。防止機器人被防炸系統踢
     "vision_model": "",  # 視覺模型名稱（用於識圖，留空=停用識圖功能。使用同一個 API URL/Key，只是模型名不同）
     "vision_fallback_chain": "",  # 視覺模型降級鏈（逗號分隔，主視覺模型失敗時依序嘗試）
-    "vision_use_fallback_api": False,  # 視覺模型失敗時是否也嘗試備援 API 端點
     "ai_hard_ceiling": 20,           # AI pipeline 硬上限（秒）
     "ai_soft_target": 16,            # AI 軟目標（秒）
     "ai_max_tokens": 2000,           # AI 回覆最大 token 數
@@ -5521,8 +5520,8 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
 
     _vision_diag: optional list to append diagnostic events to (for AI log embed).
     Supports a degradation chain: if the primary vision model fails, try
-    models in settings["vision_fallback_chain"] in order, then optionally the
-    fallback API endpoint with the fallback model."""
+    models in settings["vision_fallback_chain"] in order, then the
+    fallback API endpoint (same as the chat degradation chain)."""
     if _vision_diag is None:
         _vision_diag = []
     vision_model = settings.get("vision_model", "")
@@ -5615,8 +5614,8 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
             if _m and _m != vision_model:
                 _attempt_list.append((_m, api_url, settings["api_key"], f"降級視覺({_m})"))
 
-    # Optionally try the fallback API endpoint with its model
-    if settings.get("vision_use_fallback_api", False) and settings.get("fallback_enabled", False):
+    # Try the fallback API endpoint as last resort (same logic as chat: all chain models fail → backup API)
+    if settings.get("fallback_enabled", False):
         _fb_url = settings.get("fallback_api_url", "").strip()
         _fb_key = settings.get("fallback_api_key", "").strip()
         _fb_model = settings.get("fallback_model", "").strip()
@@ -6893,7 +6892,6 @@ async def api_get_chat_ai_settings(request):
         "circuit_cooldown_msg": chat_ai_settings.get("circuit_cooldown_msg", ""),
         "vision_model": chat_ai_settings.get("vision_model", ""),
         "vision_fallback_chain": chat_ai_settings.get("vision_fallback_chain", ""),
-        "vision_use_fallback_api": chat_ai_settings.get("vision_use_fallback_api", False),
         "ai_room_enabled": ai_chat_rooms.get("enabled", True),
         "ai_room_panel_channel_id": ai_chat_rooms.get("panel_channel_id"),
         "ai_room_category_id": ai_chat_rooms.get("category_id"),
@@ -6992,8 +6990,6 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["circuit_cooldown_msg"] = body["circuit_cooldown_msg"]
     if "vision_fallback_chain" in body:
         chat_ai_settings["vision_fallback_chain"] = body["vision_fallback_chain"]
-    if "vision_use_fallback_api" in body:
-        chat_ai_settings["vision_use_fallback_api"] = bool(body["vision_use_fallback_api"])
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 

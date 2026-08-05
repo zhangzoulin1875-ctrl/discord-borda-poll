@@ -120,6 +120,12 @@
         <label class="block text-sm text-gray-400 mb-2">模型降級鏈（逗號分隔）</label>
         <input id="ai-model-chain" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini,gpt-3.5-turbo,gemini-1.5-flash">
         <p class="text-xs text-gray-500 mb-3">主模型遇到 401/403/503/502/504 時，自動依序嘗試後續模型（同一個 API、同一個 Key，只是換模型名）。留空 = 不降級</p>
+        <label class="block text-sm text-gray-400 mb-1">視覺模型（識圖用）</label>
+        <input id="ai-vision-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o, gemini-1.5-flash">
+        <p class="text-xs text-gray-500 mb-2">用於識別使用者傳送的圖片。使用同一個 API URL/Key，只是模型名不同。留空 = 停用識圖功能</p>
+        <label class="block text-sm text-gray-400 mb-2">視覺模型降級鏈（逗號分隔）</label>
+        <input id="ai-vision-chain" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-1 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gemini-1.5-flash,gpt-4o-mini">
+        <p class="text-xs text-gray-500 mb-3">主視覺模型失敗時依序嘗試降級鏈中的模型，全部失敗則自動使用備援 API（與一般降級鏈邏輯相同）。留空 = 不降級</p>
         <label class="block text-sm text-gray-400 mb-1">系統提示詞（人設）</label>
         <textarea id="ai-system-prompt" rows="5" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] resize-none text-sm" placeholder="定義 AI 的角色和回覆風格"></textarea>
       </div>
@@ -709,6 +715,8 @@ async function showChatAIPanel() {
   setTimeout(() => { document.getElementById('ai-api-key').value = ''; }, 300); // 部分瀏覽器的自動填入是延遲的，補一次
   document.getElementById('ai-model').value = s.model || 'gpt-4o-mini';
   document.getElementById('ai-model-chain').value = s.model_fallback_chain || '';
+  document.getElementById('ai-vision-model').value = s.vision_model || '';
+  document.getElementById('ai-vision-chain').value = s.vision_fallback_chain || '';
   document.getElementById('ai-system-prompt').value = s.system_prompt || '';
   document.getElementById('ai-cooldown').value = s.cooldown_seconds ?? 60;
   document.getElementById('ai-min-interval').value = s.min_response_interval ?? 0;
@@ -751,6 +759,8 @@ async function saveChatAISettings() {
     api_url: document.getElementById('ai-api-url').value.trim(),
     model: document.getElementById('ai-model').value.trim(),
     model_fallback_chain: document.getElementById('ai-model-chain').value.trim(),
+    vision_model: document.getElementById('ai-vision-model').value.trim(),
+    vision_fallback_chain: document.getElementById('ai-vision-chain').value.trim(),
     system_prompt: document.getElementById('ai-system-prompt').value,
     cooldown_seconds: parseInt(document.getElementById('ai-cooldown').value) || 0,
     min_response_interval: parseInt(document.getElementById('ai-min-interval').value) || 0,
