@@ -8651,22 +8651,34 @@ async def on_message(message):
         except Exception as e:
             print(f"⚠️ fetch ref_msg 例外: {e}")
 
-    # Worthiness check — skip if the message is image-only (no text but
-    # has image attachments).  _is_worth_replying returns False for empty
-    # content, but an image with zero text is still a valid user intent
-    # (they want the AI to look at the image and react to it).
+    # Worthiness check — skip the LENGTH/greeting heuristics if the message
+    # is image-only (no text but has image attachments), since _is_worth_replying
+    # would reject empty content outright. BUT this bypass must still respect
+    # filter_strength — a bare image with no @mention must NOT get a reply
+    # when the filter is set to "mention" (bug: previously replied to every
+    # image regardless of mention, because the bypass ran before the mention
+    # check and never looked at filter_strength at all).
     _has_image_att = any(
         att.content_type and att.content_type.startswith("image/")
         for att in message.attachments
     )
-    if _has_image_att and (not message.content or not message.content.strip()):
+    _filter_strength = chat_ai_settings.get("filter_strength", "mention")
+    _image_only = _has_image_att and (not message.content or not message.content.strip())
+
+    if _image_only:
+        # "mention" strength: only bypass if actually mentioned or replying to the bot.
+        # Any other strength: image-only messages are still allowed through
+        # (same relaxed behavior as before, just now mention-gated correctly).
+        if _filter_strength == "mention" and not is_mentioned and not is_reply_to_bot:
+            print(f"   ⏭️ Not worth replying (image-only, not mentioned, filter=mention).")
+            return
         worth = True
         clean = "(圖片)"
-        print(f"   ✅ Worth replying! (image-only, bypassing worthiness check)")
+        print(f"   ✅ Worth replying! (image-only, bypassing length/greeting checks)")
     else:
         worth, clean = _is_worth_replying(
             message.content, is_mentioned, bot.user.id,
-            chat_ai_settings.get("filter_strength", "mention"),
+            _filter_strength,
             is_reply_to_bot=is_reply_to_bot,
         )
         if not worth:
