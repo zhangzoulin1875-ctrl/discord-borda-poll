@@ -14298,8 +14298,34 @@ async def _handle_proposal_decision(interaction: discord.Interaction, proposal_i
 # 自動排程／會議通知系統 — 渲染引擎 + 指令 + 確認按鈕
 # ════════════════════════════════════════════════════════════
 
+# 隨repo附帶的 Noto Sans TC 可變字重字體（fonts/NotoSansTC-Variable.ttf）。
+# Render 的原生 Python runtime（render.yaml runtime: python）只會執行
+# `pip install -r requirements.txt`，並不會套用 nixpacks.toml 或安裝任何
+# 系統字體 —— 所以之前完全找不到 CJK 字體，Pillow 只能退回沒有中文字形的
+# 內建點陣字體，導致排程圖上的中文全部變成空白方塊。
+# 修正方式：直接把字體檔案放進 git repo，用相對路徑載入，完全不依賴
+# Render 的系統環境，保證在任何部署方式下都能正確顯示中文。
+_BUNDLED_CJK_FONT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fonts", "NotoSansTC-Variable.ttf"
+)
+
+_CJK_FONT_PATH_CACHE = None
+
+
 def _find_cjk_font():
-    """Find a CJK-capable font on the system (Render/Linux)."""
+    """Find a CJK-capable font. Prefers the bundled repo font (always
+    available regardless of Render's build system); falls back to
+    scanning common system font paths in case the bundled file is
+    missing for some reason."""
+    global _CJK_FONT_PATH_CACHE
+    if _CJK_FONT_PATH_CACHE:
+        return _CJK_FONT_PATH_CACHE
+
+    if os.path.isfile(_BUNDLED_CJK_FONT_PATH):
+        _CJK_FONT_PATH_CACHE = _BUNDLED_CJK_FONT_PATH
+        return _CJK_FONT_PATH_CACHE
+
+    print("⚠️ 找不到隨附字體 fonts/NotoSansTC-Variable.ttf，改用系統字體搜尋（可能找不到，中文將顯示空白）")
     candidates = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
@@ -14308,44 +14334,42 @@ def _find_cjk_font():
         "/usr/share/fonts/google-noto-cjk/NotoSansCJKsc-Regular.otf",
         "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
     ]
-    # Also glob for any noto CJK font
     for pat in [
         "/usr/share/fonts/**/NotoSansCJK*",
         "/usr/share/fonts/**/NotoSansCJKjp*",
         "/usr/share/fonts/**/NotoSansSC*",
         "/usr/share/fonts/**/*CJK*",
-    ]:
-        try:
-            import glob as _glob
-            candidates.extend(_glob.glob(pat, recursive=True))
-        except Exception:
-            pass
-    # Also check for other CJK fonts
-    for pat in [
         "/usr/share/fonts/**/*WenQuanYi*",
         "/usr/share/fonts/**/*wqy*",
         "/usr/share/fonts/**/*DroidSansFallback*",
     ]:
         try:
-            import glob as _glob
-            candidates.extend(_glob.glob(pat, recursive=True))
+            candidates.extend(glob.glob(pat, recursive=True))
         except Exception:
             pass
     for path in candidates:
         if os.path.isfile(path):
+            _CJK_FONT_PATH_CACHE = path
             return path
     return None
 
 
-def _load_font(size: int):
-    """Load a CJK font at the given size, with fallbacks."""
+def _load_font(size: int, bold: bool = False):
+    """Load a CJK font at the given size. The bundled font is a variable
+    font with weight axes (Thin..Black); we select Bold/Regular via
+    set_variation_by_name when available."""
     font_path = _find_cjk_font()
     if font_path:
         try:
-            return ImageFont.truetype(font_path, size)
+            font = ImageFont.truetype(font_path, size)
+            try:
+                font.set_variation_by_name("Bold" if bold else "Regular")
+            except Exception:
+                pass  # not a variable font, or freetype build lacks var-font support — fine, use default instance
+            return font
         except Exception as e:
             print(f"⚠️ 字體載入失敗 {font_path}: {e}")
-    # Last resort: try Pillow's default
+    # Last resort: Pillow's built-in bitmap font (no CJK glyphs — better than crashing)
     try:
         return ImageFont.load_default()
     except Exception:
@@ -14455,12 +14479,12 @@ def _render_schedule_image(
     weekday_str = f"星期{weekdays[today.weekday()]}"
     
     # ── Fonts ──
-    font_title = _load_font(28)
+    font_title = _load_font(28, bold=True)
     font_subtitle = _load_font(16)
-    font_section = _load_font(18)
+    font_section = _load_font(18, bold=True)
     font_body = _load_font(14)
     font_small = _load_font(12)
-    font_time = _load_font(15)
+    font_time = _load_font(15, bold=True)
     
     # ── Calculate height dynamically ──
     # Header: 90px
