@@ -11437,6 +11437,7 @@ bot.add_view(AIChatRoomCloseView())
 bot.add_view(TurtleSoupStartView())  # 只有開始按鈕是持久化的
 bot.add_view(WerewolfSignupView())  # 狼人殺報名按鈕持久化
 bot.add_view(EconomyPanelButtonsView())  # 經濟看板下方的股票/公司管理快捷按鈕持久化
+bot.add_view(HorseBettingView("persistent"))  # 賽馬下注按鈕持久化（重啟後復原用）
 
 bot.setup_hook = setup_hook
 
