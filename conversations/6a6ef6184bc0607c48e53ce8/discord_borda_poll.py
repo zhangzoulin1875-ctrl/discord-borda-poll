@@ -21898,7 +21898,6 @@ def main():
 bot.add_view(AIChatRoomPanelView())
 bot.add_view(AIChatRoomCloseView())
 bot.add_view(TurtleSoupStartView())  # 只有開始按鈕是持久化的
-bot.add_view(WerewolfSignupView())  # 狼人殺報名按鈕持久化
 
 bot.setup_hook = setup_hook
 
@@ -23061,3 +23060,6 @@ class WerewolfGroup(app_commands.Group):
                 embed.add_field(name="玩家列表", value=plist[:1024], inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# WerewolfSignupView is defined above; register persistent view after class definition
+bot.add_view(WerewolfSignupView())
