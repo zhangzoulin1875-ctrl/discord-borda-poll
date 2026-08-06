@@ -3010,6 +3010,17 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
 
     use_tools = tools if (tools and api_url not in _tools_unsupported_apis) else None
 
+    # ── Reasoning 模型 timeout 自動調整 ──
+    # 如果 caller 沒有明確指定 timeout（用預設值 300/120），根據這次呼叫
+    # 會用的 reasoning_effort 自動決定合理的 timeout。必須在這裡（函式頂層，
+    # _deadline 計算之前）做，不能在下面的巢狀 _attempt() 閉包裡做——
+    # 那裡對外層變數賦值會被 Python 當成局部變數，讀取會拋 UnboundLocalError。
+    if timeout_total >= 300:
+        _top_reasoning_effort = _get_reasoning_effort(fallback_mode)
+        _top_auto_timeout = _get_reasoning_timeout(_top_reasoning_effort, fallback_mode)
+        timeout_total = _top_auto_timeout
+        timeout_read = max(3, _top_auto_timeout - 5)
+
     # ── HARD ABSOLUTE DEADLINE ──
     # `timeout_total` is the caller's TOTAL wall-clock budget for this ENTIRE
     # call_chat_api invocation — including internal retries and fallback
@@ -3344,19 +3355,17 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             "stream_options": {"include_usage": True},
         }
         # ── Reasoning 模型控制 ──
-        # GLM-5.2 等 reasoning 模型：根據呼叫類型動態調整思考強度
+        # GLM-5.2 等 reasoning 模型：根據呼叫類型動態調整思考強度。
+        # 注意：timeout 的調整已經在函式最上方（_deadline 計算之前）完成，
+        # 這裡只負責把 reasoning 參數塞進 payload，不能在這個巢狀函式
+        # (_attempt) 裡對外層的 timeout_total/timeout_read 賦值 ——
+        # 那樣做會讓 Python 把它們當成 _attempt 的本地變數，導致還沒賦值
+        # 就被讀取而拋出 UnboundLocalError（這正是先前部署崩潰的根因）。
         _reasoning_effort = _get_reasoning_effort(fallback_mode)
         _reasoning_params = _build_reasoning_params(_reasoning_effort)
         if _reasoning_params:
             payload.update(_reasoning_params)
             _diag.append(f"🧠 reasoning_effort={_reasoning_effort}")
-        # ── 動態 timeout 調整 ──
-        # 如果 caller 沒有明確指定 timeout（用預設 300），根據 reasoning 自動調整
-        if timeout_total >= 300:
-            _auto_timeout = _get_reasoning_timeout(_reasoning_effort, fallback_mode)
-            timeout_total = _auto_timeout
-            timeout_read = max(3, _auto_timeout - 5)
-            _diag.append(f"⏱️ auto-timeout={_auto_timeout}s (reasoning={_reasoning_effort})")
         if use_tools:
             payload["tools"] = use_tools
             payload["tool_choice"] = "auto"
