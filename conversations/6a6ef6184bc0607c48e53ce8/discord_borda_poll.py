@@ -8387,7 +8387,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -8469,6 +8469,7 @@ async def setup_hook():
     asyncio.ensure_future(daily_briefing_scheduler())
     asyncio.ensure_future(weekly_briefing_scheduler())
     asyncio.ensure_future(drive_sync_loop())
+    asyncio.ensure_future(werewolf_loop())  # 狼人殺面板管理
     asyncio.ensure_future(server_context_refresh_loop())
     asyncio.ensure_future(forum_index_refresh_loop())
     asyncio.ensure_future(channel_index_refresh_loop())
@@ -21897,9 +21898,1166 @@ def main():
 bot.add_view(AIChatRoomPanelView())
 bot.add_view(AIChatRoomCloseView())
 bot.add_view(TurtleSoupStartView())  # 只有開始按鈕是持久化的
+bot.add_view(WerewolfSignupView())  # 狼人殺報名按鈕持久化
 
 bot.setup_hook = setup_hook
 
 
 if __name__ == "__main__":
     main()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# AI 狼人殺（AI 主持版）
+# ═══════════════════════════════════════════════════════════════════
+
+import random as _ww_random
+
+WEREWOLF_FILE = os.path.join(DATA_DIR, "werewolf_settings.json")
+
+# ── 遊戲狀態 ──
+_ww_state = {
+    "phase": "idle",          # idle | signup | playing | ended
+    "game_id": 0,
+    "channel_id": None,       # 遊戲頻道 ID
+    "guild_id": None,
+    "role_id": None,          # 臨時身分組 ID
+    "signup_msg_id": None,    # 報名面板訊息 ID
+    "players": [],            # [{"id": str, "name": str, "is_ai": bool, "role": "", "alive": True, "dm_done": False}]
+    "day": 0,
+    "phase_detail": "",       # night_wolf | night_seer | day_discuss | day_vote | result
+    "night_target": None,     # 被狼人殺的玩家 id
+    "seer_target": None,      # 預言家查的玩家 id
+    "seer_result": None,      # 預言家查驗結果
+    "votes": {},              # {voter_id: target_id}
+    "log": [],                # 遊戲事件記錄
+    "winner": None,           # "wolves" | "villagers"
+}
+
+_ww_invite_msg_id = None
+
+def _save_ww_settings():
+    settings = {
+        "enabled": chat_ai_settings.get("werewolf_enabled", False),
+        "channel_id": chat_ai_settings.get("werewolf_channel_id"),
+    }
+    _save_json_file(WEREWOLF_FILE, settings)
+
+def _ww_log(msg: str):
+    _ww_state["log"].append(f"[Day {_ww_state['day']}] {msg}")
+    if len(_ww_state["log"]) > 100:
+        _ww_state["log"] = _ww_state["log"][-50:]
+    print(f"🐺 WW: {msg}")
+
+
+# ── AI 主持人生成旁白 ──
+_WW_NARRATOR_PROMPT = """你是一個狼人殺遊戲的主持人（旁白）。請用台灣繁體中文生成簡短、有氛圍感的旁白文字。要求：
+- 50-100字以內
+- 不要透露任何角色身分
+- 有懸疑感、沉浸感
+- 不要加 emoji 或格式符號
+- 直接輸出旁白文字，不要有開場白
+
+場景：{scene}
+{extra}"""
+
+async def _ww_narrate(scene: str, extra: str = "") -> str:
+    """生成 AI 旁白文字。"""
+    prompt = _WW_NARRATOR_PROMPT.format(scene=scene, extra=extra)
+    settings = {
+        "api_url": chat_ai_settings["api_url"],
+        "api_key": chat_ai_settings["api_key"],
+        "model": chat_ai_settings["model"],
+    }
+    if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
+        settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
+        settings["fallback_api_key"] = chat_ai_settings.get("fallback_api_key", "")
+        settings["fallback_model"] = chat_ai_settings.get("fallback_model", "")
+
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        result = await call_chat_api(
+            messages, settings,
+            max_tokens=200,
+            timeout_total=15,
+            timeout_read=12,
+            is_background=True,
+            fallback_mode="full",
+            fallback_user_id="werewolf",
+        )
+        text = result.get("content", "").strip()
+        return text or None
+    except Exception as e:
+        print(f"⚠️ WW narrate failed: {e}")
+        return None
+
+
+# ── 角色分配（6人局：2狼人 + 1預言家 + 3村民）──
+_WW_ROLES_6P = ["狼人", "狼人", "預言家", "村民", "村民", "村民"]
+
+_WW_ROLE_INFO = {
+    "狼人": {
+        "emoji": "🐺",
+        "color": discord.Color.red(),
+        "desc": "你是狼人。每晚與同伴選擇一名玩家擊殺。白天偽裝成好人，避免被投票淘汰。",
+        "team": "wolves",
+    },
+    "預言家": {
+        "emoji": "🔮",
+        "color": discord.Color.blue(),
+        "desc": "你是預言家。每晚可以查驗一名玩家的身分（好人/狼人）。白天可以利用你的資訊引導投票，但要小心被狼人針對。",
+        "team": "villagers",
+    },
+    "村民": {
+        "emoji": "👤",
+        "color": discord.Color.green(),
+        "desc": "你是普通村民。你沒有特殊能力，但要透過觀察和討論找出狼人，在白天投票淘汰他們。",
+        "team": "villagers",
+    },
+}
+
+
+def _ww_assign_roles(players: list):
+    """隨機分配角色給所有玩家。"""
+    roles = list(_WW_ROLES_6P[:len(players)])
+    _ww_random.shuffle(roles)
+    for i, p in enumerate(players):
+        p["role"] = roles[i]
+        p["alive"] = True
+        p["dm_done"] = False
+
+
+def _ww_alive_players():
+    return [p for p in _ww_state["players"] if p["alive"]]
+
+def _ww_wolves_alive():
+    return [p for p in _ww_alive_players() if p["role"] == "狼人"]
+
+def _ww_player_by_id(pid: str):
+    for p in _ww_state["players"]:
+        if p["id"] == pid:
+            return p
+    return None
+
+
+def _ww_check_win():
+    """檢查勝利條件。回傳 'wolves' / 'villagers' / None。"""
+    wolves = _ww_wolves_alive()
+    villagers = [p for p in _ww_alive_players() if p["role"] != "狼人"]
+    if len(wolves) == 0:
+        return "villagers"
+    if len(wolves) >= len(villagers):
+        return "wolves"
+    return None
+
+
+# ── 報名面板 View ──
+class WerewolfSignupView(discord.ui.View):
+    """持續存在的報名按鈕面板。"""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🐺 報名參加本局狼人殺", style=discord.ButtonStyle.primary, custom_id="ww_signup")
+    async def signup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        global _ww_state
+
+        if _ww_state["phase"] != "signup":
+            await interaction.response.send_message("⚠️ 目前無法報名（遊戲已開始或尚未開放）。", ephemeral=True)
+            return
+
+        pid = str(interaction.user.id)
+
+        # 已報名
+        for p in _ww_state["players"]:
+            if p["id"] == pid and not p["is_ai"]:
+                await interaction.response.send_message("⚠️ 你已經報名了！", ephemeral=True)
+                return
+
+        # 加入臨時身分組
+        role_id = _ww_state.get("role_id")
+        guild = interaction.guild
+        if role_id:
+            role = guild.get_role(int(role_id))
+            if role:
+                try:
+                    member = interaction.user
+                    if role not in member.roles:
+                        await member.add_roles(role)
+                except discord.Forbidden:
+                    await interaction.response.send_message("⚠️ 機器人缺少管理身分組的權限。", ephemeral=True)
+                    return
+                except Exception as e:
+                    print(f"⚠️ WW add role failed: {e}")
+
+        # 加入玩家列表
+        _ww_state["players"].append({
+            "id": pid,
+            "name": interaction.user.display_name,
+            "is_ai": False,
+            "role": "",
+            "alive": True,
+            "dm_done": False,
+        })
+
+        _ww_log(f"{interaction.user.display_name} 報名（共 {len(_ww_state['players'])} 人）")
+
+        # 更新面板
+        await _ww_update_signup_embed(interaction.channel)
+        await interaction.response.send_message(
+            f"✅ {interaction.user.mention} 已報名！目前共 {len(_ww_state['players'])} 人。",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="🗳️ 投票開始遊戲", style=discord.ButtonStyle.success, custom_id="ww_vote_start")
+    async def vote_start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        global _ww_state
+
+        if _ww_state["phase"] != "signup":
+            await interaction.response.send_message("⚠️ 目前無法投票（遊戲已開始或尚未開放）。", ephemeral=True)
+            return
+
+        pid = str(interaction.user.id)
+        real_players = [p for p in _ww_state["players"] if not p["is_ai"]]
+
+        # 確認已報名
+        if not any(p["id"] == pid for p in real_players):
+            await interaction.response.send_message("⚠️ 你必須先報名才能投票開始。", ephemeral=True)
+            return
+
+        # 最少 3 人才能發起
+        if len(real_players) < 3:
+            await interaction.response.send_message(
+                f"⚠️ 至少需要 3 名真人玩家才能開始（目前 {len(real_players)} 人）。",
+                ephemeral=True,
+            )
+            return
+
+        # 立刻 ack
+        await interaction.response.send_message("🗳️ 正在發起開始投票...", ephemeral=True)
+
+        # 發起投票面板
+        await _ww_start_vote(interaction.channel, pid)
+
+    @discord.ui.button(label="❌ 取消報名", style=discord.ButtonStyle.secondary, custom_id="ww_cancel_signup")
+    async def cancel_signup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        global _ww_state
+
+        if _ww_state["phase"] != "signup":
+            await interaction.response.send_message("⚠️ 目前無法取消報名。", ephemeral=True)
+            return
+
+        pid = str(interaction.user.id)
+        before = len(_ww_state["players"])
+        _ww_state["players"] = [p for p in _ww_state["players"] if p["id"] != pid]
+
+        if len(_ww_state["players"]) == before:
+            await interaction.response.send_message("⚠️ 你沒有報名，無需取消。", ephemeral=True)
+            return
+
+        # 移除身分組
+        role_id = _ww_state.get("role_id")
+        if role_id:
+            role = interaction.guild.get_role(int(role_id))
+            if role:
+                try:
+                    await interaction.user.remove_roles(role)
+                except Exception:
+                    pass
+
+        await _ww_update_signup_embed(interaction.channel)
+        await interaction.followup.send(
+            f"✅ {interaction.user.mention} 已取消報名。目前共 {len(_ww_state['players'])} 人。",
+            ephemeral=True,
+        )
+
+
+async def _ww_update_signup_embed(channel):
+    """更新報名面板的 Embed。"""
+    global _ww_invite_msg_id
+
+    if not _ww_invite_msg_id:
+        return
+
+    try:
+        msg = await channel.fetch_message(_ww_invite_msg_id)
+    except Exception:
+        return
+
+    players = _ww_state["players"]
+    real = [p for p in players if not p["is_ai"]]
+    player_list = "\n".join(f"• {p['name']}" for p in real) or "（尚無人報名）"
+
+    embed = discord.Embed(
+        title="🐺 AI 狼人殺 · 報名中",
+        description=(
+            "一場由 AI 主持的狼人殺遊戲！\n"
+            "點擊 **報名** 按鈕加入，湊滿 3 人以上即可投票開始。\n\n"
+            f"👥 **已報名（{len(real)} 人）：**\n{player_list}\n\n"
+            "⚙️ **規則：**\n"
+            "• 6 人局：2 狼人 + 1 預言家 + 3 村民\n"
+            "• 不足 6 人時自動生成 AI 玩家補位\n"
+            "• 報名後會獲得臨時身分組，僅此身分組可在本頻道發言"
+        ),
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_footer(text="ICEA · AI 狼人殺 | 報名階段")
+
+    view = WerewolfSignupView()
+    if len(real) < 3:
+        view.vote_start.disabled = True
+    else:
+        view.vote_start.disabled = False
+
+    try:
+        await msg.edit(embed=embed, view=view)
+    except Exception as e:
+        print(f"⚠️ WW update signup embed failed: {e}")
+
+
+async def _ww_post_invite(channel):
+    """發送報名邀請面板。"""
+    global _ww_invite_msg_id
+
+    if _ww_invite_msg_id:
+        try:
+            old = await channel.fetch_message(_ww_invite_msg_id)
+            await old.delete()
+        except Exception:
+            pass
+
+    embed = discord.Embed(
+        title="🐺 AI 狼人殺 · 報名中",
+        description=(
+            "一場由 AI 主持的狼人殺遊戲！\n"
+            "點擊 **報名** 按鈕加入，湊滿 3 人以上即可投票開始。\n\n"
+            "👥 **已報名（0 人）：**\n（尚無人報名）\n\n"
+            "⚙️ **規則：**\n"
+            "• 6 人局：2 狼人 + 1 預言家 + 3 村民\n"
+            "• 不足 6 人時自動生成 AI 玩家補位\n"
+            "• 報名後會獲得臨時身分組，僅此身分組可在本頻道發言"
+        ),
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_footer(text="ICEA · AI 狼人殺 | 報名階段")
+
+    view = WerewolfSignupView()
+    view.vote_start.disabled = True  # 0 人時不能投票
+
+    msg = await channel.send(embed=embed, view=view)
+    _ww_invite_msg_id = msg.id
+    _ww_log(f"Invite posted (msg_id={msg.id})")
+
+
+# ── 開始投票面板 ──
+class WerewolfStartVoteView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=30)
+        self._votes = {}  # {user_id: True}
+        self._voted_users = set()
+
+    @discord.ui.button(label="✅ 同意開始", style=discord.ButtonStyle.success, custom_id="ww_approve_start")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+        real_players = [p for p in _ww_state["players"] if not p["is_ai"]]
+        if not any(p["id"] == uid for p in real_players):
+            await interaction.response.send_message("⚠️ 只有已報名的玩家可以投票。", ephemeral=True)
+            return
+        if uid in self._voted_users:
+            await interaction.response.send_message("⚠️ 你已經投過票了。", ephemeral=True)
+            return
+        self._voted_users.add(uid)
+        self._votes[uid] = True
+        count = len(self._votes)
+        total = len(real_players)
+        await interaction.response.send_message(
+            f"✅ 已投下同意票（{count}/{total}）。", ephemeral=True,
+        )
+
+    @discord.ui.button(label="❌ 反對", style=discord.ButtonStyle.danger, custom_id="ww_reject_start")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        uid = str(interaction.user.id)
+        real_players = [p for p in _ww_state["players"] if not p["is_ai"]]
+        if not any(p["id"] == uid for p in real_players):
+            await interaction.response.send_message("⚠️ 只有已報名的玩家可以投票。", ephemeral=True)
+            return
+        if uid in self._voted_users:
+            await interaction.response.send_message("⚠️ 你已經投過票了。", ephemeral=True)
+            return
+        self._voted_users.add(uid)
+        self._votes[uid] = False
+        count = sum(1 for v in self._votes.values() if v)
+        total = len(real_players)
+        await interaction.response.send_message(
+            f"❌ 已投下反對票（同意 {count}/{total}）。", ephemeral=True,
+        )
+
+
+async def _ww_start_vote(channel, initiator_id: str):
+    """發起開始遊戲投票。"""
+    global _ww_state
+    real_players = [p for p in _ww_state["players"] if not p["is_ai"]]
+    total = len(real_players)
+
+    vote_view = WerewolfStartVoteView()
+    vote_msg = await channel.send(
+        f"🗳️ **開始遊戲投票**\n"
+        f"由 <@{initiator_id}> 發起。需要過半數（{total // 2 + 1} 票）同意才能開始。\n"
+        f"⏱️ 投票時間 30 秒。",
+        view=vote_view,
+    )
+
+    await asyncio.sleep(30)
+
+    # 結算
+    for child in vote_view.children:
+        child.disabled = True
+    try:
+        await vote_msg.edit(view=vote_view)
+    except Exception:
+        pass
+
+    if _ww_state["phase"] != "signup":
+        return  # 已被取消或已開始
+
+    yes = sum(1 for v in vote_view._votes.values() if v)
+    needed = total // 2 + 1
+
+    _ww_log(f"Start vote: {yes}/{total} yes, needed {needed}")
+
+    if yes >= needed:
+        await channel.send(f"✅ **投票通過**（{yes}/{total}），遊戲即將開始！")
+        await _ww_begin_game(channel)
+    else:
+        await channel.send(f"❌ **投票未通過**（{yes}/{total}，需要 {needed} 票），繼續報名中。")
+
+
+async def _ww_begin_game(channel):
+    """遊戲正式開始：分配角色、發 DM、開始夜晚。"""
+    global _ww_state
+
+    _ww_state["phase"] = "playing"
+
+    # 鎖定報名按鈕
+    if _ww_invite_msg_id:
+        try:
+            msg = await channel.fetch_message(_ww_invite_msg_id)
+            view = WerewolfSignupView()
+            for child in view.children:
+                child.disabled = True
+            await msg.edit(view=view)
+        except Exception:
+            pass
+
+    # 補 AI 玩家
+    real_players = [p for p in _ww_state["players"] if not p["is_ai"]]
+    ai_needed = 6 - len(real_players)
+    if ai_needed > 0:
+        ai_names = ["AI-老王", "AI-小美", "AI-阿哲", "AI-婷婷", "AI-大偉"]
+        for i in range(ai_needed):
+            name = ai_names[i] if i < len(ai_names) else f"AI-玩家{i+1}"
+            _ww_state["players"].append({
+                "id": f"ai_{i}",
+                "name": name,
+                "is_ai": True,
+                "role": "",
+                "alive": True,
+                "dm_done": False,
+            })
+        _ww_log(f"Added {ai_needed} AI players. Total: {len(_ww_state['players'])}")
+
+    # 分配角色
+    _ww_assign_roles(_ww_state["players"])
+    _ww_log(f"Roles assigned: " + ", ".join(f"{p['name']}={p['role']}" for p in _ww_state["players"]))
+
+    # 歡迎訊息
+    role_mention = ""
+    if _ww_state.get("role_id"):
+        role_mention = f"<@&{_ww_state['role_id']}>"
+
+    narrate = await _ww_narrate("遊戲開始，所有人抵達村莊，夜幕即將降臨")
+    narrate_text = f"\n\n> {narrate}" if narrate else ""
+
+    embed = discord.Embed(
+        title="🐺 狼人殺 · 遊戲開始！",
+        description=(
+            f"本局共 **{len(_ww_state['players'])} 人**"
+            f"（真人 {len(real_players)} + AI {ai_needed if ai_needed > 0 else 0}）\n\n"
+            f"🎭 角色配置：2 狼人 + 1 預言家 + 3 村民\n\n"
+            "每個人的身分已透過 **僅自己可見的訊息** 發送，請查看你的 DM。{narrate_text}"
+        ),
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_footer(text="ICEA · AI 狼人殺")
+    await channel.send(content=role_mention, embed=embed)
+
+    # 發送角色 DM
+    for p in _ww_state["players"]:
+        if p["is_ai"]:
+            p["dm_done"] = True
+            continue
+        try:
+            member = channel.guild.get_member(int(p["id"]))
+            if not member:
+                continue
+            info = _WW_ROLE_INFO[p["role"]]
+            dm_embed = discord.Embed(
+                title=f"{info['emoji']} 你的角色：{p['role']}",
+                description=info["desc"],
+                color=info["color"],
+            )
+            # 狼人知道同伴
+            if p["role"] == "狼人":
+                partners = [pp["name"] for pp in _ww_state["players"] if pp["role"] == "狼人" and pp["id"] != p["id"]]
+                if partners:
+                    dm_embed.add_field(name="你的同伴", value="、".join(partners), inline=False)
+            dm_embed.set_footer(text="ICEA · AI 狼人殺 | 此訊息僅你可見")
+            await member.send(embed=dm_embed)
+            p["dm_done"] = True
+            _ww_log(f"DM sent to {p['name']}: {p['role']}")
+        except discord.Forbidden:
+            print(f"⚠️ WW: Cannot DM {p['name']} (DM disabled)")
+        except Exception as e:
+            print(f"⚠️ WW DM failed for {p['name']}: {e}")
+
+    await asyncio.sleep(3)
+    await _ww_night_phase(channel)
+
+
+# ── 夜晚階段 ──
+async def _ww_night_phase(channel):
+    """夜晚：狼人殺人 + 預言家查驗。"""
+    global _ww_state
+
+    _ww_state["day"] += 1
+    _ww_state["phase_detail"] = "night_wolf"
+    _ww_state["night_target"] = None
+    _ww_state["seer_target"] = None
+    _ww_state["seer_result"] = None
+
+    narrate = await _ww_narrate(f"第{_ww_state['day']}個夜晚降臨，村莊陷入寂靜")
+    narrate_text = f"\n\n> {narrate}" if narrate else ""
+
+    embed = discord.Embed(
+        title=f"🌙 第 {_ww_state['day']} 夜",
+        description=(
+            f"夜幕降臨，所有人閉上眼睛...{narrate_text}\n\n"
+            "🐺 狼人請選擇目標\n"
+            "🔮 預言家請選擇查驗對象\n\n"
+            "_請至你的 DM 進行操作_"
+        ),
+        color=discord.Color.dark_blue(),
+    )
+    await channel.send(embed=embed)
+
+    # ── 狼人行動 ──
+    wolves = [p for p in _ww_alive_players() if p["role"] == "狼人"]
+    human_wolves = [w for w in wolves if not w["is_ai"]]
+    ai_wolves = [w for w in wolves if w["is_ai"]]
+
+    # AI 狼自動選目標
+    if ai_wolves and not human_wolves:
+        targets = [p for p in _ww_alive_players() if p["role"] != "狼人"]
+        if targets:
+            target = _ww_random.choice(targets)
+            _ww_state["night_target"] = target["id"]
+            _ww_log(f"AI wolf chose target: {target['name']}")
+    elif human_wolves:
+        # 發 DM 給真人狼人投票
+        await _ww_wolf_vote(channel, human_wolves)
+
+    # ── 預言家行動 ──
+    seer = next((p for p in _ww_alive_players() if p["role"] == "預言家"), None)
+    if seer:
+        if seer["is_ai"]:
+            # AI 預言家自動查驗
+            candidates = [p for p in _ww_alive_players() if p["id"] != seer["id"]]
+            if candidates:
+                target = _ww_random.choice(candidates)
+                _ww_state["seer_target"] = target["id"]
+                _ww_state["seer_result"] = target["role"]
+                _ww_log(f"AI seer checked {target['name']}: {target['role']}")
+        else:
+            await _ww_seer_check(channel, seer)
+
+    # 等待行動完成
+    deadline = _time.time() + 60  # 60 秒等待
+    while _time.time() < deadline:
+        wolf_done = _ww_state["night_target"] is not None
+        seer_done = True
+        if seer and not seer["is_ai"]:
+            seer_done = _ww_state["seer_target"] is not None
+        if wolf_done and seer_done:
+            break
+        await asyncio.sleep(2)
+
+    # ── 處理夜晚結果 ──
+    killed_id = _ww_state.get("night_target")
+    killed = _ww_player_by_id(killed_id) if killed_id else None
+
+    if killed:
+        killed["alive"] = False
+        _ww_log(f"Night {_ww_state['day']}: {killed['name']} was killed")
+        day_narrate = await _ww_narrate(
+            f"第{_ww_state['day']}天清晨，{killed['name']}被發現死在床上",
+            extra=f"死者身分：{killed['role']}"
+        )
+        narrate_text = f"\n\n> {day_narrate}" if day_narrate else ""
+        embed = discord.Embed(
+            title=f"☀️ 第 {_ww_state['day']} 天清晨",
+            description=(
+                f"天亮了...{narrate_text}\n\n"
+                f"💀 **{killed['name']}** 在夜晚被殺害。\n"
+                f"身分：{_WW_ROLE_INFO[killed['role']]['emoji']} {killed['role']}\n\n"
+                "請大家開始討論，稍後將進行投票。"
+            ),
+            color=discord.Color.orange(),
+        )
+    else:
+        embed = discord.Embed(
+            title=f"☀️ 第 {_ww_state['day']} 天清晨",
+            description="天亮了...昨夜風平浪靜，沒有人遇害。\n\n請大家開始討論，稍後將進行投票。",
+            color=discord.Color.green(),
+        )
+
+    await channel.send(embed=embed)
+
+    # 檢查勝負
+    winner = _ww_check_win()
+    if winner:
+        await _ww_end_game(channel, winner)
+        return
+
+    # 進入白天討論
+    await _ww_day_phase(channel)
+
+
+# ── 狼人投票（DM）──
+class WerewolfNightActionView(discord.ui.View):
+    """狼人夜晚選擇目標的按鈕面板（DM）。"""
+    def __init__(self, targets):
+        super().__init__(timeout=60)
+        self._targets = targets
+        self._vote = None
+        self._voter_id = None
+
+    async def _handle(self, interaction: discord.Interaction, target_id: str):
+        if self._vote is not None:
+            await interaction.response.send_message("⚠️ 你已經選好了。", ephemeral=True)
+            return
+        self._vote = target_id
+        target = _ww_player_by_id(target_id)
+        await interaction.response.send_message(
+            f"✅ 你選擇了擊殺 **{target['name']}**。", ephemeral=True,
+        )
+        # 更新全局目標
+        global _ww_state
+        _ww_state["night_target"] = target_id
+
+
+async def _ww_wolf_vote(channel, wolves):
+    """發送 DM 給狼人玩家選擇目標。"""
+    targets = [p for p in _ww_alive_players() if p["role"] != "狼人"]
+    if not targets:
+        return
+
+    # 只讓第一個真人狼人操作（簡化：多狼時只取一人意見）
+    wolf = wolves[0]
+    try:
+        member = channel.guild.get_member(int(wolf["id"]))
+        if not member:
+            return
+
+        embed = discord.Embed(
+            title="🐺 夜晚行動 · 狼人",
+            description="請選擇今晚要擊殺的目標：",
+            color=discord.Color.red(),
+        )
+        embed.set_footer(text="60 秒內做選擇")
+
+        view = WerewolfNightActionView(targets)
+        for t in targets:
+            btn = discord.ui.Button(
+                label=f"殺 {t['name']}", style=discord.ButtonStyle.danger,
+                custom_id=f"ww_wolf_{t['id'][:12]}",
+            )
+            async def _cb(interaction, tid=t["id"]):
+                await view._handle(interaction, tid)
+            view.add_item(btn)
+
+        await member.send(embed=embed, view=view)
+
+        # 如果有多個真人狼人，通知其他狼人等待
+        for w in wolves[1:]:
+            other = channel.guild.get_member(int(w["id"]))
+            if other:
+                await other.send("🐺 你的同伴正在選擇今晚的目標...")
+
+    except Exception as e:
+        print(f"⚠️ WW wolf vote DM failed: {e}")
+        # 失敗時 AI 代選
+        _ww_state["night_target"] = _ww_random.choice(targets)["id"]
+
+
+# ── 預言家查驗（DM）──
+class WerewolfSeerView(discord.ui.View):
+    """預言家夜晚查驗的按鈕面板（DM）。"""
+    def __init__(self, targets):
+        super().__init__(timeout=60)
+        self._targets = targets
+        self._choice = None
+
+    async def _handle(self, interaction: discord.Interaction, target_id: str):
+        if self._choice is not None:
+            await interaction.response.send_message("⚠️ 你已經查過了。", ephemeral=True)
+            return
+        self._choice = target_id
+        target = _ww_player_by_id(target_id)
+        is_wolf = target["role"] == "狼人"
+
+        global _ww_state
+        _ww_state["seer_target"] = target_id
+        _ww_state["seer_result"] = target["role"]
+
+        result_text = "🐺 狼人" if is_wolf else "👤 好人"
+        await interaction.response.send_message(
+            f"🔮 查驗結果：**{target['name']}** 是 **{result_text}**",
+            ephemeral=True,
+        )
+
+
+async def _ww_seer_check(channel, seer):
+    """發送 DM 給預言家選擇查驗對象。"""
+    targets = [p for p in _ww_alive_players() if p["id"] != seer["id"]]
+    if not targets:
+        return
+
+    try:
+        member = channel.guild.get_member(int(seer["id"]))
+        if not member:
+            return
+
+        embed = discord.Embed(
+            title="🔮 夜晚行動 · 預言家",
+            description="請選擇今晚要查驗的對象：",
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="60 秒內做選擇")
+
+        view = WerewolfSeerView(targets)
+        for t in targets:
+            btn = discord.ui.Button(
+                label=f"查 {t['name']}", style=discord.ButtonStyle.primary,
+                custom_id=f"ww_seer_{t['id'][:12]}",
+            )
+            async def _cb(interaction, tid=t["id"]):
+                await view._handle(interaction, tid)
+            view.add_item(btn)
+
+        await member.send(embed=embed, view=view)
+    except Exception as e:
+        print(f"⚠️ WW seer DM failed: {e}")
+
+
+# ── 白天討論 + 投票 ──
+class WerewolfDayVoteView(discord.ui.View):
+    """白天投票淘汰面板。"""
+    def __init__(self):
+        super().__init__(timeout=60)
+        self._votes = {}  # {voter_id: target_id}
+        self._voters = set()
+
+    @discord.ui.button(label="🗳️ 投票淘汰", style=discord.ButtonStyle.danger, custom_id="ww_day_vote")
+    async def open_vote(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 這個按鈕打開一個選擇面板（用 select menu）
+        pass
+
+
+async def _ww_day_phase(channel):
+    """白天：討論 + 投票淘汰。"""
+    global _ww_state
+
+    _ww_state["phase_detail"] = "day_discuss"
+
+    embed = discord.Embed(
+        title=f"💬 第 {_ww_state['day']} 天 · 討論時間",
+        description=(
+            "請大家討論誰是狼人。\n"
+            "⏱️ 討論時間 2 分鐘，之後自動進入投票。"
+        ),
+        color=discord.Color.gold(),
+    )
+    await channel.send(embed=embed)
+
+    # 等待討論
+    await asyncio.sleep(120)
+
+    # 進入投票
+    _ww_state["phase_detail"] = "day_vote"
+    _ww_state["votes"] = {}
+
+    alive = _ww_alive_players()
+    human_alive = [p for p in alive if not p["is_ai"]]
+    ai_alive = [p for p in alive if p["is_ai"]]
+
+    # 發送投票面板
+    embed = discord.Embed(
+        title=f"🗳️ 第 {_ww_state['day']} 天 · 投票淘汰",
+        description=(
+            "請選擇你要淘汰的玩家。\n"
+            "⏱️ 投票時間 60 秒。"
+        ),
+        color=discord.Color.red(),
+    )
+    await channel.send(embed=embed)
+
+    # 使用 select menu 投票
+    options = []
+    for p in alive:
+        options.append(discord.SelectOption(
+            label=p["name"], value=p["id"],
+            description=f"{'AI 玩家' if p['is_ai'] else '真人玩家'}",
+        ))
+
+    vote_view = discord.ui.View(timeout=60)
+    select = discord.ui.Select(
+        placeholder="選擇要淘汰的玩家...",
+        options=options,
+        custom_id="ww_day_vote_select",
+    )
+
+    async def _vote_callback(interaction):
+        uid = str(interaction.user.id)
+        voter = _ww_player_by_id(uid)
+        if not voter or not voter["alive"]:
+            await interaction.response.send_message("⚠️ 你無法投票。", ephemeral=True)
+            return
+        if uid in vote_view._voted:
+            await interaction.response.send_message("⚠️ 你已經投過票了。", ephemeral=True)
+            return
+        vote_view._voted.add(uid)
+        target_id = select.values[0]
+        target = _ww_player_by_id(target_id)
+        _ww_state["votes"][uid] = target_id
+        await interaction.response.send_message(
+            f"✅ 你投了 **{target['name']}** 一票。", ephemeral=True,
+        )
+
+    vote_view._voted = set()
+    select.callback = _vote_callback
+    vote_view.add_item(select)
+    vote_msg = await channel.send(view=vote_view)
+
+    # AI 玩家自動投票
+    for ai in ai_alive:
+        targets = [p for p in alive if p["id"] != ai["id"]]
+        if targets:
+            # AI 狼人投非狼人，AI 好人隨機投
+            if ai["role"] == "狼人":
+                non_wolves = [t for t in targets if t["role"] != "狼人"]
+                vote_target = _ww_random.choice(non_wolves) if non_wolves else _ww_random.choice(targets)
+            else:
+                vote_target = _ww_random.choice(targets)
+            _ww_state["votes"][ai["id"]] = vote_target["id"]
+            _ww_log(f"AI {ai['name']} voted for {vote_target['name']}")
+
+    # 等待 60 秒
+    await asyncio.sleep(60)
+
+    # 結算投票
+    for child in vote_view.children:
+        child.disabled = True
+    try:
+        await vote_msg.edit(view=vote_view)
+    except Exception:
+        pass
+
+    # 計票
+    vote_count = {}
+    for voter_id, target_id in _ww_state["votes"].items():
+        vote_count[target_id] = vote_count.get(target_id, 0) + 1
+
+    if not vote_count:
+        await channel.send("📊 本輪無人投票，跳過淘汰。")
+    else:
+        # 找出最高票
+        max_votes = max(vote_count.values())
+        top = [tid for tid, cnt in vote_count.items() if cnt == max_votes]
+        if len(top) > 1:
+            # 平票，隨機淘汰一人
+            eliminated_id = _ww_random.choice(top)
+            await channel.send(f"📊 平票！隨機淘汰一人。")
+        else:
+            eliminated_id = top[0]
+
+        eliminated = _ww_player_by_id(eliminated_id)
+        eliminated["alive"] = False
+        _ww_log(f"Day vote: {eliminated['name']} eliminated ({eliminated['role']})")
+
+        embed = discord.Embed(
+            title="⚖️ 投票結果",
+            description=(
+                f"**{eliminated['name']}** 被淘汰！\n"
+                f"身分：{_WW_ROLE_INFO[eliminated['role']]['emoji']} {eliminated['role']}\n\n"
+                + "\n".join(
+                    f"• {p['name']}：{vote_count.get(p['id'], 0)} 票"
+                    for p in alive if p["id"] in vote_count or p["id"] == eliminated_id
+                )
+            ),
+            color=discord.Color.dark_red(),
+        )
+        await channel.send(embed=embed)
+
+    # 檢查勝負
+    winner = _ww_check_win()
+    if winner:
+        await _ww_end_game(channel, winner)
+        return
+
+    # 進入下一個夜晚
+    await asyncio.sleep(3)
+    await _ww_night_phase(channel)
+
+
+# ── 遊戲結束 + 清理 ──
+async def _ww_end_game(channel, winner: str):
+    """結束遊戲，公佈結果，清理身分組和權限。"""
+    global _ww_state
+
+    _ww_state["phase"] = "ended"
+    _ww_state["winner"] = winner
+
+    # 公佈所有身分
+    role_reveal = "\n".join(
+        f"• {p['name']}：{_WW_ROLE_INFO[p['role']]['emoji']} {p['role']} {'💀' if not p['alive'] else '✅'}"
+        for p in _ww_state["players"]
+    )
+
+    win_text = "🐺 **狼人勝利！**" if winner == "wolves" else "👥 **好人勝利！**"
+
+    narrate = await _ww_narrate(
+        f"遊戲結束，{'狼人' if winner == 'wolves' else '好人'}獲勝",
+        extra=f"存活玩家: {[p['name'] for p in _ww_alive_players()]}"
+    )
+    narrate_text = f"\n\n> {narrate}" if narrate else ""
+
+    embed = discord.Embed(
+        title="🐺 狼人殺 · 遊戲結束",
+        description=f"{win_text}{narrate_text}\n\n**身分揭曉：**\n{role_reveal}",
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_footer(text="ICEA · AI 狼人殺 | 感謝遊玩！")
+    await channel.send(embed=embed)
+
+    # 清理：移除臨時身分組
+    guild = channel.guild
+    role_id = _ww_state.get("role_id")
+    if role_id:
+        role = guild.get_role(int(role_id))
+        if role:
+            # 移除所有成員的身分組
+            try:
+                for member in role.members:
+                    try:
+                        await member.remove_roles(role)
+                    except Exception:
+                        pass
+                # 刪除身分組
+                await role.delete(reason="狼人殺遊戲結束")
+                _ww_log(f"Role {role.name} deleted")
+            except discord.Forbidden:
+                _ww_log("Cannot delete role (missing permissions)")
+            except Exception as e:
+                _ww_log(f"Role cleanup error: {e}")
+
+    # 重置頻道權限
+    try:
+        overwrite = discord.PermissionOverwrite()
+        # 恢復 @everyone 可發言
+        await channel.set_permissions(guild.default_role, overwrite=None)
+        _ww_log("Channel permissions reset")
+    except Exception as e:
+        _ww_log(f"Channel permission reset failed: {e}")
+
+    # 重置狀態
+    _ww_state = {
+        "phase": "idle",
+        "game_id": _ww_state.get("game_id", 0) + 1,
+        "channel_id": None,
+        "guild_id": None,
+        "role_id": None,
+        "signup_msg_id": None,
+        "players": [],
+        "day": 0,
+        "phase_detail": "",
+        "night_target": None,
+        "seer_target": None,
+        "seer_result": None,
+        "votes": {},
+        "log": [],
+        "winner": None,
+    }
+    _ww_invite_msg_id = None
+
+    # 重新發送報名面板
+    await asyncio.sleep(5)
+    await _ww_post_invite(channel)
+
+
+# ── 狼人殺背景循環 ──
+async def werewolf_loop():
+    """管理狼人殺報名面板。"""
+    global _ww_invite_msg_id
+    await asyncio.sleep(35)  # 等待 bot 就緒
+    while True:
+        try:
+            if not chat_ai_settings.get("werewolf_enabled"):
+                await asyncio.sleep(15)
+                continue
+
+            channel_id = chat_ai_settings.get("werewolf_channel_id")
+            if not channel_id:
+                await asyncio.sleep(15)
+                continue
+
+            channel = bot.get_channel(int(channel_id))
+            if not channel:
+                await asyncio.sleep(15)
+                continue
+
+            # 只有 idle 或 signup 階段才確保有面板
+            if _ww_state["phase"] in ("idle", "signup"):
+                needs_post = True
+                if _ww_invite_msg_id:
+                    try:
+                        await channel.fetch_message(_ww_invite_msg_id)
+                        needs_post = False
+                    except discord.NotFound:
+                        _ww_invite_msg_id = None
+                    except Exception:
+                        _ww_invite_msg_id = None
+
+                if needs_post and _ww_state["phase"] == "idle":
+                    # 建立臨時身分組（如果還沒有）
+                    if not _ww_state.get("role_id"):
+                        await _ww_setup_role_and_perms(channel)
+                    _ww_state["phase"] = "signup"
+                    await _ww_post_invite(channel)
+
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"⚠️ Werewolf loop error: {e}")
+            await asyncio.sleep(30)
+
+
+async def _ww_setup_role_and_perms(channel):
+    """建立臨時身分組並設定頻道權限。"""
+    global _ww_state
+
+    guild = channel.guild
+    # 建立身分組
+    try:
+        role = await guild.create_role(
+            name=f"狼人殺玩家_本場",
+            color=discord.Color.dark_red(),
+            reason="狼人殺遊戲身分組",
+        )
+        _ww_state["role_id"] = str(role.id)
+        _ww_state["guild_id"] = str(guild.id)
+        _ww_state["channel_id"] = str(channel.id)
+        _ww_log(f"Created role: {role.name} ({role.id})")
+    except discord.Forbidden:
+        print("⚠️ WW: Cannot create role (missing permissions)")
+        return
+    except Exception as e:
+        print(f"⚠️ WW create role failed: {e}")
+        return
+
+    # 設定頻道權限：身分組可發言，其他人只能看
+    try:
+        # @everyone 只能看
+        await channel.set_permissions(
+            guild.default_role,
+            send_messages=False,
+            read_messages=True,
+            view_channel=True,
+        )
+        # 身分組可以發言
+        await channel.set_permissions(
+            role,
+            send_messages=True,
+            read_messages=True,
+            view_channel=True,
+        )
+        _ww_log("Channel permissions set")
+    except Exception as e:
+        print(f"⚠️ WW set permissions failed: {e}")
+
+
+# ── Slash Command Group ──
+class WerewolfGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="ww", description="AI 狼人殺遊戲")
+
+    @app_commands.command(name="toggle", description="開啟/關閉 AI 狼人殺功能（機器人擁有者限定）")
+    async def ww_toggle(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        chat_ai_settings["werewolf_enabled"] = not chat_ai_settings.get("werewolf_enabled", False)
+        _save_ww_settings()
+        status = "開啟" if chat_ai_settings["werewolf_enabled"] else "關閉"
+        await interaction.response.send_message(f"✅ AI 狼人殺已{status}。", ephemeral=True)
+
+    @app_commands.command(name="channel", description="設定狼人殺頻道（機器人擁有者限定）")
+    @app_commands.describe(channel="要設為狼人殺頻道的頻道")
+    async def ww_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        chat_ai_settings["werewolf_channel_id"] = str(channel.id)
+        _save_ww_settings()
+        await interaction.response.send_message(
+            f"✅ 狼人殺頻道已設為 {channel.mention}。\n"
+            f"啟用後會自動發送報名面板。",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="end", description="強制結束當前狼人殺遊戲（機器人擁有者限定）")
+    async def ww_end(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        if _ww_state["phase"] not in ("playing", "signup"):
+            await interaction.response.send_message("⚠️ 目前沒有進行中的狼人殺遊戲。", ephemeral=True)
+            return
+        await _ww_end_game(interaction.channel, "villagers")
+        await interaction.response.send_message("✅ 狼人殺遊戲已強制結束。", ephemeral=True)
+
+    @app_commands.command(name="status", description="查看狼人殺遊戲狀態")
+    async def ww_status(self, interaction: discord.Interaction):
+        embed = discord.Embed(title="🐺 AI 狼人殺狀態", color=discord.Color.dark_red())
+        embed.add_field(name="功能狀態", value="開啟" if chat_ai_settings.get("werewolf_enabled") else "關閉", inline=True)
+        ch_id = chat_ai_settings.get("werewolf_channel_id")
+        embed.add_field(name="頻道", value=f"<#{ch_id}>" if ch_id else "未設定", inline=True)
+
+        phase_names = {
+            "idle": "空閒", "signup": "報名中", "playing": "遊戲中", "ended": "已結束",
+        }
+        embed.add_field(name="階段", value=phase_names.get(_ww_state["phase"], _ww_state["phase"]), inline=True)
+
+        if _ww_state["phase"] in ("playing", "signup"):
+            players = _ww_state["players"]
+            real = [p for p in players if not p["is_ai"]]
+            ai = [p for p in players if p["is_ai"]]
+            embed.add_field(name="真人玩家", value=str(len(real)), inline=True)
+            embed.add_field(name="AI 玩家", value=str(len(ai)), inline=True)
+            embed.add_field(name="第幾天", value=str(_ww_state["day"]), inline=True)
+            if players:
+                plist = ", ".join(p["name"] for p in players)
+                embed.add_field(name="玩家列表", value=plist[:1024], inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
