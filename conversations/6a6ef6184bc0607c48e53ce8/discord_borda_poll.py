@@ -8413,9 +8413,59 @@ _ww_state = {
     "votes": {},              # {voter_id: target_id}
     "log": [],                # 遊戲事件記錄
     "winner": None,           # "wolves" | "villagers"
+    "discussion_suspects": {},  # {player_id: 被指名懷疑次數}（每天討論階段重置）
 }
 
 _ww_invite_msg_id = None
+_ww_webhook_cache = {}  # {channel_id: discord.Webhook} 快取，避免重複建立/查詢
+
+async def _ww_get_webhook(channel):
+    """取得（或建立）本頻道用於 AI 玩家發言的 Webhook，並快取起來。"""
+    cached = _ww_webhook_cache.get(channel.id)
+    if cached:
+        return cached
+    try:
+        webhooks = await channel.webhooks()
+        existing = next((w for w in webhooks if w.name == "ICEA 狼人殺 AI"), None)
+        if existing:
+            _ww_webhook_cache[channel.id] = existing
+            return existing
+        created = await channel.create_webhook(name="ICEA 狼人殺 AI", reason="狼人殺 AI 玩家發言用")
+        _ww_webhook_cache[channel.id] = created
+        return created
+    except discord.Forbidden:
+        print("⚠️ WW: 無 Manage Webhooks 權限，AI 發言將改用一般訊息格式")
+        return None
+    except Exception as e:
+        print(f"⚠️ WW get_webhook failed: {e}")
+        return None
+
+
+def _ww_ai_avatar_url(name: str) -> str:
+    """依名字產生一個穩定但看起來隨機的頭像（dicebear，同名字每次都一樣，換名字就換頭像）。"""
+    seed = urllib.parse.quote(name)
+    return f"https://api.dicebear.com/9.x/adventurer/png?seed={seed}&backgroundType=gradientLinear"
+
+
+async def _ww_send_ai_message(channel, ai_player: dict, text: str):
+    """用 Webhook 以 AI 玩家的身分（自訂名字+頭像）發送發言訊息，更有帶入感。
+    若無法取得 Webhook（權限不足等），自動降級為一般訊息格式。"""
+    webhook = await _ww_get_webhook(channel)
+    if webhook:
+        try:
+            await webhook.send(
+                content=text,
+                username=ai_player["name"],
+                avatar_url=_ww_ai_avatar_url(ai_player["name"]),
+            )
+            return
+        except Exception as e:
+            print(f"⚠️ WW webhook send failed, falling back: {e}")
+    # 降級：一般訊息
+    try:
+        await channel.send(f"**{ai_player['name']}：** {text}")
+    except Exception as e:
+        print(f"⚠️ WW fallback message send failed: {e}")
 
 def _save_ww_settings():
     settings = {
@@ -8971,6 +9021,9 @@ async def _ww_night_phase(channel):
     """夜晚：狼人殺人 + 預言家查驗。"""
     global _ww_state
 
+    # 綁定本輪遊戲 ID：所有長時間 await 之後都要驗證，避免舊局殘留任務污染新局
+    my_game_id = _ww_state.get("game_id", 0)
+
     _ww_state["day"] += 1
     _ww_state["phase_detail"] = "night_wolf"
     _ww_state["night_target"] = None
@@ -9042,6 +9095,8 @@ async def _ww_night_phase(channel):
     # 等待行動完成
     deadline = _time.time() + 60  # 60 秒等待
     while _time.time() < deadline:
+        if _ww_state.get("game_id") != my_game_id:
+            return  # 舊局殘留任務，新局已開始，靜默中止
         wolf_done = _ww_state["night_target"] is not None
         seer_done = True
         if seer and not seer["is_ai"]:
@@ -9049,6 +9104,9 @@ async def _ww_night_phase(channel):
         if wolf_done and seer_done:
             break
         await asyncio.sleep(2)
+
+    if _ww_state.get("game_id") != my_game_id:
+        return  # 本局已結束/被新局取代，靜默中止
 
     # ── 處理夜晚結果 ──
     killed_id = _ww_state.get("night_target")
@@ -9099,8 +9157,13 @@ class WerewolfNightActionView(discord.ui.View):
         self._targets = targets
         self._vote = None
         self._voter_id = None
+        self._game_id = _ww_state.get("game_id", 0)  # 綁定建立時的局號，防止跨局污染
 
     async def _handle(self, interaction: discord.Interaction, target_id: str):
+        global _ww_state
+        if _ww_state.get("game_id") != self._game_id:
+            await interaction.response.send_message("⚠️ 此面板已失效（遊戲已結束或新的一局已開始）。", ephemeral=True)
+            return
         if self._vote is not None:
             await interaction.response.send_message("⚠️ 你已經選好了。", ephemeral=True)
             return
@@ -9110,7 +9173,6 @@ class WerewolfNightActionView(discord.ui.View):
             f"✅ 你選擇了擊殺 **{target['name']}**。", ephemeral=True,
         )
         # 更新全局目標
-        global _ww_state
         _ww_state["night_target"] = target_id
 
 
@@ -9166,8 +9228,13 @@ class WerewolfSeerView(discord.ui.View):
         super().__init__(timeout=60)
         self._targets = targets
         self._choice = None
+        self._game_id = _ww_state.get("game_id", 0)  # 綁定建立時的局號，防止跨局污染
 
     async def _handle(self, interaction: discord.Interaction, target_id: str):
+        global _ww_state
+        if _ww_state.get("game_id") != self._game_id:
+            await interaction.response.send_message("⚠️ 此面板已失效（遊戲已結束或新的一局已開始）。", ephemeral=True)
+            return
         if self._choice is not None:
             await interaction.response.send_message("⚠️ 你已經查過了。", ephemeral=True)
             return
@@ -9175,7 +9242,6 @@ class WerewolfSeerView(discord.ui.View):
         target = _ww_player_by_id(target_id)
         is_wolf = target["role"] == "狼人"
 
-        global _ww_state
         _ww_state["seer_target"] = target_id
         _ww_state["seer_result"] = target["role"]
 
@@ -9234,51 +9300,76 @@ class WerewolfDayVoteView(discord.ui.View):
         pass
 
 
-async def _ww_ai_discuss(ai_player: dict) -> str | None:
-    """讓 AI 玩家在白天討論時發言。根據角色產生不同視角的簡短發言。"""
+async def _ww_ai_discuss(ai_player: dict) -> tuple[str, str | None] | None:
+    """讓 AI 玩家在白天討論時發言。根據角色產生不同視角的簡短發言。
+    回傳 (發言內容, 被懷疑的玩家id或None) —— 懷疑對象由程式預先指定給AI寫評論，
+    不讓AI自己自由選名字，避免（1）誤把自己的名字當懷疑對象、（2）提到遊戲外不存在的名字。"""
     role = ai_player["role"]
+    my_name = ai_player["name"]
     alive = _ww_alive_players()
     others = [p for p in alive if p["id"] != ai_player["id"]]
-    
+
+    if not others:
+        return None
+
+    suspect_id = None
+
     if role == "狼人":
-        # 狼人：假裝好人，隨機懷疑某人
-        suspect = _ww_random.choice(others) if others else None
+        # 狼人：假裝好人。70% 機率點名非狼人（偽裝合理），30% 隨機（含可能點隊友，製造煙霧彈）
+        non_wolves = [p for p in others if p["role"] != "狼人"]
+        if non_wolves and _ww_random.random() < 0.7:
+            suspect = _ww_random.choice(non_wolves)
+        else:
+            suspect = _ww_random.choice(others)
+        suspect_id = suspect["id"]
         prompt = (
-            f"你是狼人殺遊戲中的狼人玩家，正在白天討論階段。"
-            f"你需要偽裝成好人，不要暴露自己的身分。"
-            f"活著的玩家有：{', '.join(p['name'] for p in alive)}。"
-            f"請用台灣繁體中文，以玩家視角說一句簡短的懷疑或分析（20-40字），不要提到自己的身分，不要加emoji。"
-            f"直接輸出發言內容。"
+            f"你是狼人殺遊戲中的玩家，你的名字是「{my_name}」。你的真實身分是狼人，但正在白天討論階段偽裝成好人，"
+            f"絕對不能暴露自己是狼人，也絕對不要提到「{my_name}」這個名字（不要用第三人稱討論自己）。\n"
+            f"請針對玩家「{suspect['name']}」說一句簡短的懷疑或分析（20-40字），語氣自然、像真人在推理，不要加emoji，不要提及「懷疑對象」「AI」等字眼。\n"
+            f"直接輸出發言內容，不要加任何前綴或說明。"
         )
     elif role == "預言家":
         # 預言家：暗示有資訊但不直接跳身分
         checked = ai_player.get("seer_history", [])
-        if checked:
-            checked_names = [_ww_player_by_id(cid)["name"] for cid in checked if _ww_player_by_id(cid)]
+        checked_wolf = next((cid for cid in checked if _ww_player_by_id(cid) and _ww_player_by_id(cid)["role"] == "狼人"), None)
+        if checked_wolf:
+            suspect = _ww_player_by_id(checked_wolf)
+            suspect_id = suspect["id"]
             prompt = (
-                f"你是狼人殺遊戲中的預言家，正在白天討論階段。"
-                f"你已經查驗過以下玩家：{', '.join(checked_names)}。"
-                f"活著的玩家有：{', '.join(p['name'] for p in alive)}。"
-                f"請用台灣繁體中文，以玩家視角說一句簡短的觀察或引導（20-40字），可以暗示你有資訊但不要直接說我是預言家，不要加emoji。"
-                f"直接輸出發言內容。"
+                f"你是狼人殺遊戲中的玩家，你的名字是「{my_name}」。你的真實身分是預言家，你已經查驗出「{suspect['name']}」是狼人，"
+                f"但不要直接說「我是預言家」或「我查驗過」，絕對不要提到「{my_name}」這個名字（不要用第三人稱討論自己）。\n"
+                f"請用比較有把握、堅定的語氣針對「{suspect['name']}」說一句簡短的懷疑或引導（20-40字），暗示你有依據但不要直接爆身分，不要加emoji。\n"
+                f"直接輸出發言內容，不要加任何前綴或說明。"
+            )
+        elif checked:
+            checked_names = [_ww_player_by_id(cid)["name"] for cid in checked if _ww_player_by_id(cid)]
+            suspect = _ww_random.choice(others)
+            suspect_id = suspect["id"]
+            prompt = (
+                f"你是狼人殺遊戲中的玩家，你的名字是「{my_name}」。你的真實身分是預言家，你已經查驗過「{'、'.join(checked_names)}」但他們都是好人，"
+                f"絕對不要提到「{my_name}」這個名字（不要用第三人稱討論自己）。\n"
+                f"請針對玩家「{suspect['name']}」說一句簡短的觀察或引導（20-40字），可以暗示你有一些資訊但不要直接爆身分，不要加emoji。\n"
+                f"直接輸出發言內容，不要加任何前綴或說明。"
             )
         else:
+            suspect = _ww_random.choice(others)
+            suspect_id = suspect["id"]
             prompt = (
-                f"你是狼人殺遊戲中的玩家，正在白天討論階段。"
-                f"活著的玩家有：{', '.join(p['name'] for p in alive)}。"
-                f"請用台灣繁體中文，以玩家視角說一句簡短的觀察或懷疑（20-40字），不要加emoji。"
-                f"直接輸出發言內容。"
+                f"你是狼人殺遊戲中的玩家，你的名字是「{my_name}」。絕對不要提到「{my_name}」這個名字（不要用第三人稱討論自己）。\n"
+                f"請針對玩家「{suspect['name']}」說一句簡短的觀察或懷疑（20-40字），不要加emoji。\n"
+                f"直接輸出發言內容，不要加任何前綴或說明。"
             )
     else:
-        # 村民：隨機懷疑
-        suspect = _ww_random.choice(others) if others else None
+        # 村民：隨機懷疑（沒有任何內幕消息，純粹瞎猜，符合真實遊玩體感）
+        suspect = _ww_random.choice(others)
+        suspect_id = suspect["id"]
         prompt = (
-            f"你是狼人殺遊戲中的普通村民，正在白天討論階段。"
-            f"活著的玩家有：{', '.join(p['name'] for p in alive)}。"
-            f"請用台灣繁體中文，以玩家視角說一句簡短的觀察或懷疑（20-40字），不要加emoji。"
-            f"直接輸出發言內容。"
+            f"你是狼人殺遊戲中的普通村民，你的名字是「{my_name}」。你沒有任何特殊資訊，只能憑直覺瞎猜。"
+            f"絕對不要提到「{my_name}」這個名字（不要用第三人稱討論自己）。\n"
+            f"請針對玩家「{suspect['name']}」說一句簡短的觀察或懷疑（20-40字），語氣自然、像真人隨口猜測，不要加emoji。\n"
+            f"直接輸出發言內容，不要加任何前綴或說明。"
         )
-    
+
     settings = {
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
@@ -9288,7 +9379,7 @@ async def _ww_ai_discuss(ai_player: dict) -> str | None:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
         settings["fallback_api_key"] = chat_ai_settings.get("fallback_api_key", "")
         settings["fallback_model"] = chat_ai_settings.get("fallback_model", "")
-    
+
     messages = [{"role": "user", "content": prompt}]
     try:
         result = await call_chat_api(
@@ -9303,7 +9394,11 @@ async def _ww_ai_discuss(ai_player: dict) -> str | None:
         text = result.get("content", "").strip()
         # 清理：去掉引號、換行
         text = text.strip().strip("'").strip('"').replace("\n", " ")
-        return text[:100] if text else None
+        # 防禦性檢查：若AI仍不小心提到自己的名字，整句直接捨棄（避免蠢錯誤露出）
+        if text and my_name in text:
+            print(f"⚠️ WW AI discuss self-mention detected, discarding: {text[:50]}")
+            return None
+        return (text[:100], suspect_id) if text else None
     except Exception as e:
         print(f"⚠️ WW AI discuss failed: {e}")
         return None
@@ -9313,7 +9408,11 @@ async def _ww_day_phase(channel):
     """白天：討論 + 投票淘汰。"""
     global _ww_state
 
+    # 綁定本輪遊戲 ID：所有長時間 await 之後都要驗證，避免舊局殘留任務污染新局
+    my_game_id = _ww_state.get("game_id", 0)
+
     _ww_state["phase_detail"] = "day_discuss"
+    _ww_state["discussion_suspects"] = {}
 
     # 提前計算存活玩家名單（討論發言與投票階段都需要用到）
     alive = _ww_alive_players()
@@ -9330,22 +9429,30 @@ async def _ww_day_phase(channel):
     )
     await channel.send(embed=embed)
 
-    # AI 玩家發言（討論階段）
+    # AI 玩家發言（討論階段），並記錄被懷疑次數供投票階段參考
     for ai in ai_alive:
         try:
-            msg = await _ww_ai_discuss(ai)
-            if msg:
-                await channel.send(f"**{ai['name']}：** {msg}")
+            result = await _ww_ai_discuss(ai)
+            if _ww_state.get("game_id") != my_game_id:
+                return  # 舊局殘留任務，新局已開始，靜默中止
+            if result:
+                msg, suspect_id = result
+                await _ww_send_ai_message(channel, ai, msg)
+                if suspect_id:
+                    _ww_state["discussion_suspects"][suspect_id] = _ww_state["discussion_suspects"].get(suspect_id, 0) + 1
                 await asyncio.sleep(2)
         except Exception as e:
             print(f"⚠️ WW AI discuss failed for {ai['name']}: {e}")
 
     # 等待討論（剩餘時間，扣掉 AI 發言已用的時間）
     await asyncio.sleep(60)
+    if _ww_state.get("game_id") != my_game_id:
+        return  # 本局已結束/被新局取代，靜默中止，避免對新局頻道亂發訊息
 
     # 進入投票
     _ww_state["phase_detail"] = "day_vote"
     _ww_state["votes"] = {}
+    suspects_tally = dict(_ww_state.get("discussion_suspects", {}))
 
     # 發送投票面板
     embed = discord.Embed(
@@ -9374,6 +9481,9 @@ async def _ww_day_phase(channel):
     )
 
     async def _vote_callback(interaction):
+        if _ww_state.get("game_id") != my_game_id:
+            await interaction.response.send_message("⚠️ 此投票面板已失效（新的一局已經開始）。", ephemeral=True)
+            return
         uid = str(interaction.user.id)
         voter = _ww_player_by_id(uid)
         if not voter or not voter["alive"]:
@@ -9395,7 +9505,7 @@ async def _ww_day_phase(channel):
     vote_view.add_item(select)
     vote_msg = await channel.send(view=vote_view)
 
-    # AI 玩家自動投票（策略性投票）
+    # AI 玩家自動投票（策略性投票 + 討論階段風向影響）
     for ai in ai_alive:
         targets = [p for p in alive if p["id"] != ai["id"]]
         if not targets:
@@ -9421,18 +9531,17 @@ async def _ww_day_phase(channel):
                 unconfirmed = [t for t in targets if t not in confirmed_good]
                 vote_target = _ww_random.choice(unconfirmed) if unconfirmed else _ww_random.choice(targets)
         else:
-            # AI 村民：隨機投，但稍微偏向投 AI 玩家（因為人類更容易判斷真人）
-            other_ai = [t for t in targets if t["is_ai"]]
-            other_human = [t for t in targets if not t["is_ai"]]
-            if other_ai and other_human and _ww_random.random() < 0.4:
-                vote_target = _ww_random.choice(other_ai)
-            else:
-                vote_target = _ww_random.choice(targets)
+            # AI 村民：沒有內幕消息，主要跟討論階段的風向走（誰被點名越多次就越容易被投），
+            # 但保留隨機噪聲，不是每次都精準命中真兇——這樣才像真實玩家會誤判、會被帶錯風向。
+            weights = [1 + suspects_tally.get(t["id"], 0) * 2 for t in targets]
+            vote_target = _ww_random.choices(targets, weights=weights, k=1)[0]
         _ww_state["votes"][ai["id"]] = vote_target["id"]
         _ww_log(f"AI {ai['name']} ({ai['role']}) voted for {vote_target['name']} ({vote_target['role']})")
 
     # 等待 60 秒
     await asyncio.sleep(60)
+    if _ww_state.get("game_id") != my_game_id:
+        return  # 本局已結束/被新局取代，靜默中止
 
     # 結算投票
     for child in vote_view.children:
@@ -9477,6 +9586,9 @@ async def _ww_day_phase(channel):
             color=discord.Color.dark_red(),
         )
         await channel.send(embed=embed)
+
+    if _ww_state.get("game_id") != my_game_id:
+        return  # 保險：結算後再檢查一次，避免對新局做出勝負判定
 
     # 檢查勝負
     winner = _ww_check_win()
