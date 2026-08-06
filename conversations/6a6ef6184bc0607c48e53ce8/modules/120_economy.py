@@ -545,3 +545,158 @@ class EconomyGroup(app_commands.Group):
             await interaction.followup.send(f"✅ 經濟看板已設定至 {channel.mention}，將即時更新。", ephemeral=True)
         else:
             await interaction.followup.send(f"⚠️ 看板設定已儲存，但發送失敗，請確認機器人在 {channel.mention} 有發言權限。", ephemeral=True)
+
+    @app_commands.command(name="roulette", description="俄羅斯轉盤 — 填越多子彈倍率越高，但死掉的機率也越高")
+    @app_commands.describe(
+        bet="下注金額（最低 100）",
+        bullets="裝填子彈數 1-5 顆（越多倍率越高：1=1.3x, 2=1.6x, 3=2.0x, 4=3.0x, 5=5.0x）"
+    )
+    @app_commands.choices(bullets=[
+        app_commands.Choice(name="1 顆 — 1.3x（存活率 83%）", value=1),
+        app_commands.Choice(name="2 顆 — 1.6x（存活率 67%）", value=2),
+        app_commands.Choice(name="3 顆 — 2.0x（存活率 50%）", value=3),
+        app_commands.Choice(name="4 顆 — 3.0x（存活率 33%）", value=4),
+        app_commands.Choice(name="5 顆 — 5.0x（存活率 17%）", value=5),
+    ])
+    async def eco_roulette(self, interaction: discord.Interaction, bet: int, bullets: int):
+        user_id_str = str(interaction.user.id)
+
+        # 驗證參數
+        if bet < ROULETTE_MIN_BET:
+            await interaction.response.send_message(
+                f"❌ 最低下注 {ROULETTE_MIN_BET} {currency_name()}。", ephemeral=True
+            )
+            return
+        if bullets < 1 or bullets > 5:
+            await interaction.response.send_message(
+                "❌ 子彈數必須在 1-5 之間（6 顆就必死了，沒人會那麼做）。", ephemeral=True
+            )
+            return
+
+        _ensure_user(user_id_str, interaction.user.display_name)
+        bal = get_balance(user_id_str)
+        if bal < bet:
+            await interaction.response.send_message(
+                f"❌ 餘額不足。你只有 {bal} {currency_name()}，下注需要 {bet}。", ephemeral=True
+            )
+            return
+
+        # 冷卻檢查
+        import time as _time_mod
+        now = _time_mod.time()
+        last_play = _roulette_cooldowns.get(user_id_str, 0)
+        if now - last_play < ROULETTE_COOLDOWN_SEC:
+            remaining = int(ROULETTE_COOLDOWN_SEC - (now - last_play))
+            await interaction.response.send_message(
+                f"⏳ 手還在發抖呢，等 {remaining} 秒再來。", ephemeral=True
+            )
+            return
+        _roulette_cooldowns[user_id_str] = now
+
+        # 先扣籌碼（確認後扣板機才決定生死）
+        add_balance(user_id_str, -bet, interaction.user.display_name)
+        multiplier = ROULETTE_MULTIPLIERS[bullets]
+        potential_profit = int(bet * (multiplier - 1))
+
+        embed = discord.Embed(
+            title="🔫 俄羅斯轉盤",
+            description=(
+                f"**{interaction.user.display_name}** 走到桌前，裝填了 **{bullets}** 顆子彈。\n\n"
+                f"💵 下注：**{bet}** {currency_name()}\n"
+                f"🔫 彈巢：6 格，裝 {bullets} 顆\n"
+                f"✨ 倍率：**{multiplier}x**\n"
+                f"🎯 贏了拿：**{potential_profit}** {currency_name()}（淨利）\n"
+                f"💀 輸了賠：**{bet}** {currency_name()}\n\n"
+                f"扣下板機，看命運給你什麼答案…"
+            ),
+            color=discord.Color.dark_red(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_footer(text="30 秒內未扣板機將自動退還籌碼")
+
+        view = RouletteConfirmView(user_id_str, bet, bullets)
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+# ── 俄羅斯轉盤 ──
+ROULETTE_MULTIPLIERS = {1: 1.3, 2: 1.6, 3: 2.0, 4: 3.0, 5: 5.0}
+ROULETTE_MIN_BET = 100
+# 冷卻記錄：{user_id_str: last_play_timestamp}
+_roulette_cooldowns = {}
+ROULETTE_COOLDOWN_SEC = 10  # 每人每次間隔 10 秒防止刷屏
+
+
+class RouletteConfirmView(discord.ui.View):
+    """俄羅斯轉盤確認面板 — 玩家點擊扣板機。"""
+
+    def __init__(self, user_id: str, bet: int, bullets: int):
+        super().__init__(timeout=30)
+        self.user_id = user_id
+        self.bet = bet
+        self.bullets = bullets
+        self.pulled = False
+
+    @discord.ui.button(label="🔫 扣板機", style=discord.ButtonStyle.danger)
+    async def pull_trigger(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("這不是你的賭局！", ephemeral=True)
+            return
+        if self.pulled:
+            return
+        self.pulled = True
+        self.stop()
+
+        bet = self.bet
+        bullets = self.bullets
+        multiplier = ROULETTE_MULTIPLIERS[bullets]
+        # 6 個彈巢，隨機一個位置，若 < bullets 就是中彈
+        chamber = _eco_random.randint(0, 5)
+        hit = chamber < bullets
+
+        if hit:
+            # 死亡 — 失去下注金額
+            add_balance(self.user_id, -bet, interaction.user.display_name)
+            new_bal = get_balance(self.user_id)
+            embed = discord.Embed(
+                title="💥 砰！",
+                description=(
+                    f"**{interaction.user.display_name}** 倒下了…\n\n"
+                    f"🔫 彈巢位置：{chamber + 1}/6（裝填 {bullets} 顆子彈）\n"
+                    f"💔 損失 **{bet}** {currency_name()}\n"
+                    f"💰 餘額：**{new_bal}** {currency_name()}\n\n"
+                    f"「命運的子彈不會放過任何人。」"
+                ),
+                color=discord.Color.red(),
+                timestamp=discord.utils.utcnow(),
+            )
+            # 清除按鈕
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            # 存活 — 贏得 bet * (multiplier - 1) 淨利
+            profit = int(bet * (multiplier - 1))
+            add_balance(self.user_id, profit, interaction.user.display_name)
+            new_bal = get_balance(self.user_id)
+            embed = discord.Embed(
+                title="🟢 喀——空槍！你活下來了！",
+                description=(
+                    f"**{interaction.user.display_name}** 冷汗直流，但活著。\n\n"
+                    f"🔫 彈巢位置：{chamber + 1}/6（裝填 {bullets} 顆子彈）\n"
+                    f"✨ 倍率 **{multiplier}x**\n"
+                    f"💵 贏得 **{profit}** {currency_name()}\n"
+                    f"💰 餘額：**{new_bal}** {currency_name()}\n\n"
+                    f"「老天爺今天還不想收你。」"
+                ),
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow(),
+            )
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        # 超時沒扣 — 退還籌碼
+        if not self.pulled:
+            add_balance(self.user_id, self.bet, "roulette_timeout_refund")
+            print(f"💰 俄羅斯轉盤超時退款：{self.user_id} → {self.bet} {currency_name()}")
