@@ -3187,6 +3187,39 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         print(f"⚠️ 非串流回應為空，嘗試串流模式...")
                     except Exception:
                         return status, body  # can't parse, let upstream handle
+                elif status == 400 and any(
+                    k in body and "unsupported parameter" in body.lower()
+                    for k in ("reasoning_effort", "thinking", "enable_thinking")
+                ):
+                    # ── 這個 API 對未知欄位做嚴格驗證，reasoning 控制參數
+                    # 被直接拒絕。記住這個 endpoint 以後永遠不送這些參數，
+                    # 並立刻用清乾淨的 payload 重試一次（不要落到下面的串流
+                    # 備援——串流備援目前沿用同一份 payload，一樣會帶著壞
+                    # 參數再失敗一次，白白浪費時間）。
+                    print(f"⚠️ 端點不支援 reasoning 參數（{body[:150]}），記住並移除後立即重試...")
+                    _reasoning_unsupported_apis.add(api_url)
+                    save_reasoning_unsupported()
+                    payload_clean = {k: v for k, v in payload.items()
+                                      if k not in ("reasoning_effort", "thinking", "enable_thinking")}
+                    payload_ns_clean = {**payload_clean, "stream": False}
+                    payload_ns_clean.pop("stream_options", None)
+                    try:
+                        status, body = await _do_non_stream_post(api_url, payload_ns_clean, t_ns)
+                        if status == 200:
+                            try:
+                                data = json_module.loads(body)
+                                msg = data.get("choices", [{}])[0].get("message", {})
+                                if msg.get("content") or msg.get("tool_calls"):
+                                    if use_tools:
+                                        _tools_supported_apis.add(api_url)
+                                        save_tools_supported()
+                                    return status, body
+                            except Exception:
+                                return status, body
+                    except (asyncio.TimeoutError, Exception) as e_clean:
+                        print(f"⚠️ 移除 reasoning 參數後仍失敗（{type(e_clean).__name__}: {e_clean}），嘗試串流模式...")
+                    payload.clear()
+                    payload.update(payload_clean)
                 else:
                     print(f"⚠️ 非串流 POST 失敗 (status={status})，嘗試串流模式...")
             except (asyncio.TimeoutError, Exception) as e:
@@ -3383,7 +3416,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # 就被讀取而拋出 UnboundLocalError（這正是先前部署崩潰的根因）。
         _reasoning_effort = _get_reasoning_effort(fallback_mode)
         _reasoning_params = _build_reasoning_params(_reasoning_effort)
-        if _reasoning_params:
+        if _reasoning_params and api_url not in _reasoning_unsupported_apis:
             payload.update(_reasoning_params)
             _diag.append(f"🧠 reasoning_effort={_reasoning_effort}")
         if use_tools:
@@ -4345,6 +4378,13 @@ def _ai_circuit_success():
 
 _tools_unsupported_apis: set = set()
 _tools_supported_apis: set = set()
+# ── Reasoning 參數不支援白名單 ──
+# 有些 API 供應商對 payload 做嚴格參數驗證，收到不認識的欄位
+# （reasoning_effort/thinking/enable_thinking）直接回 400 Bad Request，
+# 而不是像大多數供應商一樣忽略未知欄位。一旦偵測到，記住這個 endpoint
+# 之後永遠不要再送 reasoning 參數，避免每次呼叫都白白浪費一次 400 重試
+# 的時間（這在短 timeout 的快速通道下是致命的）。
+_reasoning_unsupported_apis: set = set()
 
 # ── Global background-AI-call throttle ──
 # Root cause of "every single chat reply times out": multiple background
@@ -4397,6 +4437,22 @@ def load_tools_unsupported():
                 print(f"✅ tools_unsupported_apis 載入：{_tools_unsupported_apis}（略過 tools 參數，直接用純文字呼叫）")
     except Exception as e:
         print(f"⚠️ tools_unsupported_apis load failed: {e}")
+
+REASONING_UNSUPPORTED_FILE = os.path.join(DATA_DIR, "reasoning_unsupported_apis.json")
+
+def save_reasoning_unsupported():
+    _save_json_file(REASONING_UNSUPPORTED_FILE, list(_reasoning_unsupported_apis))
+
+def load_reasoning_unsupported():
+    global _reasoning_unsupported_apis
+    try:
+        if os.path.exists(REASONING_UNSUPPORTED_FILE):
+            with open(REASONING_UNSUPPORTED_FILE, "r", encoding="utf-8") as f:
+                _reasoning_unsupported_apis = set(json_module.load(f))
+            if _reasoning_unsupported_apis:
+                print(f"✅ reasoning_unsupported_apis 載入：{_reasoning_unsupported_apis}（略過 reasoning 參數）")
+    except Exception as e:
+        print(f"⚠️ reasoning_unsupported_apis load failed: {e}")
 
 _MICROPEDIA_SKIP_PREFIXES = ("特殊:", "File:", "Category:", "Template:", "Help:",
                              "Special:", "MediaWiki:", "User:", "Talk:", "Project:", "分類:")
@@ -8693,6 +8749,7 @@ async def setup_hook():
     # flag every single room as stale on every restart. See on_ready().
     load_tools_unsupported()
     load_tools_supported()
+    load_reasoning_unsupported()
     asyncio.ensure_future(self_ping_loop())
     asyncio.ensure_future(auto_save_loop())
     asyncio.ensure_future(daily_briefing_scheduler())
