@@ -3938,6 +3938,14 @@ async def _resolve_log_channel(guild):
     if not guild:
         return None, "沒有 guild 物件"
 
+    # CRITICAL: log_channel_id may be stored as a string (e.g. from dashboard API).
+    # guild.get_channel() and guild.fetch_channel() both expect an int — a string
+    # key will silently miss the cache and may fail the API call. Always convert.
+    try:
+        log_ch_id = int(log_ch_id)
+    except (TypeError, ValueError):
+        return None, f"log_channel_id 無法轉為整數（值={log_ch_id!r}，型態={type(log_ch_id).__name__}）"
+
     log_ch = guild.get_channel(log_ch_id)
     if log_ch:
         return log_ch, None
