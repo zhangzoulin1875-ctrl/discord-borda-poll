@@ -653,9 +653,10 @@ class RouletteConfirmView(discord.ui.View):
         chamber = _eco_random.randint(0, 5)
         hit = chamber < bullets
 
+        # 注意：下注時（eco_roulette 指令）已經預先扣過一次本金了，
+        # 這裡只處理「輸了不用再扣（本金已經沒了）」跟「贏了要把本金+淨利一次還回來」。
         if hit:
-            # 死亡 — 失去下注金額
-            add_balance(self.user_id, -bet, interaction.user.display_name)
+            # 死亡 — 本金已經在下注時扣掉了，這裡不再扣第二次！
             new_bal = get_balance(self.user_id)
             embed = discord.Embed(
                 title="💥 砰！",
@@ -674,9 +675,11 @@ class RouletteConfirmView(discord.ui.View):
                 child.disabled = True
             await interaction.response.edit_message(embed=embed, view=self)
         else:
-            # 存活 — 贏得 bet * (multiplier - 1) 淨利
-            profit = int(bet * (multiplier - 1))
-            add_balance(self.user_id, profit, interaction.user.display_name)
+            # 存活 — 本金已經扣過了，這裡要把「本金 + 淨利」一次全額還回來
+            # （payout = bet * multiplier，淨利 = payout - bet，顯示給玩家的是淨利）
+            payout = int(bet * multiplier)
+            net_profit = payout - bet
+            add_balance(self.user_id, payout, interaction.user.display_name)
             new_bal = get_balance(self.user_id)
             embed = discord.Embed(
                 title="🟢 喀——空槍！你活下來了！",
@@ -684,7 +687,7 @@ class RouletteConfirmView(discord.ui.View):
                     f"**{interaction.user.display_name}** 冷汗直流，但活著。\n\n"
                     f"🔫 彈巢位置：{chamber + 1}/6（裝填 {bullets} 顆子彈）\n"
                     f"✨ 倍率 **{multiplier}x**\n"
-                    f"💵 贏得 **{profit}** {currency_name()}\n"
+                    f"💵 贏得 **{net_profit}** {currency_name()}\n"
                     f"💰 餘額：**{new_bal}** {currency_name()}\n\n"
                     f"「老天爺今天還不想收你。」"
                 ),
