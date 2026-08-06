@@ -626,6 +626,16 @@ _roulette_cooldowns = {}
 ROULETTE_COOLDOWN_SEC = 10  # 每人每次間隔 10 秒防止刷屏
 
 
+def _build_chamber_diagram(bullets: int, chamber: int) -> str:
+    """視覺化 6 格彈巢：前 bullets 格是子彈（🔴），其餘是空槍（⚪）；
+    chamber 是 0-indexed 扣到的格子。讓玩家一看就懂為什麼中彈/空槍，
+    不再只看一個容易讓人誤以為「亂跳」的裸數字。"""
+    slots = ["🔴" if i < bullets else "⚪" for i in range(6)]
+    diagram = "".join(slots)
+    landed = slots[chamber]
+    return f"{diagram}\n扣到第 **{chamber + 1}** 格（{landed}）"
+
+
 class RouletteConfirmView(discord.ui.View):
     """俄羅斯轉盤確認面板 — 玩家點擊扣板機。"""
 
@@ -662,7 +672,7 @@ class RouletteConfirmView(discord.ui.View):
                 title="💥 砰！",
                 description=(
                     f"**{interaction.user.display_name}** 倒下了…\n\n"
-                    f"🔫 彈巢位置：{chamber + 1}/6（裝填 {bullets} 顆子彈）\n"
+                    f"🔫 {_build_chamber_diagram(bullets, chamber)}\n"
                     f"💔 損失 **{bet}** {currency_name()}\n"
                     f"💰 餘額：**{new_bal}** {currency_name()}\n\n"
                     f"「命運的子彈不會放過任何人。」"
@@ -685,7 +695,7 @@ class RouletteConfirmView(discord.ui.View):
                 title="🟢 喀——空槍！你活下來了！",
                 description=(
                     f"**{interaction.user.display_name}** 冷汗直流，但活著。\n\n"
-                    f"🔫 彈巢位置：{chamber + 1}/6（裝填 {bullets} 顆子彈）\n"
+                    f"🔫 {_build_chamber_diagram(bullets, chamber)}\n"
                     f"✨ 倍率 **{multiplier}x**\n"
                     f"💵 贏得 **{net_profit}** {currency_name()}\n"
                     f"💰 餘額：**{new_bal}** {currency_name()}\n\n"
