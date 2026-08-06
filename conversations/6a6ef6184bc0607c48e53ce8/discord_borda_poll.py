@@ -8535,10 +8535,27 @@ class WerewolfSignupView(discord.ui.View):
 
         pid = str(interaction.user.id)
 
-        # 已報名
+        # 已報名 → 重新測試私訊狀態（方便玩家開啟私訊後重測）
         for p in _ww_state["players"]:
             if p["id"] == pid and not p["is_ai"]:
-                await interaction.response.send_message("⚠️ 你已經報名了！", ephemeral=True)
+                dm_warning = ""
+                try:
+                    await interaction.user.send("🔄 重新測試私訊連線成功！")
+                    p["dm_ok"] = True
+                except discord.Forbidden:
+                    p["dm_ok"] = False
+                    dm_warning = (
+                        "\n\n⚠️ 私訊仍然是關閉的，請至 **伺服器設定 → 隱私設定 → "
+                        "允許來自伺服器成員的私訊** 開啟後再重新點擊測試。"
+                    )
+                except Exception as e:
+                    print(f"⚠️ WW re-signup DM test failed: {e}")
+                await _ww_update_signup_embed(interaction.channel)
+                status = "✅ 私訊正常" if p.get("dm_ok", True) else "❌ 私訊仍關閉"
+                await interaction.response.send_message(
+                    f"⚠️ 你已經報名了，已重新測試私訊：{status}{dm_warning}",
+                    ephemeral=True,
+                )
                 return
 
         # 加入臨時身分組
@@ -8565,14 +8582,33 @@ class WerewolfSignupView(discord.ui.View):
             "role": "",
             "alive": True,
             "dm_done": False,
+            "dm_ok": True,
         })
 
         _ww_log(f"{interaction.user.display_name} 報名（共 {len(_ww_state['players'])} 人）")
 
+        # 立即測試私訊是否能送達（遊戲開始後角色分配靠 DM，DM 關閉會導致玩家收不到身分且無法行動）
+        dm_warning = ""
+        try:
+            await interaction.user.send(
+                "🐺 你已成功報名本局狼人殺！\n"
+                "遊戲開始後，你的身分與夜晚行動都會透過**私訊**進行，請保持這個對話開啟。"
+            )
+        except discord.Forbidden:
+            new_player = _ww_state["players"][-1]
+            new_player["dm_ok"] = False
+            dm_warning = (
+                "\n\n⚠️ **偵測到你的私訊是關閉的！** 遊戲需要透過私訊分配身分、進行夜晚行動。\n"
+                "請至 **伺服器設定 → 隱私設定 → 允許來自伺服器成員的私訊** 開啟後，"
+                "重新點擊報名以便機器人重新測試。"
+            )
+        except Exception as e:
+            print(f"⚠️ WW signup DM test failed: {e}")
+
         # 更新面板
         await _ww_update_signup_embed(interaction.channel)
         await interaction.response.send_message(
-            f"✅ {interaction.user.mention} 已報名！目前共 {len(_ww_state['players'])} 人。",
+            f"✅ {interaction.user.mention} 已報名！目前共 {len(_ww_state['players'])} 人。{dm_warning}",
             ephemeral=True,
         )
 
@@ -8653,7 +8689,11 @@ async def _ww_update_signup_embed(channel):
 
     players = _ww_state["players"]
     real = [p for p in players if not p["is_ai"]]
-    player_list = "\n".join(f"• {p['name']}" for p in real) or "（尚無人報名）"
+    player_list = "\n".join(
+        f"• {p['name']}" + ("" if p.get('dm_ok', True) else " ⚠️私訊未開")
+        for p in real
+    ) or "（尚無人報名）"
+    dm_closed_count = sum(1 for p in real if not p.get("dm_ok", True))
 
     embed = discord.Embed(
         title="🐺 AI 狼人殺 · 報名中",
@@ -8664,11 +8704,18 @@ async def _ww_update_signup_embed(channel):
             "⚙️ **規則：**\n"
             "• 6 人局：2 狼人 + 1 預言家 + 3 村民\n"
             "• 不足 6 人時自動生成 AI 玩家補位\n"
-            "• 報名後會獲得臨時身分組，僅此身分組可在本頻道發言"
+            "• 報名後會獲得臨時身分組，僅此身分組可在本頻道發言\n"
+            "• ⚠️ **請務必開啟「允許來自伺服器成員的私訊」**，角色分配與夜晚行動都透過私訊進行"
         ),
         color=discord.Color.dark_red(),
         timestamp=discord.utils.utcnow(),
     )
+    if dm_closed_count > 0:
+        embed.add_field(
+            name="⚠️ 私訊警告",
+            value=f"有 {dm_closed_count} 位玩家私訊關閉，開局前請開啟私訊並重新報名一次以通過檢測。",
+            inline=False,
+        )
     embed.set_footer(text="ICEA · AI 狼人殺 | 報名階段")
 
     view = WerewolfSignupView()
@@ -8703,7 +8750,8 @@ async def _ww_post_invite(channel):
             "⚙️ **規則：**\n"
             "• 6 人局：2 狼人 + 1 預言家 + 3 村民\n"
             "• 不足 6 人時自動生成 AI 玩家補位\n"
-            "• 報名後會獲得臨時身分組，僅此身分組可在本頻道發言"
+            "• 報名後會獲得臨時身分組，僅此身分組可在本頻道發言\n"
+            "• ⚠️ **請務必開啟「允許來自伺服器成員的私訊」**，角色分配與夜晚行動都透過私訊進行"
         ),
         color=discord.Color.dark_red(),
         timestamp=discord.utils.utcnow(),
@@ -8817,6 +8865,16 @@ async def _ww_begin_game(channel):
             await msg.edit(view=view)
         except Exception:
             pass
+
+    # 開局前最後檢查：私訊未開的玩家公開提醒（他們仍會進入遊戲，但收不到身分與夜晚行動面板）
+    real_players_check = [p for p in _ww_state["players"] if not p["is_ai"]]
+    dm_closed = [p for p in real_players_check if not p.get("dm_ok", True)]
+    if dm_closed:
+        names = "、".join(p["name"] for p in dm_closed)
+        await channel.send(
+            f"⚠️ **注意：** {names} 的私訊仍為關閉狀態，遊戲開始後將無法收到身分或進行夜晚行動！\n"
+            f"請盡快開啟「允許來自伺服器成員的私訊」，若收不到 DM 請私訊管理員協助。"
+        )
 
     # 補 AI 玩家
     real_players = [p for p in _ww_state["players"] if not p["is_ai"]]
@@ -9053,6 +9111,7 @@ async def _ww_wolf_vote(channel, wolves):
             )
             async def _cb(interaction, tid=t["id"]):
                 await view._handle(interaction, tid)
+            btn.callback = _cb
             view.add_item(btn)
 
         await member.send(embed=embed, view=view)
@@ -9122,6 +9181,7 @@ async def _ww_seer_check(channel, seer):
             )
             async def _cb(interaction, tid=t["id"]):
                 await view._handle(interaction, tid)
+            btn.callback = _cb
             view.add_item(btn)
 
         await member.send(embed=embed, view=view)
