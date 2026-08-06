@@ -3543,11 +3543,23 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             _is_owner_call = bool(fallback_user_id) and str(fallback_user_id) == str(BOT_OWNER_ID)
             _skip_chain_for_admin = (fallback_mode == "full")
             _skip_chain_for_owner = _is_owner_call and settings.get("owner_skip_model_chain", True)
-            _skip_model_chain = _skip_chain_for_admin or _skip_chain_for_owner
+            # ── FIX：逾時不跳降級鏈 ──
+            # 之前 owner 和行政功能遇到任何失敗（包括逾時）都直接跳到備援 API，
+            # 但逾時跟 401/503 不同——一個模型慢不代表降級鏈裡其他模型也慢，
+            # 它們可能在完全不同的後端上。備援 API 有配額/成本限制，
+            # 免費降級鏈模型應該先有機會試。只有明確的 auth/server 錯誤
+            # （401/403/502/503/504）才跳過降級鏈直接備援。
+            _is_timeout_failure = (status == -1 or
+                                   "timeout" in body_text.lower() or "Timeout" in body_text or
+                                   "逾時" in body_text or "Connection" in body_text)
+            _skip_model_chain = (_skip_chain_for_admin or _skip_chain_for_owner) and not _is_timeout_failure
             if _skip_model_chain and len(_model_chain) > 1:
                 _why = "行政功能" if _skip_chain_for_admin else "擁有者跳過降級"
                 _diag.append(f"⏭️ 跳過降級鏈（{_why}），直接備援（{_status_label}）")
                 print(f"⏭️ 跳過模型降級鏈（{_why}），直接交由備援 API 處理（{_status_label}）")
+            if _is_timeout_failure and not _skip_model_chain and len(_model_chain) > 1:
+                _diag.append(f"🔄 逾時不走捷徑，先試降級鏈（{_status_label}）")
+                print(f"🔄 主模型逾時，不跳過降級鏈，先試免費模型再考慮備援（{_status_label}）")
             _model_retryable = (not _skip_model_chain) and len(_model_chain) > 1
             if _model_retryable:
                 for _mi in range(1, len(_model_chain)):
