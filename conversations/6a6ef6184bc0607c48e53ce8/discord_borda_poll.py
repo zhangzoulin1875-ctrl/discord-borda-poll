@@ -2776,9 +2776,9 @@ def _is_worth_replying(content: str, is_mentioned: bool, bot_id: int, strength: 
     if not clean:
         return False, clean
 
-    # ── MENTION: ONLY reply when explicitly @mentioned ──
+    # ── MENTION: ONLY reply when explicitly @mentioned or replying to the bot ──
     if strength == "mention":
-        if is_mentioned:
+        if is_mentioned or is_reply_to_bot:
             return True, clean
         return False, clean
 
@@ -9195,8 +9195,11 @@ async def on_message(message):
 
             # Save user memory if AI extracted facts
             if new_facts:
-                _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
-                print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
+                try:
+                    _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
+                    print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
+                except Exception as mem_err:
+                    print(f"⚠️ 記憶更新失敗（不影響回覆）：{mem_err}")
 
             # Update message count
             room = ai_chat_rooms.get("rooms", {}).get(str(message.channel.id))
@@ -9405,9 +9408,14 @@ async def on_message(message):
             async with message.channel.typing():
                 reply, new_facts, mod_action, model_info = await generate_chat_reply(message, chat_ai_settings)
         # Save user memory if AI extracted facts (regardless of reply success)
+        # Wrapped in try/except — a memory save failure must NEVER block the
+        # conversation log or the reply itself.
         if new_facts:
-            _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
-            print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
+            try:
+                _update_user_memory(str(message.author.id), message.author.display_name, new_facts)
+                print(f"🧠 已更新 {message.author.display_name} 的記憶：{new_facts}")
+            except Exception as mem_err:
+                print(f"⚠️ 記憶更新失敗（不影響回覆）：{mem_err}")
 
         # Log conversation to log channel if configured
         log_cfg = chat_ai_settings.get("log_channel_id")
