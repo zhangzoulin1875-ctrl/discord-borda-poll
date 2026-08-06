@@ -262,6 +262,31 @@ def _build_economy_info_embed() -> "discord.Embed":
     except Exception as e:
         print(f"⚠️ 經濟面板股市摘要失敗：{e}")
 
+    # ── 賽馬資訊 ──
+    try:
+        import time as _hr_time_mod
+        hr_lines = []
+        if current_race and current_race.get("status") == "betting":
+            remaining = int(current_race.get("betting_end_time", 0) - _hr_time_mod.time())
+            remaining = max(0, remaining)
+            m, s = remaining // 60, remaining % 60
+            num_bets = len(current_race.get("bets", []))
+            hr_lines.append(f"🏇 **賽事進行中** — {len(current_race['horses'])} 匹馬 | 投注截止 {m}m{s}s | {num_bets} 筆下注")
+        else:
+            last_end = horse_racing_settings.get("last_race_end_time", 0)
+            elapsed = _hr_time_mod.time() - last_end
+            remaining_min = max(0, int((30 * 60 - elapsed) / 60))
+            ch_set = "✅" if horse_racing_settings.get("channel_id") else "❌"
+            hr_lines.append(f"🏇 下一場約 {remaining_min} 分鐘後 | 頻道{ch_set}設定")
+
+        embed.add_field(
+            name="🏇 賽馬賭博",
+            value="\n".join(hr_lines) + "\n`/horse set_channel`(擁有者) | `/horse start_now`(擁有者) | `/horse status`",
+            inline=False
+        )
+    except Exception as e:
+        print(f"⚠️ 經濟面板賽馬摘要失敗：{e}")
+
     embed.set_footer(text="此看板即時更新，反映最新經濟數據")
     return embed
 
