@@ -87,7 +87,7 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
                 {"role": "user", "content": validation_prompt},
             ]
             val_result = await asyncio.wait_for(
-                call_chat_api(val_messages, chat_ai_settings, tools=None, fallback_mode="disabled"),
+                call_chat_api(val_messages, chat_ai_settings, tools=None, fallback_mode="disabled", category="admin"),
                 timeout=20,
             )
             val_text = (val_result.get("content") or "").strip()
@@ -766,6 +766,7 @@ async def _verify_application_essays(content: str) -> dict:
             ai_call_settings,
             max_tokens=200,
             fallback_mode="full",  # administrative — never leave applications unverified
+            category="admin",
         )
         text = result.get("content", "") if isinstance(result, dict) else ""
         text = text.strip()
@@ -868,6 +869,7 @@ async def _verify_flag_image(image_url: str) -> bool:
             messages, settings, max_tokens=200,
             timeout_total=90, timeout_read=80,
             fallback_mode="full",  # administrative — skip chain, go straight to backup on failure
+            category="admin",
         )
         text = (result.get("content") or "").strip() if isinstance(result, dict) else ""
         if not text:

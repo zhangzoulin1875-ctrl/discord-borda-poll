@@ -164,7 +164,7 @@ async def _generate_quiz_question() -> dict | None:
         _quiz_settings = dict(chat_ai_settings)
         _quiz_settings["model"] = chat_ai_settings.get("quiz_model") or chat_ai_settings["model"]
         result = await asyncio.wait_for(
-            call_chat_api(messages, _quiz_settings, max_tokens=600, fallback_mode="full"),  # 娛樂功能降級鏈：主模型失敗直接切備援API
+            call_chat_api(messages, _quiz_settings, max_tokens=600, fallback_mode="full", category="entertainment"),  # 娛樂功能降級鏈：主模型失敗直接切備援API
             timeout=30
         )
     except asyncio.TimeoutError:

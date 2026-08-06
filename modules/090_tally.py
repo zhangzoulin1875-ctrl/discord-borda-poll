@@ -221,7 +221,7 @@ async def _ai_judge_ballot(content: str, legend: dict, n_candidates: int) -> dic
             timeout_total=40,
             timeout_read=30,
             is_background=True,
-            fallback_mode="full",  # 行政功能（正式選舉計票）— 主 API 故障直接切備援，不受聊天限速影響
+            fallback_mode="full", category="admin",  # 行政功能（正式選舉計票）— 主 API 故障直接切備援，不受聊天限速影響
         )
         raw = (msg.get("content") or "").strip()
         if raw.startswith("```"):

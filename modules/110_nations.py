@@ -126,8 +126,8 @@ async def _organize_agenda_items(raw_text: str, ai_settings: dict) -> dict:
     try:
         result = await call_chat_api(
             messages,
-            {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
-            max_tokens=1500, fallback_mode="disabled",
+            {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini"), "model_fallback_chain": ai_settings.get("model_fallback_chain", "")},
+            max_tokens=1500, fallback_mode="disabled", category="admin",
         )
         text = result.get("content", "") if isinstance(result, dict) else ""
         if not text:
@@ -353,9 +353,11 @@ async def _analyze_user(user_name: str, messages: list, ai_settings: dict) -> di
                 "api_url": ai_settings.get("api_url", ""),
                 "api_key": ai_settings.get("api_key", ""),
                 "model": ai_settings.get("model", "gpt-4o-mini"),
+                "model_fallback_chain": ai_settings.get("model_fallback_chain", ""),
             },
             max_tokens=1500,
             fallback_mode="disabled",
+            category="admin",
         )
         text = result.get("content", "") if isinstance(result, dict) else ""
         if not text:

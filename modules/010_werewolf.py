@@ -132,6 +132,7 @@ async def _ww_narrate(scene: str, extra: str = "") -> str:
             is_background=True,
             fallback_mode="full",
             fallback_user_id="werewolf",
+            category="entertainment",
         )
         text = result.get("content", "").strip()
         return text or None
@@ -1014,6 +1015,7 @@ async def _ww_ai_discuss(ai_player: dict) -> tuple[str, str | None] | None:
             is_background=True,
             fallback_mode="full",
             fallback_user_id="werewolf_ai",
+            category="entertainment",
         )
         text = result.get("content", "").strip()
         # 清理：去掉引號、換行

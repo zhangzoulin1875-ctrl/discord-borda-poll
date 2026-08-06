@@ -592,7 +592,7 @@ async def api_global_scan_batch(request):
 
         extracted = None
         try:
-            resp = await call_chat_api(messages, chat_ai_settings, max_tokens=8000)
+            resp = await call_chat_api(messages, chat_ai_settings, max_tokens=8000, category="admin")
             ai_text = resp.get("content") or ""
             ai_text_clean = ai_text.strip()
             if ai_text_clean.startswith("```"):
@@ -1744,12 +1744,19 @@ def load_token_usage():
 # 1. 透過 payload 參數控制思考強度（reasoning_effort / thinking）
 # 2. 根據是否開啟 reasoning 動態調整 timeout
 
-def _get_reasoning_effort(fallback_mode: str = "full") -> str:
+def _get_reasoning_effort(fallback_mode: str = "full", category: str = "") -> str:
     """根據呼叫類型取得 reasoning_effort 設定。
-    fallback_mode="full" 通常是行政功能 → 用 reasoning_admin_effort
-    fallback_mode="rate_limited" 通常是聊天 → 用 reasoning_chat_effort
-    fallback_mode="disabled" 通常是娛樂 → 用 reasoning_entertainment_effort
+    category 優先於 fallback_mode——明確指定時使用 category。
+    fallback_mode 僅在 category 未指定時作為向後兼容的推斷依據。
     """
+    if category:
+        if category == "chat":
+            return chat_ai_settings.get("reasoning_chat_effort", "low")
+        elif category == "entertainment":
+            return chat_ai_settings.get("reasoning_entertainment_effort", "low")
+        elif category == "admin":
+            return chat_ai_settings.get("reasoning_admin_effort", "medium")
+    # 向後兼容：從 fallback_mode 推斷
     if fallback_mode == "rate_limited":
         return chat_ai_settings.get("reasoning_chat_effort", "low")
     elif fallback_mode == "disabled":
@@ -1777,7 +1784,7 @@ def _build_reasoning_params(effort: str) -> dict:
     # else: effort is empty/unknown → don't send any params (use API default)
     return params
 
-def _get_reasoning_timeout(effort: str, fallback_mode: str = "full") -> int:
+def _get_reasoning_timeout(effort: str, fallback_mode: str = "full", category: str = "") -> int:
     """根據是否開啟 reasoning 取得適當的 timeout。"""
     if effort == "none" or not effort:
         return chat_ai_settings.get("reasoning_disabled_timeout", 25)
@@ -2557,6 +2564,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
             is_background=False,
             fallback_mode=_fb_mode,
             fallback_user_id=_fb_user,
+            category="admin",
         )
         if result.get("error") and not result.get("content"):
             return None, {"model": "?", "fallback": False, "diag": result.get("_diag", [])}
@@ -2589,6 +2597,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
                     is_background=False,
                     fallback_mode=_fb_mode,
                     fallback_user_id=_fb_user,
+                    category="admin",
                 )
                 if result2.get("content"):
                     raw_reply = result2.get("content") or ""
@@ -2971,7 +2980,7 @@ def _check_fallback_chat_rate(limit: int = 6):
     return True
 
 
-async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120, is_background: bool = True, fallback_mode: str = "full", fallback_user_id: str = "") -> dict:
+async def call_chat_api(messages: list, settings: dict, tools: list = None, max_tokens: int = 300, timeout_total: int = 300, timeout_read: int = 120, is_background: bool = True, fallback_mode: str = "full", fallback_user_id: str = "", category: str = "") -> dict:
     """fallback_mode:
     - "full":          Always use fallback on provider errors (administrative)
     - "rate_limited":  Use fallback but limited to 6 req/min (chat)
@@ -2998,13 +3007,22 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     # 自行指定 per-feature 模型（即 settings model == 主模型），則覆寫為專用模型。
     _settings_model = settings.get("model", "")
     _main_model = chat_ai_settings.get("model", "")
+    _cat = category or ""
     _category_override = ""
-    if fallback_mode == "rate_limited":
+    if _cat == "chat":
         _category_override = chat_ai_settings.get("chat_model", "").strip()
-    elif fallback_mode == "full":
+    elif _cat == "admin":
         _category_override = chat_ai_settings.get("admin_model", "").strip()
-    elif fallback_mode == "disabled":
+    elif _cat == "entertainment":
         _category_override = chat_ai_settings.get("entertainment_model", "").strip()
+    elif not _cat:
+        # 向後兼容：從 fallback_mode 推斷
+        if fallback_mode == "rate_limited":
+            _category_override = chat_ai_settings.get("chat_model", "").strip()
+        elif fallback_mode == "full":
+            _category_override = chat_ai_settings.get("admin_model", "").strip()
+        elif fallback_mode == "disabled":
+            _category_override = chat_ai_settings.get("entertainment_model", "").strip()
     if _category_override and _settings_model == _main_model:
         settings = {**settings, "model": _category_override}
         _diag_cat = f"🎯 使用分類模型：{_category_override}（{fallback_mode}）"
@@ -3037,7 +3055,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     # _deadline 計算之前）做，不能在下面的巢狀 _attempt() 閉包裡做——
     # 那裡對外層變數賦值會被 Python 當成局部變數，讀取會拋 UnboundLocalError。
     if timeout_total >= 300:
-        _top_reasoning_effort = _get_reasoning_effort(fallback_mode)
+        _top_reasoning_effort = _get_reasoning_effort(fallback_mode, category)
         _top_auto_timeout = _get_reasoning_timeout(_top_reasoning_effort, fallback_mode)
         timeout_total = _top_auto_timeout
         timeout_read = max(3, _top_auto_timeout - 5)
@@ -3435,7 +3453,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # (_attempt) 裡對外層的 timeout_total/timeout_read 賦值 ——
         # 那樣做會讓 Python 把它們當成 _attempt 的本地變數，導致還沒賦值
         # 就被讀取而拋出 UnboundLocalError（這正是先前部署崩潰的根因）。
-        _reasoning_effort = _get_reasoning_effort(fallback_mode)
+        _reasoning_effort = _get_reasoning_effort(fallback_mode, category)
         _reasoning_params = _build_reasoning_params(_reasoning_effort)
         if _reasoning_params and api_url not in _reasoning_unsupported_apis:
             payload.update(_reasoning_params)
@@ -6852,7 +6870,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
             # Single-round quick path: give it nearly the ENTIRE remaining budget.
             _call_tt = max(6, _ai_budget - 1.5)
         _call_tr = max(4, _call_tt - 2)
-        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
+        assistant_msg = await call_chat_api(msgs, settings, tools=tools, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_call_tt, timeout_read=_call_tr, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id, category="chat")
         _reply_model = assistant_msg.get("_used_model")
         _reply_fallback = assistant_msg.get("_used_fallback", False)
         _reply_diag = assistant_msg.get("_diag", [])
@@ -6912,7 +6930,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # minus a small safety margin — not a hardcoded 8s.
         t2 = _time.time()
         _round2_budget = max(4, _ai_budget - (t2 - t0) - 1)
-        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id)
+        final_msg = await call_chat_api(msgs, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=_round2_budget, timeout_read=max(3, _round2_budget - 2), is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id, category="chat")
         _reply_model = final_msg.get("_used_model")
         _reply_fallback = final_msg.get("_used_fallback", False)
         _reply_diag = final_msg.get("_diag", [])
@@ -6958,7 +6976,7 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
         # the whole chat feature down. Fall back to one plain, tool-free call.
         print(f"⚠️ 工具呼叫流程失敗，改用純文字模式重試：{e}")
         fallback_msg = await asyncio.wait_for(
-            call_chat_api(messages, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=10, timeout_read=8, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id), timeout=12
+            call_chat_api(messages, settings, tools=None, max_tokens=settings.get("ai_max_tokens", 2000), timeout_total=10, timeout_read=8, is_background=False, fallback_mode="rate_limited", fallback_user_id=user_id, category="chat"), timeout=12
         )
         _reply_model = fallback_msg.get("_used_model")
         _reply_fallback = fallback_msg.get("_used_fallback", False)
@@ -10343,7 +10361,7 @@ async def _ai_refine_extract_from_discord(channel_snippets: str, existing_topics
 
         try:
             result = await asyncio.wait_for(
-                call_chat_api(messages, chat_ai_settings, max_tokens=1500, fallback_mode="disabled"), timeout=40
+                call_chat_api(messages, chat_ai_settings, max_tokens=1500, fallback_mode="disabled", category="admin"), timeout=40
             )
         except Exception as e:
             print(f"🔍 AI精煉: {prompt_label}失敗: {e}")
@@ -10536,7 +10554,7 @@ async def _ai_refine_verify_and_reorganize(preliminary_entries: list, wiki_artic
 
         try:
             result = await asyncio.wait_for(
-                call_chat_api(messages, chat_ai_settings, max_tokens=800, fallback_mode="disabled"), timeout=40
+                call_chat_api(messages, chat_ai_settings, max_tokens=800, fallback_mode="disabled", category="admin"), timeout=40
             )
         except Exception as e:
             print(f"🔍 AI精煉: 驗證「{entry['topic']}」失敗: {e}")
@@ -10999,7 +11017,7 @@ async def _analyze_community(guild) -> bool:
 
     try:
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings, max_tokens=2500, fallback_mode="disabled"), timeout=60
+            call_chat_api(messages, chat_ai_settings, max_tokens=2500, fallback_mode="disabled", category="admin"), timeout=60
         )
     except Exception as e:
         print(f"🧠 社群感知：AI 分析失敗：{e}")
@@ -11875,8 +11893,8 @@ async def _generate_daily_summary(messages_text: str, date_str: str) -> str:
     try:
         result = await call_chat_api(
             messages,
-            {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini")},
-            max_tokens=2500, fallback_mode="disabled",  # briefing asks for 500-1500 中文字 output — needs a
+            {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini"), "model_fallback_chain": ai_settings.get("model_fallback_chain", "")},
+            max_tokens=2500, fallback_mode="disabled", category="admin",  # briefing asks for 500-1500 中文字 output — needs a
                               # much bigger budget than the 300-token chat default,
                               # plus headroom for reasoning-model preamble
         )

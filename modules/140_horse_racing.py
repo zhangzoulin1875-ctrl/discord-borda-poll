@@ -235,6 +235,7 @@ async def _resolve_race():
             messages, dict(chat_ai_settings),
             max_tokens=500,
             timeout_total=40,
+            category="entertainment",
             timeout_read=35,
             is_background=True,
             fallback_mode="full",  # 娛樂功能降級鏈：主模型失敗直接切備援API（對齊海龜湯/狼人殺/占卜）

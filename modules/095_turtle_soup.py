@@ -139,6 +139,7 @@ async def _generate_turtle_soup(difficulty: str) -> tuple:
                 is_background=True,
                 fallback_mode="full",
                 fallback_user_id="turtle_soup",
+                category="entertainment",
             )
             if result.get("circuit_open"):
                 print(f"⚠️ Turtle soup generation blocked: circuit breaker open")
@@ -226,6 +227,7 @@ async def _judge_turtle_soup_question(question: str, truth: str, qa_history: lis
             is_background=True,
             fallback_mode="full",
             fallback_user_id="turtle_soup",
+            category="entertainment",
         )
         answer = result.get("content", "").strip()
         # 只允許五種回答
@@ -328,6 +330,7 @@ async def _generate_turtle_soup_hint(truth: str, qa_history: list, level: int = 
             is_background=True,
             fallback_mode="full",
             fallback_user_id="turtle_soup",
+            category="entertainment",
         )
         hint = result.get("content", "").strip()
         hint = _sanitize_turtle_soup_hint(hint) if hint else hint

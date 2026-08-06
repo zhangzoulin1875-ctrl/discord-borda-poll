@@ -845,6 +845,7 @@ class EconomyGroup(app_commands.Group):
                     is_background=False,
                     fallback_mode="full",
                     fallback_user_id="economy_fortune",
+                    category="entertainment",
                 ),
                 timeout=45,
             )

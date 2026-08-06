@@ -1251,7 +1251,7 @@ async def _link_event_causal_chains():
             ]
 
             try:
-                resp = await call_chat_api(messages, chat_ai_settings, max_tokens=2000)
+                resp = await call_chat_api(messages, chat_ai_settings, max_tokens=2000, category="admin")
                 ai_text = (resp.get("content") or "").strip()
                 if ai_text.startswith("```"):
                     ai_text = re.sub(r"^```(?:json)?\s*", "", ai_text, flags=re.IGNORECASE)
@@ -1454,7 +1454,7 @@ async def _rescue_orphan_entities():
         ]
 
         try:
-            resp = await call_chat_api(messages, chat_ai_settings, max_tokens=4000)
+            resp = await call_chat_api(messages, chat_ai_settings, max_tokens=4000, category="admin")
             ai_text = (resp.get("content") or "").strip()
             if ai_text.startswith("```"):
                 ai_text = re.sub(r"^```(?:json)?\s*", "", ai_text, flags=re.IGNORECASE)
@@ -1585,7 +1585,7 @@ async def _run_global_micropedia_scan():
                     ]
 
                     try:
-                        resp = await call_chat_api(messages, chat_ai_settings, max_tokens=4000)
+                        resp = await call_chat_api(messages, chat_ai_settings, max_tokens=4000, category="admin")
                         ai_text = resp.get("content") or ""
                         ai_text_clean = ai_text.strip()
                         if ai_text_clean.startswith("```"):
@@ -1869,7 +1869,7 @@ async def _deep_scan_community(guild) -> bool:
 
     try:
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings, max_tokens=4000, fallback_mode="disabled"), timeout=120
+            call_chat_api(messages, chat_ai_settings, max_tokens=4000, fallback_mode="disabled", category="admin"), timeout=120
         )
     except Exception as e:
         print(f"📜 社群編年史：AI 分析失敗：{e}")
