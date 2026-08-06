@@ -206,6 +206,7 @@ async def keep_alive_server():
     app.router.add_put("/api/schedule-settings", api_set_schedule_settings)
     app.router.add_post("/api/test-ai-connection", api_test_ai_connection)
     app.router.add_post("/api/test-admin-functions", api_test_admin_functions)
+    app.router.add_post("/api/test-all-functions", api_test_all_functions)
     # Dashboard routes
     app.router.add_get("/dashboard", dashboard_index)
     app.router.add_get("/login", dashboard_login)
@@ -1679,6 +1680,9 @@ chat_ai_settings = {
     "turtle_soup_model": "",             # AI 海龜湯模型
     "werewolf_model": "",                # AI 狼人殺模型
     "fortune_model": "",                 # AI 占卜模型
+    "chat_model": "",                     # 聊天功能專用模型（留空=用主模型）
+    "admin_model": "",                    # 行政功能專用模型（留空=用主模型）
+    "entertainment_model": "",            # 娛樂功能專用模型（留空=用主模型）
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -2989,6 +2993,23 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     (default 120s) instead of hammering a blocked endpoint on every Discord
     message — which only makes the provider's abuse detector more certain
     the traffic is bot spam."""
+    # ── 分類模型覆寫 ──
+    # 根據 fallback_mode 判斷呼叫類別，如果該類別有專用模型且 caller 沒有
+    # 自行指定 per-feature 模型（即 settings model == 主模型），則覆寫為專用模型。
+    _settings_model = settings.get("model", "")
+    _main_model = chat_ai_settings.get("model", "")
+    _category_override = ""
+    if fallback_mode == "rate_limited":
+        _category_override = chat_ai_settings.get("chat_model", "").strip()
+    elif fallback_mode == "full":
+        _category_override = chat_ai_settings.get("admin_model", "").strip()
+    elif fallback_mode == "disabled":
+        _category_override = chat_ai_settings.get("entertainment_model", "").strip()
+    if _category_override and _settings_model == _main_model:
+        settings = {**settings, "model": _category_override}
+        _diag_cat = f"🎯 使用分類模型：{_category_override}（{fallback_mode}）"
+        print(_diag_cat)
+
     # Circuit breaker check — if tripped, fail fast without hitting the network
     if not _ai_circuit_check():
         remaining = _ai_circuit_breaker["cooldown_seconds"] - (_time.time() - _ai_circuit_breaker["trip_time"])
@@ -7476,6 +7497,9 @@ async def api_get_chat_ai_settings(request):
         "turtle_soup_model": chat_ai_settings.get("turtle_soup_model", ""),
         "werewolf_model": chat_ai_settings.get("werewolf_model", ""),
         "fortune_model": chat_ai_settings.get("fortune_model", ""),
+        "chat_model": chat_ai_settings.get("chat_model", ""),
+        "admin_model": chat_ai_settings.get("admin_model", ""),
+        "entertainment_model": chat_ai_settings.get("entertainment_model", ""),
     })
 
 
@@ -7626,6 +7650,12 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["werewolf_model"] = body["werewolf_model"]
     if "fortune_model" in body:
         chat_ai_settings["fortune_model"] = body["fortune_model"]
+    if "chat_model" in body:
+        chat_ai_settings["chat_model"] = body["chat_model"]
+    if "admin_model" in body:
+        chat_ai_settings["admin_model"] = body["admin_model"]
+    if "entertainment_model" in body:
+        chat_ai_settings["entertainment_model"] = body["entertainment_model"]
     if "log_channel_id" in body:
         chat_ai_settings["log_channel_id"] = body["log_channel_id"] or None
     save_chat_ai_settings()
@@ -8046,6 +8076,251 @@ async def api_test_admin_functions(request):
         }
     })
 
+
+
+async def api_test_all_functions(request):
+    """Global comprehensive test of ALL AI models across categories, fallback chain, backup, and features."""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    import time as _time
+
+    def _make_test_flag_png_data_uri() -> str:
+        import struct, zlib, base64 as _b64
+        width, height = 60, 36
+        yellow, red, blue = (255, 204, 0), (204, 0, 0), (0, 51, 204)
+        cx, cy, r2 = width / 2, height / 2, 9 * 9
+        raw = bytearray()
+        for y in range(height):
+            raw.append(0)  # PNG filter byte: none
+            for x in range(width):
+                if y < 3 or y >= height - 3:
+                    px = yellow
+                elif (x - cx) ** 2 + (y - cy) ** 2 <= r2:
+                    px = blue
+                else:
+                    px = red
+                raw += bytes(px)
+        compressed = zlib.compress(bytes(raw), 9)
+
+        def _chunk(tag: bytes, data: bytes) -> bytes:
+            return (struct.pack(">I", len(data)) + tag + data
+                    + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+
+        png = b"\x89PNG\r\n\x1a\n"
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit RGB
+        png += _chunk(b"IHDR", ihdr)
+        png += _chunk(b"IDAT", compressed)
+        png += _chunk(b"IEND", b"")
+        return "data:image/png;base64," + _b64.b64encode(png).decode()
+
+    test_image_url = _make_test_flag_png_data_uri()
+
+    async def _test_text(api_url, api_key, model, label):
+        if not model:
+            return {"label": label, "type": "text", "status": "skipped", "model": "", "error": "模型未設定，跳過"}
+        if not api_url or not api_key:
+            return {"label": label, "type": "text", "status": "error", "model": model, "error": "API URL 或 Key 未設定"}
+        url = api_url.strip()
+        if not url.endswith("/chat/completions"):
+            if url.endswith("/v1") or url.endswith("/v2"):
+                url += "/chat/completions"
+            else:
+                url += "/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": "請回覆「連線正常」四個字，不要有其他內容。"}
+            ],
+            "max_tokens": 20,
+            "stream": False,
+        }
+        t0 = _time.monotonic()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, sock_read=20)) as sess:
+                async with sess.post(url, json=payload, headers=headers) as resp:
+                    elapsed = int((_time.monotonic() - t0) * 1000)
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        return {"label": label, "type": "text", "status": "error",
+                                "http_status": resp.status, "latency_ms": elapsed,
+                                "model": model, "error": f"HTTP {resp.status}: {err_text[:200]}"}
+                    data = await resp.json()
+                    content_text = ""
+                    choices = data.get("choices", [])
+                    if choices:
+                        content_text = (choices[0].get("message", {}).get("content") or "").strip()
+                        if not content_text:
+                            finish_reason = choices[0].get("finish_reason", "?")
+                            content_text = f"（模型回應空白，finish_reason={finish_reason}）"
+                    return {"label": label, "type": "text", "status": "ok", "latency_ms": elapsed,
+                            "model": model, "response_snippet": content_text[:100]}
+        except asyncio.TimeoutError:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "type": "text", "status": "timeout", "latency_ms": elapsed,
+                    "model": model, "error": "請求逾時（30 秒）"}
+        except Exception as e:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "type": "text", "status": "error", "latency_ms": elapsed,
+                    "model": model, "error": str(e)[:300]}
+
+    async def _test_vision(api_url, api_key, vision_model, label):
+        if not vision_model:
+            return {"label": label, "type": "vision", "status": "skipped", "model": "", "error": "視覺模型未設定，跳過"}
+        if not api_url or not api_key:
+            return {"label": label, "type": "vision", "status": "error", "model": vision_model, "error": "API URL 或 Key 未設定"}
+        url = api_url.strip()
+        if not url.endswith("/chat/completions"):
+            if url.endswith("/v1") or url.endswith("/v2"):
+                url += "/chat/completions"
+            else:
+                url += "/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "這是一張測試用的圖片。請回答 JSON："
+                                '{"has_image": true/false, "description": "簡短描述圖片內容"}'
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": test_image_url},
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 200,
+            "temperature": 0.1,
+            "stream": False,
+        }
+        t0 = _time.monotonic()
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60, sock_read=50)) as sess:
+                async with sess.post(url, json=payload, headers=headers) as resp:
+                    elapsed = int((_time.monotonic() - t0) * 1000)
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        return {"label": label, "type": "vision", "status": "error",
+                                "http_status": resp.status, "latency_ms": elapsed,
+                                "model": vision_model, "error": f"HTTP {resp.status}: {err_text[:200]}"}
+                    data = await resp.json()
+                    content_text = ""
+                    choices = data.get("choices", [])
+                    if choices:
+                        content_text = (choices[0].get("message", {}).get("content") or "").strip()
+                    vision_ok = False
+                    desc = ""
+                    if not content_text:
+                        finish_reason = choices[0].get("finish_reason", "?") if choices else "?"
+                        return {"label": label, "type": "vision", "status": "error",
+                                "latency_ms": elapsed, "model": vision_model,
+                                "error": f"模型回應空白（finish_reason={finish_reason}），無法判讀圖片"}
+                    try:
+                        if content_text.startswith("```"):
+                            content_text = content_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                        parsed = json_module.loads(content_text)
+                        vision_ok = bool(parsed.get("has_image", False))
+                        desc = parsed.get("description", "")
+                    except Exception:
+                        if any(kw in content_text.lower() for kw in ["圖片", "image", "紅色", "藍色", "圓形", "flag"]):
+                            vision_ok = True
+                            desc = content_text[:100]
+                    return {"label": label, "type": "vision", "status": "ok", "latency_ms": elapsed,
+                            "model": vision_model, "response_snippet": (desc or content_text)[:150]}
+        except asyncio.TimeoutError:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "type": "vision", "status": "timeout", "latency_ms": elapsed,
+                    "model": vision_model, "error": "請求逾時（60 秒）"}
+        except Exception as e:
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            return {"label": label, "type": "vision", "status": "error", "latency_ms": elapsed,
+                    "model": vision_model, "error": str(e)[:300]}
+
+    results = []
+
+    primary_url = chat_ai_settings.get("api_url", "")
+    primary_key = chat_ai_settings.get("api_key", "")
+    main_model = chat_ai_settings.get("model", "").strip()
+
+    fallback_url = chat_ai_settings.get("fallback_api_url", "")
+    fallback_key = chat_ai_settings.get("fallback_api_key", "")
+
+    # 1. 聊天模型 — chat_model or main model, label "💬 聊天"
+    chat_m = chat_ai_settings.get("chat_model", "").strip() or main_model
+    results.append(await _test_text(primary_url, primary_key, chat_m, "💬 聊天"))
+
+    # 2. 行政模型 — admin_model or main model, label "🛡️ 行政"
+    admin_m = chat_ai_settings.get("admin_model", "").strip() or main_model
+    results.append(await _test_text(primary_url, primary_key, admin_m, "🛡️ 行政"))
+
+    # 3. 娛樂模型 — entertainment_model or main model, label "🎮 娛樂"
+    ent_m = chat_ai_settings.get("entertainment_model", "").strip() or main_model
+    results.append(await _test_text(primary_url, primary_key, ent_m, "🎮 娛樂"))
+
+    # 4. 降級鏈 — each model in model_fallback_chain, label "🔗 降級鏈 · {model}"
+    chain_raw = chat_ai_settings.get("model_fallback_chain", "").strip()
+    if chain_raw:
+        for m in [m.strip() for m in chain_raw.split(",") if m.strip()]:
+            results.append(await _test_text(primary_url, primary_key, m, f"🔗 降級鏈 · {m}"))
+
+    # 5. 備援模型 — fallback_model on fallback API, label "🔄 備援 API"
+    fallback_m = chat_ai_settings.get("fallback_model", "").strip()
+    results.append(await _test_text(fallback_url, fallback_key, fallback_m, "🔄 備援 API"))
+
+    # 6. AI 搶答模型 — quiz_model if set, label "🧠 AI 搶答"
+    quiz_m = chat_ai_settings.get("quiz_model", "").strip()
+    results.append(await _test_text(primary_url, primary_key, quiz_m, "🧠 AI 搶答"))
+
+    # 7. 海龜湯模型 — turtle_soup_model if set, label "🍜 海龜湯"
+    turtle_m = chat_ai_settings.get("turtle_soup_model", "").strip()
+    results.append(await _test_text(primary_url, primary_key, turtle_m, "🍜 海龜湯"))
+
+    # 8. 狼人殺模型 — werewolf_model if set, label "🐺 狼人殺"
+    werewolf_m = chat_ai_settings.get("werewolf_model", "").strip()
+    results.append(await _test_text(primary_url, primary_key, werewolf_m, "🐺 狼人殺"))
+
+    # 9. 占卜模型 — fortune_model if set, label "🔮 占卜"
+    fortune_m = chat_ai_settings.get("fortune_model", "").strip()
+    results.append(await _test_text(primary_url, primary_key, fortune_m, "🔮 占卜"))
+
+    # 10. 視覺模型 — vision_model if set, label "👁️ 視覺識圖" (skip if not set)
+    vision_m = chat_ai_settings.get("vision_model", "").strip()
+    results.append(await _test_vision(primary_url, primary_key, vision_m, "👁️ 視覺識圖"))
+
+    # 11. 備援視覺模型 — fallback_vision_model or fallback_model if set, label "🔄 備援視覺識圖" (skip if not set)
+    fallback_vis_m = (
+        chat_ai_settings.get("fallback_vision_model", "").strip()
+        or chat_ai_settings.get("fallback_model", "").strip()
+    )
+    results.append(await _test_vision(fallback_url, fallback_key, fallback_vis_m, "🔄 備援視覺識圖"))
+
+    # Summary
+    total = len(results)
+    ok_cnt = sum(1 for r in results if r.get("status") == "ok")
+    err_cnt = sum(1 for r in results if r.get("status") == "error")
+    timeout_cnt = sum(1 for r in results if r.get("status") == "timeout")
+    skipped_cnt = sum(1 for r in results if r.get("status") == "skipped")
+
+    return web.json_response({
+        "results": results,
+        "summary": {
+            "total": total,
+            "ok": ok_cnt,
+            "error": err_cnt,
+            "timeout": timeout_cnt,
+            "skipped": skipped_cnt,
+            "all_ok": (err_cnt == 0 and timeout_cnt == 0 and total > 0)
+        }
+    })
 
 ai_settings = {
     "api_url": os.getenv("AI_API_URL", "https://api.openai.com/v1/chat/completions"),

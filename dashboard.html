@@ -131,6 +131,29 @@
         <label class="block text-sm text-gray-400 mb-1">系統提示詞（人設）</label>
         <textarea id="ai-system-prompt" rows="5" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] resize-none text-sm" placeholder="定義 AI 的角色和回覆風格"></textarea>
       </div>
+      <!-- 分類模型選擇 -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">🎯 分類模型選擇</h3>
+        <p class="text-xs text-gray-400 mb-4">為聊天、行政、娛樂三大類功能分別指定模型。留空 = 使用主模型。這比遊戲級別的個別模型設定更上層，能一次切換整個類別的模型。</p>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">💬 聊天功能模型</label>
+            <input id="ai-chat-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
+            <p class="text-xs text-gray-500 mt-1">用於一般聊天回覆、AI 聊天室對話。建議選用回覆速度快的模型</p>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">🛡️ 行政功能模型</label>
+            <input id="ai-admin-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
+            <p class="text-xs text-gray-500 mt-1">用於提案審核、入盟分析、計票判讀、快報生成。建議選用推理能力強的模型</p>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">🎮 娛樂功能模型</label>
+            <input id="ai-entertainment-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
+            <p class="text-xs text-gray-500 mt-1">用於股市評估、賽馬模擬等娛樂功能的 AI 呼叫（個別遊戲模型若已設定則優先使用）</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Rate Limiting -->
       <div class="bg-[#2b2d31] rounded-xl p-5">
         <h3 class="font-semibold mb-3">回應頻率控制</h3>
@@ -526,6 +549,14 @@
         <p class="text-xs text-gray-400 mb-4">逐一測試所有行政功能使用的模型（主模型、降級鏈全部、備援模型），並用預設假圖片測試識圖功能（主視覺模型 + 備援視覺模型）。不需要自己上傳圖片。</p>
         <button onclick="testAdminFunctions()" class="w-full bg-[#ed4245] hover:bg-[#c2383a] px-4 py-3 rounded-lg font-semibold text-sm">🛡️ 開始行政功能完整測試</button>
         <div id="admin-test-results" class="space-y-3 mt-4"></div>
+      </div>
+
+      <!-- 全域功能測試 -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">🌍 全域功能測試</h3>
+        <p class="text-xs text-gray-400 mb-4">一次測試所有功能類別的 AI 模型：聊天、行政、娛樂、降級鏈、備援 API、各遊戲模型、視覺模型。快速確認哪些模型可用、哪些逾時或失敗。</p>
+        <button onclick="testAllFunctions()" class="w-full bg-[#57f287] hover:bg-[#3ba55c] px-4 py-3 rounded-lg font-semibold text-sm text-black">🌍 開始全域功能測試</button>
+        <div id="all-functions-test-results" class="space-y-3 mt-4"></div>
       </div>
     </div>
   </div>
@@ -978,6 +1009,9 @@ async function showChatAIPanel() {
   document.getElementById('ai-turtle-soup-channel').value = s.turtle_soup_channel_id || '';
   document.getElementById('ai-turtle-soup-difficulty').value = s.turtle_soup_difficulty || 'medium';
   // 娛樂功能模型
+  document.getElementById('ai-chat-model').value = s.chat_model || '';
+  document.getElementById('ai-admin-model').value = s.admin_model || '';
+  document.getElementById('ai-entertainment-model').value = s.entertainment_model || '';
   document.getElementById('ai-quiz-model').value = s.quiz_model || '';
   document.getElementById('ai-turtle-soup-model').value = s.turtle_soup_model || '';
   document.getElementById('ai-werewolf-model').value = s.werewolf_model || '';
@@ -1061,6 +1095,10 @@ async function saveChatAISettings() {
     entertainment_unavailable_msg: document.getElementById('ai-entertainment-unavailable-msg').value.trim(),
     circuit_cooldown_msg: document.getElementById('ai-circuit-cooldown-msg').value.trim(),
   };
+  // 分類模型
+  data.chat_model = document.getElementById('ai-chat-model').value.trim();
+  data.admin_model = document.getElementById('ai-admin-model').value.trim();
+  data.entertainment_model = document.getElementById('ai-entertainment-model').value.trim();
   // 娛樂功能模型
   data.quiz_model = document.getElementById('ai-quiz-model').value.trim();
   data.turtle_soup_model = document.getElementById('ai-turtle-soup-model').value.trim();
@@ -1152,6 +1190,47 @@ async function testAdminFunctions() {
   } catch (e) {
     resultsDiv.innerHTML = '<p class="text-sm text-red-400">❌ 請求失敗：' + escHtml(String(e)) + '</p>';
   }
+}
+
+// ── 全域功能測試 ──
+async function testAllFunctions() {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '⏳ 測試中...';
+  const resultsDiv = document.getElementById('all-functions-test-results');
+  resultsDiv.innerHTML = '<p class="text-sm text-gray-400 text-center py-4">正在測試所有功能模型，請稍候（可能需要 1-2 分鐘）...</p>';
+  try {
+    const data = await api('/api/test-all-functions', 'POST', {});
+    if (data.error) { resultsDiv.innerHTML = '<p class="text-sm text-red-400">❌ ' + escHtml(data.error) + '</p>'; return; }
+    const summary = data.summary || {};
+    const results = data.results || [];
+    let html = '';
+    if (summary.all_ok) {
+      html += '<div class="bg-green-900/30 border border-green-700 rounded-lg p-4 mb-4"><p class="text-sm text-green-400 font-semibold">✅ 全部通過！' + summary.ok + '/' + summary.total + ' 項正常</p></div>';
+    } else {
+      html += '<div class="bg-yellow-900/30 border border-yellow-700 rounded-lg p-4 mb-4"><p class="text-sm text-yellow-400 font-semibold">⚠️ ' + summary.ok + ' 成功 / ' + summary.error + ' 失敗 / ' + summary.timeout + ' 逾時 / ' + summary.skipped + ' 跳過（共 ' + summary.total + ' 項）</p></div>';
+    }
+    results.forEach(r => {
+      const statusIcon = r.status === 'ok' ? '✅' : r.status === 'timeout' ? '⏱️' : r.status === 'skipped' ? '⏭️' : '❌';
+      const statusColor = r.status === 'ok' ? 'text-green-400' : r.status === 'skipped' ? 'text-gray-500' : 'text-red-400';
+      const typeIcon = r.type === 'vision' ? '📷' : '💬';
+      let card = '<div class="bg-[#1e1f22] rounded-lg p-4">';
+      card += '<div class="flex items-center justify-between mb-2">';
+      card += '<span class="font-semibold text-sm">' + statusIcon + ' ' + typeIcon + ' ' + escHtml(r.label) + '</span>';
+      card += '<span class="' + statusColor + ' text-sm font-medium">' + r.status.toUpperCase() + (r.latency_ms ? ' · ' + r.latency_ms + 'ms' : '') + '</span>';
+      card += '</div>';
+      if (r.model) card += '<p class="text-xs text-gray-500 mb-1">模型：' + escHtml(r.model) + '</p>';
+      if (r.response_snippet) card += '<p class="text-sm text-gray-300 mb-1">回覆：' + escHtml(r.response_snippet) + '</p>';
+      if (r.error) card += '<p class="text-xs text-red-400 mt-1 break-all">' + escHtml(r.error) + '</p>';
+      card += '</div>';
+      html += card;
+    });
+    resultsDiv.innerHTML = html;
+  } catch (e) {
+    resultsDiv.innerHTML = '<p class="text-sm text-red-400">❌ 請求失敗：' + escHtml(String(e)) + '</p>';
+  }
+  btn.disabled = false;
+  btn.textContent = '🌍 開始全域功能測試';
 }
 
 // ── Meeting AI Settings ──
