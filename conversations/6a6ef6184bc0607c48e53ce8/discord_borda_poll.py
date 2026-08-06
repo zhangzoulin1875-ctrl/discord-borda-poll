@@ -8277,6 +8277,13 @@ async def on_ready():
     except Exception as e:
         print(f"❌ 同步指令失敗：{e}")
 
+    # 恢復重啟前的遊戲狀態（海龜湯/狼人殺）
+    try:
+        await asyncio.sleep(3)  # 等待 guild 資料完全載入
+        await restore_active_game_states()
+    except Exception as e:
+        print(f"⚠️ 遊戲狀態恢復失敗：{e}")
+
     # Warmup probe: if we don't yet know whether the chat AI endpoint supports
     # tools, do a tiny test call NOW (before any user message arrives) so the
     # first real user message doesn't pay the double-call penalty. This probe
@@ -8469,6 +8476,7 @@ async def setup_hook():
     load_economy()
     load_stock_market()
     load_horse_racing()
+    load_graceful_restart()
     load_refine_settings()
     load_refine_knowledge()
     save_quiz_data()  # Create files if not exists
@@ -11359,6 +11367,14 @@ async def _graceful_shutdown_save():
     Called on SIGTERM (Render redeploy/restart) so we never lose the last
     few seconds of activity between periodic sync cycles."""
     print("🛑 收到終止訊號，儲存所有暫存資料到雲端硬碟...")
+    # 先保存正在進行的遊戲狀態 + 發送重啟公告（需要在 bot 還連線時完成）
+    try:
+        await save_active_game_states()
+        save_economy()
+        save_stock_market()
+        save_horse_racing()
+    except Exception as e:
+        print(f"⚠️ 遊戲狀態保存失敗：{e}")
     try:
         save_polls_to_disk()
         save_quiz_data()
@@ -11367,6 +11383,9 @@ async def _graceful_shutdown_save():
         save_chat_ai_settings()
         save_user_memories()
         save_knowledge_base()
+        save_economy()
+        save_stock_market()
+        save_horse_racing()
         await sync_to_drive()
         print("✅ 關機前資料已全部同步到 Google Drive")
     except Exception as e:
@@ -11438,6 +11457,7 @@ bot.add_view(TurtleSoupStartView())  # 只有開始按鈕是持久化的
 bot.add_view(WerewolfSignupView())  # 狼人殺報名按鈕持久化
 bot.add_view(EconomyPanelButtonsView())  # 經濟看板下方的股票/公司管理快捷按鈕持久化
 bot.add_view(HorseBettingView("persistent"))  # 賽馬下注按鈕持久化（重啟後復原用）
+bot.add_view(_WerewolfResumeView())  # 狼人殺重啟恢復按鈕持久化
 
 bot.setup_hook = setup_hook
 
