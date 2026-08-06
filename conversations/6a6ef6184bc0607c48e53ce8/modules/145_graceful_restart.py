@@ -105,6 +105,7 @@ async def save_active_game_states():
 
     ts_save = None
     ww_save = None
+    ts_invite_msg_id_save = _turtle_soup_invite_msg_id  # 即使沒遊戲，也保存邀請面板ID以便重啟後刪除舊面板
 
     # 保存海龜湯（移除不可序列化的物件）
     if _turtle_soup_state.get("active"):
@@ -125,6 +126,7 @@ async def save_active_game_states():
     _restart_state = {
         "timestamp": _gr_time.time(),
         "turtle_soup": ts_save,
+        "ts_invite_msg_id": ts_invite_msg_id_save,
         "werewolf": ww_save,
         "ww_invite_msg_id": ww_invite_msg_id_save,
         "notified_channels": notified_channels,
@@ -169,9 +171,28 @@ async def restore_active_game_states():
     global _restart_state, _turtle_soup_state, _ww_state
 
     ts_save = _restart_state.get("turtle_soup")
+    ts_invite_msg_id = _restart_state.get("ts_invite_msg_id")
     ww_save = _restart_state.get("werewolf")
 
     # ── 恢復海龜湯 ──
+    # 如果沒有遊戲進行中，嘗試刪除舊邀請面板（按鈕已失效），讓 turtle_soup_loop 重發新的
+    if not (ts_save and ts_save.get("active")) and ts_invite_msg_id:
+        try:
+            # 找出海龜湯頻道
+            ts_ch_id = chat_ai_settings.get("turtle_soup_channel_id")
+            if ts_ch_id:
+                ts_channel = bot.get_channel(int(ts_ch_id))
+                if ts_channel:
+                    try:
+                        old_panel = await ts_channel.fetch_message(int(ts_invite_msg_id))
+                        await old_panel.delete()
+                        print(f"🍜 已刪除舊海龜湯邀請面板（msg_id={ts_invite_msg_id}）")
+                    except discord.NotFound:
+                        pass  # 訊息已不存在
+                    except Exception as e:
+                        print(f"⚠️ 刪除舊海龜湯面板失敗：{e}")
+        except Exception as e:
+            print(f"⚠️ 海龜湯舊面板清理失敗：{e}")
     if ts_save and ts_save.get("active"):
         ch_id = ts_save.get("channel_id")
         if ch_id:
