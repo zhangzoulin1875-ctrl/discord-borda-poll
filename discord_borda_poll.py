@@ -1746,9 +1746,20 @@ def load_token_usage():
 
 def _get_reasoning_effort(fallback_mode: str = "full", category: str = "") -> str:
     """根據呼叫類型取得 reasoning_effort 設定。
+
+    全域 reasoning_effort 是最高優先級的 kill switch：
+    - 設為 "none" 時，所有類別都回 "none"（完全停用 reasoning），
+      確保使用者從 dashboard 設定「關閉」能真正全域生效，
+      不會被 per-category 預設值覆蓋。
+    - 設為其他值或未設定時，使用 per-category 設定。
+
     category 優先於 fallback_mode——明確指定時使用 category。
     fallback_mode 僅在 category 未指定時作為向後兼容的推斷依據。
     """
+    # 全域 kill switch：reasoning_effort="none" → 所有類別都停用
+    _global_effort = chat_ai_settings.get("reasoning_effort", "")
+    if _global_effort == "none":
+        return "none"
     if category:
         if category == "chat":
             return chat_ai_settings.get("reasoning_chat_effort", "low")
@@ -1773,10 +1784,12 @@ def _build_reasoning_params(effort: str) -> dict:
     """
     params = {}
     if effort == "none":
-        # 關閉 reasoning — 發送所有已知格式的「關閉」指令
-        params["reasoning_effort"] = "none"
-        params["thinking"] = {"type": "disabled"}
-        params["enable_thinking"] = False
+        # 關閉 reasoning — 不送任何 reasoning 參數。
+        # 原本會送 {"reasoning_effort":"none", "thinking":{"type":"disabled"}, "enable_thinking":False}
+        # 但某些 API 供應商（如 ltzy.top 代理）對未知欄位做嚴格驗證，
+        # 收到 enable_thinking 就直接回 400 Bad Request，浪費 20 秒。
+        # 不送參數 = 讓 API 用自己的預設行為（多數 API 預設就是不做 reasoning）。
+        return {}
     elif effort in ("low", "medium", "high", "auto"):
         params["reasoning_effort"] = effort
         params["thinking"] = {"type": "enabled", "effort": effort}
