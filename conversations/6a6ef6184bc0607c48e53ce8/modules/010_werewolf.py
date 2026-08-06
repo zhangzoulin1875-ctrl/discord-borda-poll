@@ -1373,12 +1373,17 @@ async def werewolf_loop():
                     except Exception:
                         _ww_invite_msg_id = None
 
-                if needs_post and _ww_state["phase"] == "idle":
-                    # 建立臨時身分組（如果還沒有）
-                    if not _ww_state.get("role_id"):
-                        await _ww_setup_role_and_perms(channel)
-                    _ww_state["phase"] = "signup"
+                if needs_post:
+                    # idle 階段：初次開局，需建立臨時身分組 + 轉入 signup
+                    if _ww_state["phase"] == "idle":
+                        if not _ww_state.get("role_id"):
+                            await _ww_setup_role_and_perms(channel)
+                        _ww_state["phase"] = "signup"
+                    # signup 階段但面板遺失（例如重啟後恢復到 signup 卻無面板）：直接重發
                     await _ww_post_invite(channel)
+                    if _ww_state["players"]:
+                        # 重發後若已有報名玩家（如重啟恢復），立即更新面板反映正確人數
+                        await _ww_update_signup_embed(channel)
 
             await asyncio.sleep(30)
         except Exception as e:

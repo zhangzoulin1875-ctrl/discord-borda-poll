@@ -116,14 +116,17 @@ async def save_active_game_states():
         print(f"🍜 海龜湯狀態已保存（{ts_save['questions_used']}/{ts_save['max_questions']} 題）")
 
     # 保存狼人殺
+    ww_invite_msg_id_save = None
     if _ww_state.get("phase") in ("signup", "playing"):
         ww_save = {k: v for k, v in _ww_state.items()}
+        ww_invite_msg_id_save = _ww_invite_msg_id
         print(f"🐺 狼人殺狀態已保存（phase={ww_save['phase']}, day={ww_save['day']}, players={len(ww_save['players'])}）")
 
     _restart_state = {
         "timestamp": _gr_time.time(),
         "turtle_soup": ts_save,
         "werewolf": ww_save,
+        "ww_invite_msg_id": ww_invite_msg_id_save,
         "notified_channels": notified_channels,
     }
     _save_restart_state()
@@ -230,7 +233,29 @@ async def restore_active_game_states():
                     _ww_state = ww_save
                     print(f"🐺 狼人殺已恢復：phase={ww_save['phase']}, day={ww_save['day']}, players={len(ww_save['players'])}")
 
-                    if ww_save["phase"] == "playing":
+                    if ww_save["phase"] == "signup":
+                        # 報名階段：舊面板在重啟瞬間已失效（bot離線時按鈕會顯示「此交互失敗」），
+                        # 不嘗試復活舊訊息，直接刪除舊面板 + 強制重發一個全新、功能正常的面板，
+                        # 並保留已報名玩家名單。
+                        global _ww_invite_msg_id
+                        _ww_invite_msg_id = _restart_state.get("ww_invite_msg_id")
+                        await _ww_post_invite(channel)  # 內部會嘗試刪除舊面板並發新的
+                        if _ww_state["players"]:
+                            await _ww_update_signup_embed(channel)  # 反映已報名人數
+
+                        embed = discord.Embed(
+                            title="✅ 重啟完畢",
+                            description=(
+                                "資料未遺失，狼人殺報名階段已恢復！\n"
+                                f"👥 已報名：{len(ww_save['players'])} 人\n"
+                                "⚠️ 重啟前的舊報名面板已失效，請使用上方**全新面板**重新點擊（已報名名單已保留，無需重新報名）。"
+                            ),
+                            color=discord.Color.green(),
+                            timestamp=discord.utils.utcnow(),
+                        )
+                        await channel.send(embed=embed)
+                        print(f"✅ 狼人殺報名面板已強制重發至頻道 {ch_id}")
+                    elif ww_save["phase"] == "playing":
                         alive_players = [p["name"] for p in ww_save["players"] if p.get("alive")]
                         dead_players = [p["name"] for p in ww_save["players"] if not p.get("alive")]
                         phase_detail = ww_save.get("phase_detail", "")
@@ -256,19 +281,7 @@ async def restore_active_game_states():
                         view = _WerewolfResumeView()
                         await channel.send(embed=embed, view=view)
                         print(f"✅ 狼人殺恢復公告已發送至頻道 {ch_id}（含繼續按鈕）")
-                    else:
-                        embed = discord.Embed(
-                            title="✅ 重啟完畢",
-                            description=(
-                                "資料未遺失，狼人殺報名階段已恢復！\n"
-                                f"👥 已報名：{len(ww_save['players'])} 人\n"
-                                "報名面板將在稍後自動恢復。"
-                            ),
-                            color=discord.Color.green(),
-                            timestamp=discord.utils.utcnow(),
-                        )
-                        await channel.send(embed=embed)
-                        print(f"✅ 狼人殺報名恢復公告已發送至頻道 {ch_id}")
+
                 else:
                     print(f"⚠️ 狼人殺頻道 {ch_id} 找不到，無法恢復")
             except Exception as e:
