@@ -3057,7 +3057,21 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     # reserve, and within that phase, no single attempt may claim more than
     # half of what's left there either, so a retry/second model always gets
     # a real shot too.
-    _fallback_reserve = min(8, max(3, timeout_total * 0.3))
+    # ── FIX：reasoning 關閉的短 timeout 場景要重新分配預算 ──
+    # 實測發現：即使 reasoning_effort=none，主 API（z-ai/glm-5.2 經 ltzy.top
+    # 代理）連「ping」這種最簡單的訊息也會逾時，代表這條代理本身的延遲/佇列
+    # 問題不是我們能用 payload 參數關掉的。在 timeout_total 被壓到 25s 這種
+    # 短預算下，如果還沿用「主模型可獨佔 85%」的邏輯，主模型會吃掉 ~15s 卻
+    # 幾乎必然失敗，只留 ~2-3s 給降級鏈/備援 API——備援根本來不及跑完，
+    # 導致「兩邊都沒時間完成」而 100% 逾時。
+    # 修正：timeout_total 越短（= reasoning 關閉的快速通道），越要把預算
+    # 大幅向備援 API 傾斜——主模型只給一次「快速嘗試」機會，剩下大部分
+    # 時間留給已知較快、較穩定的備援 API，讓至少一邊有機會在期限內回應，
+    # 而不是浪費時間在一個已知會逾時的主模型上。
+    if timeout_total <= 30:
+        _fallback_reserve = max(10, timeout_total * 0.55)
+    else:
+        _fallback_reserve = min(8, max(3, timeout_total * 0.3))
     _primary_deadline = _deadline - _fallback_reserve
 
     def _remaining_primary(floor=0.5):
@@ -3068,7 +3082,13 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     # timeout 硬切斷，然後觸發降級鏈/備援 API，等於「為了降級而降級」。
     # 主模型成功時根本不需要降級，所以把上限提高到 85%，讓正在工作的
     # 主模型有足夠時間完成回應。
-    _max_single_attempt = max(5, (timeout_total - _fallback_reserve) * 0.85)
+    # ── 但短 timeout（reasoning 關閉）場景例外 ──：已知主模型連最簡單
+    # 訊息都會逾時，給它 85% 的短預算只是保證性失敗，改用較保守的 60%，
+    # 把省下來的時間讓給上面新增的備援保留額度。
+    if timeout_total <= 30:
+        _max_single_attempt = max(4, (timeout_total - _fallback_reserve) * 0.6)
+    else:
+        _max_single_attempt = max(5, (timeout_total - _fallback_reserve) * 0.85)
     _used_model = None        # which model actually answered (for logging)
     _used_fallback = False    # whether the backup API was used
     _diag = []                # diagnostic events for AI log embed
