@@ -1635,6 +1635,13 @@ chat_ai_settings = {
     "ai_max_tokens": 2000,           # AI 回覆最大 token 數
     "preprocess_timeout": 6,         # 預處理（百科/Discord/網路）各路逾時（秒）
     "tool_skip_threshold": 12,       # 時間預算低於此值時關閉工具（秒）
+    "reasoning_effort": "low",      # reasoning 模型思考強度: "none"(關閉) / "low" / "medium" / "high" / "auto"
+                                    # GLM-5.2, DeepSeek-R1 等 reasoning 模型適用。none=跳過思考直接回答
+    "reasoning_admin_effort": "medium",  # 行政功能(提案/計票/入盟)的思考強度，品質需求較高
+    "reasoning_chat_effort": "low",  # 聊天功能的思考強度，速度優先
+    "reasoning_entertainment_effort": "low",  # 娛樂功能(海龜湯/狼人殺/占卜)的思考強度
+    "reasoning_enabled_timeout": 90,  # 開啟 reasoning 時的 timeout（秒），預設 90 秒
+    "reasoning_disabled_timeout": 25, # 關閉 reasoning 時的 timeout（秒），預設 25 秒
     "circuit_breaker_cooldown": 120, # 熔斷器冷卻時間（秒）
     "forum_index_interval": 900,    # 論壇索引更新間隔（秒）
     "channel_index_interval": 1800,  # 頻道索引更新間隔（秒）
@@ -1726,6 +1733,53 @@ def load_token_usage():
     except Exception as e:
         print(f"⚠️ Token usage load failed: {e}")
         token_usage["started_at"] = _time.time()
+
+# ── Reasoning 模型控制 ──
+# GLM-5.2, DeepSeek-R1 等 reasoning 模型在回答前會先「思考」(reasoning)，
+# 思考過程可能耗時 30-120 秒。這裡提供統一的控制機制：
+# 1. 透過 payload 參數控制思考強度（reasoning_effort / thinking）
+# 2. 根據是否開啟 reasoning 動態調整 timeout
+
+def _get_reasoning_effort(fallback_mode: str = "full") -> str:
+    """根據呼叫類型取得 reasoning_effort 設定。
+    fallback_mode="full" 通常是行政功能 → 用 reasoning_admin_effort
+    fallback_mode="rate_limited" 通常是聊天 → 用 reasoning_chat_effort
+    fallback_mode="disabled" 通常是娛樂 → 用 reasoning_entertainment_effort
+    """
+    if fallback_mode == "rate_limited":
+        return chat_ai_settings.get("reasoning_chat_effort", "low")
+    elif fallback_mode == "disabled":
+        return chat_ai_settings.get("reasoning_entertainment_effort", "low")
+    else:  # "full" or default
+        return chat_ai_settings.get("reasoning_admin_effort", "medium")
+
+def _build_reasoning_params(effort: str) -> dict:
+    """根據 reasoning_effort 值構建 API payload 中的 reasoning 控制參數。
+    同時發送多種格式以兼容不同 API 供應商：
+    - reasoning_effort: OpenAI o1/o3 格式（也適用於 Nvidia NIM）
+    - thinking: ZhipuAI/GLM 格式
+    - enable_thinking: 部分 API 使用的布林值格式
+    """
+    params = {}
+    if effort == "none":
+        # 關閉 reasoning — 發送所有已知格式的「關閉」指令
+        params["reasoning_effort"] = "none"
+        params["thinking"] = {"type": "disabled"}
+        params["enable_thinking"] = False
+    elif effort in ("low", "medium", "high", "auto"):
+        params["reasoning_effort"] = effort
+        params["thinking"] = {"type": "enabled", "effort": effort}
+        params["enable_thinking"] = True
+    # else: effort is empty/unknown → don't send any params (use API default)
+    return params
+
+def _get_reasoning_timeout(effort: str, fallback_mode: str = "full") -> int:
+    """根據是否開啟 reasoning 取得適當的 timeout。"""
+    if effort == "none" or not effort:
+        return chat_ai_settings.get("reasoning_disabled_timeout", 25)
+    else:
+        return chat_ai_settings.get("reasoning_enabled_timeout", 90)
+
 
 def _track_token_usage(data: dict):
     usage = data.get("usage")
@@ -2494,8 +2548,8 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
             api_messages, settings,
             tools=tools,
             max_tokens=settings.get("ai_max_tokens", 800),
-            timeout_total=settings.get("ai_hard_ceiling", 45),
-            timeout_read=settings.get("ai_hard_ceiling", 45) - 5,
+            timeout_total=_get_reasoning_timeout(_get_reasoning_effort(_fb_mode), _fb_mode),
+            timeout_read=_get_reasoning_timeout(_get_reasoning_effort(_fb_mode), _fb_mode) - 5,
             is_background=False,
             fallback_mode=_fb_mode,
             fallback_user_id=_fb_user,
@@ -2526,8 +2580,8 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
                 result2 = await call_chat_api(
                     api_messages, settings, tools=None,
                     max_tokens=settings.get("ai_max_tokens", 800),
-                    timeout_total=settings.get("ai_hard_ceiling", 45),
-                    timeout_read=settings.get("ai_hard_ceiling", 45) - 5,
+                    timeout_total=_get_reasoning_timeout(_get_reasoning_effort(_fb_mode), _fb_mode),
+                    timeout_read=_get_reasoning_timeout(_get_reasoning_effort(_fb_mode), _fb_mode) - 5,
                     is_background=False,
                     fallback_mode=_fb_mode,
                     fallback_user_id=_fb_user,
@@ -3289,6 +3343,20 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             "max_tokens": max_tokens,
             "stream_options": {"include_usage": True},
         }
+        # ── Reasoning 模型控制 ──
+        # GLM-5.2 等 reasoning 模型：根據呼叫類型動態調整思考強度
+        _reasoning_effort = _get_reasoning_effort(fallback_mode)
+        _reasoning_params = _build_reasoning_params(_reasoning_effort)
+        if _reasoning_params:
+            payload.update(_reasoning_params)
+            _diag.append(f"🧠 reasoning_effort={_reasoning_effort}")
+        # ── 動態 timeout 調整 ──
+        # 如果 caller 沒有明確指定 timeout（用預設 300），根據 reasoning 自動調整
+        if timeout_total >= 300:
+            _auto_timeout = _get_reasoning_timeout(_reasoning_effort, fallback_mode)
+            timeout_total = _auto_timeout
+            timeout_read = max(3, _auto_timeout - 5)
+            _diag.append(f"⏱️ auto-timeout={_auto_timeout}s (reasoning={_reasoning_effort})")
         if use_tools:
             payload["tools"] = use_tools
             payload["tool_choice"] = "auto"
@@ -7349,6 +7417,18 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["abuse_mute_admins"] = body["abuse_mute_admins"]
     if "ai_hard_ceiling" in body:
         chat_ai_settings["ai_hard_ceiling"] = int(body["ai_hard_ceiling"])
+    if "reasoning_effort" in body:
+        chat_ai_settings["reasoning_effort"] = body["reasoning_effort"]
+    if "reasoning_admin_effort" in body:
+        chat_ai_settings["reasoning_admin_effort"] = body["reasoning_admin_effort"]
+    if "reasoning_chat_effort" in body:
+        chat_ai_settings["reasoning_chat_effort"] = body["reasoning_chat_effort"]
+    if "reasoning_entertainment_effort" in body:
+        chat_ai_settings["reasoning_entertainment_effort"] = body["reasoning_entertainment_effort"]
+    if "reasoning_enabled_timeout" in body:
+        chat_ai_settings["reasoning_enabled_timeout"] = int(body["reasoning_enabled_timeout"])
+    if "reasoning_disabled_timeout" in body:
+        chat_ai_settings["reasoning_disabled_timeout"] = int(body["reasoning_disabled_timeout"])
     if "ai_soft_target" in body:
         chat_ai_settings["ai_soft_target"] = int(body["ai_soft_target"])
     if "ai_max_tokens" in body:
@@ -7943,6 +8023,12 @@ async def call_ai_api(conversation: str, settings: dict) -> str:
         "temperature": 0.3,
         "stream": True,
     }
+    # ── Reasoning 模型控制 ──
+    _reasoning_effort = settings.get("reasoning_effort") or chat_ai_settings.get("reasoning_admin_effort", "medium")
+    _reasoning_params = _build_reasoning_params(_reasoning_effort)
+    if _reasoning_params:
+        payload.update(_reasoning_params)
+    _reasoning_timeout = _get_reasoning_timeout(_reasoning_effort)
     # Auto-append /chat/completions if only base URL is provided
     api_url = settings["api_url"].rstrip("/")
     if not api_url.endswith("/chat/completions"):
@@ -7951,7 +8037,7 @@ async def call_ai_api(conversation: str, settings: dict) -> str:
         else:
             api_url += "/v1/chat/completions"
     # Use streaming to avoid long silent waits — collect chunks as they arrive
-    timeout = aiohttp.ClientTimeout(total=300, connect=15, sock_read=60)
+    timeout = aiohttp.ClientTimeout(total=_reasoning_timeout, connect=15, sock_read=max(10, _reasoning_timeout // 2))
     result_chunks = []
     async with aiohttp.ClientSession() as session:
         async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
@@ -8004,6 +8090,12 @@ async def call_ai_api_stream(conversation: str, settings: dict):
         "temperature": 0.3,
         "stream": True,
     }
+    # ── Reasoning 模型控制 ──
+    _reasoning_effort = settings.get("reasoning_effort") or chat_ai_settings.get("reasoning_chat_effort", "low")
+    _reasoning_params = _build_reasoning_params(_reasoning_effort)
+    if _reasoning_params:
+        payload.update(_reasoning_params)
+    _reasoning_timeout = _get_reasoning_timeout(_reasoning_effort)
     # Auto-append /chat/completions if only base URL is provided
     api_url = settings["api_url"].rstrip("/")
     if not api_url.endswith("/chat/completions"):
@@ -8013,7 +8105,7 @@ async def call_ai_api_stream(conversation: str, settings: dict):
             api_url += "/chat/completions"
         else:
             api_url += "/v1/chat/completions"
-    timeout = aiohttp.ClientTimeout(total=300, connect=15, sock_read=90)
+    timeout = aiohttp.ClientTimeout(total=_reasoning_timeout, connect=15, sock_read=max(15, _reasoning_timeout // 2))
     async with aiohttp.ClientSession() as session:
         async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
             if resp.status != 200:
