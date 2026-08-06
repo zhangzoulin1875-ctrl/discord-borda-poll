@@ -1,6 +1,8 @@
-.agents/.env
-node_modules/
-.npm/
 __pycache__/
-.cache/
-blobs/
+*.pyc
+.env
+data/*.json
+bot.log
+incoming_files/
+.agents/
+.base44-conversation-workspace
