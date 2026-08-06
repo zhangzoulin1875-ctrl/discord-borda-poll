@@ -628,6 +628,20 @@ class EconomyGroup(app_commands.Group):
                 f"⏳ 手還在發抖呢，等 {remaining} 秒再來。", ephemeral=True
             )
             return
+
+        # 死亡冷卻檢查 — 死過一次的人 2 小時內不能再賭
+        last_death = _roulette_death_cooldowns.get(user_id_str, 0)
+        if last_death and now - last_death < ROULETTE_DEATH_COOLDOWN_SEC:
+            remaining_sec = int(ROULETTE_DEATH_COOLDOWN_SEC - (now - last_death))
+            remaining_h = remaining_sec // 3600
+            remaining_m = (remaining_sec % 3600) // 60
+            await interaction.response.send_message(
+                f"💀 你上次賭輪盤被打死了，傷口還沒癒合。\n"
+                f"⏳ 還需等待 **{remaining_h}小時{remaining_m}分鐘** 才能再賭。",
+                ephemeral=True
+            )
+            return
+
         _roulette_cooldowns[user_id_str] = now
 
         # 先扣籌碼（確認後扣板機才決定生死）
@@ -661,6 +675,10 @@ ROULETTE_MIN_BET = 100
 # 冷卻記錄：{user_id_str: last_play_timestamp}
 _roulette_cooldowns = {}
 ROULETTE_COOLDOWN_SEC = 10  # 每人每次間隔 10 秒防止刷屏
+
+# 死亡冷卻：死過一次的人 2 小時內不能再賭
+_roulette_death_cooldowns = {}  # {user_id_str: death_timestamp}
+ROULETTE_DEATH_COOLDOWN_SEC = 2 * 60 * 60  # 2 小時
 
 
 def _build_chamber_diagram(bullets: int, chamber: int) -> str:
@@ -704,6 +722,10 @@ class RouletteConfirmView(discord.ui.View):
         # 這裡只處理「輸了不用再扣（本金已經沒了）」跟「贏了要把本金+淨利一次還回來」。
         if hit:
             # 死亡 — 本金已經在下注時扣掉了，這裡不再扣第二次！
+            # 記錄死亡時間，觸發 2 小時冷卻
+            import time as _time_mod2
+            _roulette_death_cooldowns[self.user_id] = _time_mod2.time()
+            print(f"💀 俄羅斯轉盤死亡冷卻：{self.user_id} 死亡，2小時內禁止再賭")
             new_bal = get_balance(self.user_id)
             embed = discord.Embed(
                 title="💥 砰！",
@@ -711,7 +733,8 @@ class RouletteConfirmView(discord.ui.View):
                     f"**{interaction.user.display_name}** 倒下了…\n\n"
                     f"🔫 {_build_chamber_diagram(bullets, chamber)}\n"
                     f"💔 損失 **{bet}** {currency_name()}\n"
-                    f"💰 餘額：**{new_bal}** {currency_name()}\n\n"
+                    f"💰 餘額：**{new_bal}** {currency_name()}\n"
+                    f"⏳ **2 小時內無法再賭輪盤**\n\n"
                     f"「命運的子彈不會放過任何人。」"
                 ),
                 color=discord.Color.red(),
