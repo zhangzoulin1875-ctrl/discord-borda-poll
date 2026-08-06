@@ -8403,7 +8403,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -8468,6 +8468,7 @@ async def setup_hook():
     load_quiz_data()
     load_economy()
     load_stock_market()
+    load_horse_racing()
     load_refine_settings()
     load_refine_knowledge()
     save_quiz_data()  # Create files if not exists
@@ -8502,6 +8503,7 @@ async def setup_hook():
     asyncio.ensure_future(token_log_loop())
     asyncio.ensure_future(economy_panel_loop())  # 經濟系統看板：重啟自動清理廢棄面板+即時更新
     asyncio.ensure_future(stock_market_loop())  # AI 股票市場：每2小時一回合
+    asyncio.ensure_future(horse_racing_loop())  # 賽馬賭博系統：每30分鐘一局
     # Load community awareness + chronicle data
     _load_community_awareness()
     _load_awareness_settings()
