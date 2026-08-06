@@ -817,16 +817,21 @@ class EconomyGroup(app_commands.Group):
                 f"全部用中文，不要用 markdown 格式。"
             )
 
-        # AI 呼叫（娛樂功能，fallback_mode=disabled）
+        # AI 呼叫 —— 對齊海龜湯/狼人殺的實際作法：fallback_mode="full"，
+        # 主模型任何錯誤（逾時/5xx/空內容）直接秒切備援 API，不會判失敗退款。
+        # （備援API仍會先跳過免費降級鏈，因為fallback_mode="full"時
+        # call_chat_api內部邏輯判定「反正要切更強的備援，不用先浪費時間
+        # 試免費模型鏈」——這跟海龜湯/狼人殺的行為完全一致。）
         settings = {
             "api_url": chat_ai_settings["api_url"],
             "api_key": chat_ai_settings["api_key"],
             "model": chat_ai_settings.get("fortune_model") or chat_ai_settings["model"],
-            # 娛樂功能不能用付費備援 API（留給行政功能），但仍應該走
-            # 「模型降級鏈」——同一組 API/Key 底下依序嘗試其他免費模型，
-            # 主模型偶發故障時不會直接判定失敗退款。
             "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
         }
+        if chat_ai_settings.get("fallback_enabled"):
+            settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
+            settings["fallback_api_key"] = chat_ai_settings.get("fallback_api_key", "")
+            settings["fallback_model"] = chat_ai_settings.get("fallback_model", "")
 
         messages = [{"role": "user", "content": prompt}]
 
@@ -838,7 +843,8 @@ class EconomyGroup(app_commands.Group):
                     timeout_total=40,
                     timeout_read=35,
                     is_background=False,
-                    fallback_mode="disabled",
+                    fallback_mode="full",
+                    fallback_user_id="economy_fortune",
                 ),
                 timeout=45,
             )
