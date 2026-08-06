@@ -7135,6 +7135,20 @@ async def load_from_drive():
     for f in json_files:
         filename = f["name"]
         content = await _drive_download(filename)
+        # chat_ai_settings.json is the single point of failure for the ENTIRE
+        # bot (API key, model, model_fallback_chain, log_channel_id, all
+        # feature toggles) — a transient network hiccup on cold boot losing
+        # this file resets everything to hardcoded defaults for the whole run.
+        # Retry a few times with a short backoff before giving up, since Render
+        # containers often have flaky networking in the first few seconds.
+        if not content and filename == "chat_ai_settings.json":
+            for _retry in range(3):
+                await asyncio.sleep(2)
+                print(f"🔄 重試下載 {filename}（第 {_retry+1}/3 次）...")
+                content = await _drive_download(filename)
+                if content:
+                    print(f"✅ 重試成功，取得 {filename}")
+                    break
         if content:
             try:
                 filepath = os.path.join(data_dir, filename)
@@ -9197,6 +9211,8 @@ async def on_message(message):
                     await _send_chat_log(message, message.content or "(圖片)", reply or "(空回覆)", model_info=model_info)
                 except Exception as log_exc:
                     print(f"   ⚠️ _send_chat_log 例外：{log_exc}")
+            else:
+                print(f"   ⏭️ 跳過對話紀錄：log_channel_id 未設定（值={log_cfg!r}）")
 
             if reply and reply.strip():
                 _last_global_reply = _time.time()
@@ -9225,6 +9241,19 @@ async def on_message(message):
                     print(f"🚫 AI 熔斷器開啟中，不發送 fallback")
                 else:
                     print(f"   ⚠️ AI 回覆為空")
+        except Exception as room_err:
+            # Previously uncaught — an exception here meant the user got NO
+            # reply at all (not even an error message) and nothing was logged.
+            print(f"⚠️ AI 聊天室處理例外：{room_err}")
+            try:
+                if chat_ai_settings.get("log_channel_id"):
+                    await _send_chat_log(message, message.content or "(圖片)", f"❌ 處理例外：{room_err}", model_info=None)
+            except Exception as log_exc2:
+                print(f"   ⚠️ 例外記錄失敗：{log_exc2}")
+            try:
+                await message.reply("⚠️ 發生錯誤，請稍後再試。", mention_author=False)
+            except Exception:
+                pass
         finally:
             _user_generating.discard(uid_str)
         return  # AI chat room message fully handled
@@ -9387,6 +9416,8 @@ async def on_message(message):
                 await _send_chat_log(message, clean or message.content, reply or "(空回覆)", model_info=model_info)
             except Exception as log_exc:
                 print(f"   ⚠️ _send_chat_log 拋出例外（不影響回覆）：{log_exc}")
+        else:
+            print(f"   ⏭️ 跳過對話紀錄：log_channel_id 未設定（值={log_cfg!r}）")
 
         if reply and reply.strip():
             chat_cooldowns[(message.channel.id, message.author.id)] = _time.time()
@@ -9439,11 +9470,21 @@ async def on_message(message):
     except asyncio.TimeoutError:
         print(f"⚠️ Chat AI timeout (API call took too long)")
         try:
+            if chat_ai_settings.get("log_channel_id"):
+                await _send_chat_log(message, message.content or "(圖片)", "❌ 逾時（API 呼叫時間過長）", model_info=None)
+        except Exception as log_exc3:
+            print(f"   ⚠️ 逾時記錄失敗：{log_exc3}")
+        try:
             await message.reply("⏰ 回覆逾時，請稍後再試。", mention_author=False)
         except Exception as e:
             print(f"⚠️ AI 回覆後處理例外: {e}")
     except Exception as e:
         print(f"⚠️ Chat AI error: {e}")
+        try:
+            if chat_ai_settings.get("log_channel_id"):
+                await _send_chat_log(message, message.content or "(圖片)", f"❌ 處理例外：{e}", model_info=None)
+        except Exception as log_exc4:
+            print(f"   ⚠️ 例外記錄失敗：{log_exc4}")
         # If the circuit breaker is tripped, don't spam error messages in Discord
         if _ai_circuit_breaker["tripped"]:
             print(f"🚫 AI 熔斷器開啟中，不發送錯誤訊息到 Discord")

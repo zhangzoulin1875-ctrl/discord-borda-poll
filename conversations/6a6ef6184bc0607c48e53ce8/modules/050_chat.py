@@ -489,6 +489,9 @@ class ChatGroup(app_commands.Group):
         log_ch_id = chat_ai_settings.get("log_channel_id")
         log_ch_val = f"<#{log_ch_id}>" if log_ch_id else "未設定"
         embed.add_field(name="紀錄頻道", value=log_ch_val, inline=True)
+        _drive_ok = globals().get("_drive_load_succeeded", None)
+        _drive_status = "✅ 本次啟動成功" if _drive_ok else ("⚠️ 本次啟動失敗（設定可能是硬編碼預設值）" if _drive_ok is False else "❓ 未知")
+        embed.add_field(name="本次啟動 Drive 設定載入", value=_drive_status, inline=False)
         # Micropedia status
         micro_on = chat_ai_settings.get("micropedia_enabled", True)
         micro_max = chat_ai_settings.get("micropedia_max_results", 5)
