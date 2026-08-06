@@ -311,9 +311,9 @@ async def setup_economy_panel():
     except Exception as e:
         print(f"⚠️ 掃描舊經濟看板失敗：{e}")
 
-    # 3) 發送全新的看板訊息
+    # 3) 發送全新的看板訊息（附上股票/公司管理快捷按鈕，持久化view）
     try:
-        new_msg = await channel.send(embed=_build_economy_info_embed())
+        new_msg = await channel.send(embed=_build_economy_info_embed(), view=EconomyPanelButtonsView())
         economy_settings["info_message_id"] = new_msg.id
         save_economy()
         print(f"✅ 經濟看板已（重新）發送至 #{channel.name}（訊息 ID: {new_msg.id}）")
