@@ -836,7 +836,7 @@ async def _ai_evaluate_company(co: dict, company_id: str) -> dict:
             timeout_total=30,
             timeout_read=25,
             is_background=True,
-            fallback_mode="disabled",  # 娛樂功能，主API故障時停用
+            fallback_mode="full",  # 娛樂功能降級鏈：主模型失敗直接切備援API（對齊海龜湯/狼人殺/占卜）
             fallback_user_id="stock_market",
         )
         if result.get("circuit_open"):

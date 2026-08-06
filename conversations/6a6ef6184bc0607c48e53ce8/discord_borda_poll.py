@@ -7140,6 +7140,9 @@ async def load_from_drive():
                 filepath = os.path.join(data_dir, filename)
                 with open(filepath, "w", encoding="utf-8") as fh:
                     fh.write(content)
+                if filename == "chat_ai_settings.json":
+                    global _drive_load_succeeded
+                    _drive_load_succeeded = True
                 print(f"✅ 從 Google Drive 載入 {filename}")
                 ok_count += 1
             except Exception as e:
@@ -7393,6 +7396,8 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["werewolf_model"] = body["werewolf_model"]
     if "fortune_model" in body:
         chat_ai_settings["fortune_model"] = body["fortune_model"]
+    if "log_channel_id" in body:
+        chat_ai_settings["log_channel_id"] = body["log_channel_id"] or None
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -8475,7 +8480,14 @@ async def setup_hook():
     load_member_nations()
     save_briefing_settings()  # Create file if not exists
     load_chat_ai_settings()
-    save_chat_ai_settings()  # Create file if not exists
+    # Only save (and potentially overwrite Drive) if we actually loaded real data.
+    # If Drive download failed AND no local file exists, saving would write
+    # defaults (log_channel_id=None, api_key="", etc.) which then get uploaded
+    # to Drive on next sync — permanently destroying the real settings.
+    if _drive_load_succeeded or os.path.exists(CHAT_AI_DATA_FILE):
+        save_chat_ai_settings()
+    else:
+        print("⚠️ Drive 載入失敗且無本地檔，跳過 save_chat_ai_settings 以防覆蓋 Drive 上的正確設定")
     load_quiz_data()
     load_economy()
     load_stock_market()
@@ -9452,12 +9464,19 @@ async def on_message(message):
 async def token_log_loop():
     """Background task: post token usage to the AI log channel every 30 minutes."""
     await asyncio.sleep(120)
+    _first_check = True
     while True:
         try:
             log_channel_id = chat_ai_settings.get("log_channel_id")
             if not log_channel_id:
+                if _first_check:
+                    print(f"📊 Token Log: log_channel_id 未設定（值={log_channel_id!r}），跳過。請用 /chat log_channel 設定或從 dashboard 設定。")
+                    _first_check = False
                 await asyncio.sleep(1800)
                 continue
+            if _first_check:
+                print(f"📊 Token Log: log_channel_id={log_channel_id}，開始監控。")
+                _first_check = False
             log_ch = None
             for guild in bot.guilds:
                 ch = guild.get_channel(int(log_channel_id))
@@ -9465,7 +9484,7 @@ async def token_log_loop():
                     log_ch = ch
                     break
             if not log_ch:
-                print("⚠️ Token Log: Cannot find log channel")
+                print(f"⚠️ Token Log: 找不到頻道 ID {log_channel_id}（可能已刪除或 Bot 無權限），bot.guilds={len(bot.guilds)}")
                 await asyncio.sleep(1800)
                 continue
             today = datetime.now(GMT8).strftime("%Y-%m-%d")
