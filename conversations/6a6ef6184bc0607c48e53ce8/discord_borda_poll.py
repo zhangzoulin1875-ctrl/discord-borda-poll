@@ -8916,6 +8916,9 @@ async def _ww_begin_game(channel):
     """遊戲正式開始：分配角色、發 DM、開始夜晚。"""
     global _ww_state
 
+    # 遞增 game_id：讓舊局的殘留任務（等待中的 sleep、DM 面板等）在新局開始後立即失效
+    _ww_state["game_id"] = _ww_state.get("game_id", 0) + 1
+    _ww_log(f"Game starting, game_id={_ww_state['game_id']}")
     _ww_state["phase"] = "playing"
 
     # 鎖定報名按鈕
@@ -9138,6 +9141,9 @@ async def _ww_night_phase(channel):
         )
 
     await channel.send(embed=embed)
+
+    if _ww_state.get("game_id") != my_game_id:
+        return  # 本局已結束/被新局取代，靜默中止
 
     # 檢查勝負
     winner = _ww_check_win()
@@ -9598,6 +9604,8 @@ async def _ww_day_phase(channel):
 
     # 進入下一個夜晚
     await asyncio.sleep(3)
+    if _ww_state.get("game_id") != my_game_id:
+        return  # 等待期間本局已結束/被新局取代
     await _ww_night_phase(channel)
 
 
@@ -9706,8 +9714,10 @@ async def _ww_end_game(channel, winner: str):
         "votes": {},
         "log": [],
         "winner": None,
+        "discussion_suspects": {},
     }
     _ww_invite_msg_id = None
+    _ww_webhook_cache.clear()  # 清除 webhook 快取，下局會重新建立
 
     # 重新發送報名面板
     await asyncio.sleep(5)
@@ -9879,6 +9889,7 @@ class WerewolfGroup(app_commands.Group):
             "votes": {},
             "log": [],
             "winner": None,
+            "discussion_suspects": {},
         }
         _ww_invite_msg_id = None
 
