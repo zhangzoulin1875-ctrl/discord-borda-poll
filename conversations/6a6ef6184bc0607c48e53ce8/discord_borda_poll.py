@@ -4030,8 +4030,10 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
         if _diag_lines:
             # Join all diag lines, truncate to Discord's 1024-char field value limit
             _diag_text = "\n".join(_diag_lines)
-            if len(_diag_text) > 1020:
-                _diag_text = _diag_text[:1020] + "..."
+            # Reserve 8 chars for the "```\n" / "\n```" wrapper added below,
+            # so the final field value never exceeds Discord's 1024 limit.
+            if len(_diag_text) > 1010:
+                _diag_text = _diag_text[:1010] + "..."
             embed.add_field(
                 name="📋 API 診斷",
                 value="```\n" + _diag_text + "\n```",
@@ -4043,8 +4045,9 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
         _vision_lines = model_info.get("vision_diag", []) if model_info else []
         if _vision_lines:
             _vdiag_text = "\n".join(_vision_lines)
-            if len(_vdiag_text) > 1020:
-                _vdiag_text = _vdiag_text[:1020] + "..."
+            # Same 8-char wrapper reservation as the API diag field above.
+            if len(_vdiag_text) > 1010:
+                _vdiag_text = _vdiag_text[:1010] + "..."
             embed.add_field(
                 name="📷 識圖診斷",
                 value="```\n" + _vdiag_text + "\n```",
@@ -4054,8 +4057,28 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
         ch_name = channel_name or (message.channel.name if hasattr(message.channel, "name") else "?")
         _vision_tag = " | 識圖: 有" if _vision_lines else (" | 識圖: 無圖片" if not message.attachments else " | 識圖: 失敗")
         embed.set_footer(text=f"#{ch_name} | {_api_label} | 模型: {_model_name}{_vision_tag} | User ID: {author.id}")
-        await log_ch.send(embed=embed)
-        print(f"📝 對話紀錄已發送到 #{log_ch.name}（模型={_model_name}, {_api_label}, 診斷={len(_diag_lines)}筆）")
+        try:
+            await log_ch.send(embed=embed)
+            print(f"📝 對話紀錄已發送到 #{log_ch.name}（模型={_model_name}, {_api_label}, 診斷={len(_diag_lines)}筆）")
+        except discord.HTTPException as http_err:
+            # Defensive fallback: any embed validation error (e.g. a field
+            # exceeding Discord's length limits) must NOT lose the log entry
+            # entirely. Retry with a minimal embed (just the conversation,
+            # no diag fields) so the core record still gets through.
+            print(f"⚠️ 完整對話紀錄發送失敗（{http_err}），改用精簡版重試...")
+            try:
+                minimal_embed = discord.Embed(
+                    title="💬 AI 對話紀錄（精簡版 — 完整版超出長度限制）",
+                    color=_embed_color,
+                    timestamp=discord.utils.utcnow(),
+                )
+                minimal_embed.add_field(name=f"👤 {author.display_name}", value=f"> {user_text}", inline=False)
+                minimal_embed.add_field(name="🤖 AI 回覆", value=f"> {ai_text}", inline=False)
+                minimal_embed.set_footer(text=f"#{ch_name} | {_api_label} | 模型: {_model_name} | User ID: {author.id}")
+                await log_ch.send(embed=minimal_embed)
+                print(f"📝 精簡版對話紀錄已發送到 #{log_ch.name}")
+            except Exception as retry_err:
+                print(f"⚠️ 精簡版對話紀錄也發送失敗：{retry_err}")
     except discord.Forbidden:
         print(f"⚠️ 對話紀錄發送失敗：Bot 沒有在 #{getattr(log_ch, 'name', '?')} 發送訊息/嵌入的權限")
     except Exception as e:
