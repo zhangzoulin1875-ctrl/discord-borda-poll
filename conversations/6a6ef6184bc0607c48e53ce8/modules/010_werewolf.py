@@ -115,6 +115,7 @@ async def _ww_narrate(scene: str, extra: str = "") -> str:
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
         "model": chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
+        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
@@ -996,6 +997,7 @@ async def _ww_ai_discuss(ai_player: dict) -> tuple[str, str | None] | None:
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
         "model": chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
+        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")

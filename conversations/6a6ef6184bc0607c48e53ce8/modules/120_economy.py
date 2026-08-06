@@ -822,6 +822,10 @@ class EconomyGroup(app_commands.Group):
             "api_url": chat_ai_settings["api_url"],
             "api_key": chat_ai_settings["api_key"],
             "model": chat_ai_settings.get("fortune_model") or chat_ai_settings["model"],
+            # 娛樂功能不能用付費備援 API（留給行政功能），但仍應該走
+            # 「模型降級鏈」——同一組 API/Key 底下依序嘗試其他免費模型，
+            # 主模型偶發故障時不會直接判定失敗退款。
+            "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
         }
 
         messages = [{"role": "user", "content": prompt}]
@@ -840,6 +844,10 @@ class EconomyGroup(app_commands.Group):
             )
         except asyncio.TimeoutError:
             result = {"content": "", "error": "timeout"}
+
+        if not result.get("content") or result.get("circuit_open"):
+            print(f"⚠️ AI 占卜失敗：circuit_open={result.get('circuit_open')}, "
+                  f"error={result.get('error', '')[:150]}, diag={result.get('_diag')}")
 
         fortune_text = result.get("content", "").strip()
         if not fortune_text or result.get("circuit_open"):

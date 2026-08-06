@@ -119,6 +119,7 @@ async def _generate_turtle_soup(difficulty: str) -> tuple:
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
         "model": chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
+        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
@@ -208,6 +209,7 @@ async def _judge_turtle_soup_question(question: str, truth: str, qa_history: lis
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
         "model": chat_ai_settings["model"],
+        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
@@ -309,6 +311,7 @@ async def _generate_turtle_soup_hint(truth: str, qa_history: list, level: int = 
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
         "model": chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
+        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
