@@ -471,7 +471,7 @@ class StockTradeModal(discord.ui.Modal, title="股票交易"):
             embed.add_field(name="餘額", value=f"{get_balance(uid)} {currency_name()}", inline=True)
 
         save_stock_market()
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class CompanyCreateModal(discord.ui.Modal, title="創建公司"):
@@ -1116,7 +1116,7 @@ class StockGroup(app_commands.Group):
         if not success:
             await interaction.response.send_message(result, ephemeral=True)
             return
-        await interaction.response.send_message(embed=result)
+        await interaction.response.send_message(embed=result, ephemeral=True)
 
     @company.command(name="info", description="查看公司資訊")
     @app_commands.describe(name="公司名稱")
@@ -1125,7 +1125,7 @@ class StockGroup(app_commands.Group):
         if not co:
             await interaction.response.send_message(f"❌ 找不到公司「{name}」。", ephemeral=True)
             return
-        await interaction.response.send_message(embed=_build_company_info_embed(co))
+        await interaction.response.send_message(embed=_build_company_info_embed(co), ephemeral=True)
 
     @company.command(name="policy", description="設定公司政策（僅創辦人）")
     @app_commands.describe(name="公司名稱", policy="公司政策描述")
@@ -1157,14 +1157,14 @@ class StockGroup(app_commands.Group):
             timestamp=discord.utils.utcnow(),
         )
         embed.set_footer(text="政策將在下次開盤時影響股價")
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @company.command(name="list", description="列出所有公司")
     async def company_list(self, interaction: discord.Interaction):
         if not stock_companies:
             await interaction.response.send_message("目前沒有任何公司。", ephemeral=True)
             return
-        await interaction.response.send_message(embed=_build_company_list_embed())
+        await interaction.response.send_message(embed=_build_company_list_embed(), ephemeral=True)
 
     # ── 股票交易 ──
 
@@ -1176,7 +1176,7 @@ class StockGroup(app_commands.Group):
             return
         view = StockSelectView(str(interaction.user.id), "buy")
         embed = discord.Embed(title="📈 買入股票", description="請從下方選單選擇要買入的公司：", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="sell", description="賣出持股")
     async def stock_sell(self, interaction: discord.Interaction):
@@ -1186,7 +1186,7 @@ class StockGroup(app_commands.Group):
             return
         view = StockSelectView(str(interaction.user.id), "sell")
         embed = discord.Embed(title="📉 賣出股票", description="請從下方選單選擇要賣出的公司：", color=discord.Color.orange())
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="short", description="做空股票（借股賣出，賭股價下跌）")
     async def stock_short(self, interaction: discord.Interaction):
@@ -1196,7 +1196,7 @@ class StockGroup(app_commands.Group):
             return
         view = StockSelectView(str(interaction.user.id), "short")
         embed = discord.Embed(title="🩸 做空股票", description="請從下方選單選擇要做空的公司：\n⚠️ 做空有無限虧損風險", color=discord.Color.dark_orange())
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="cover", description="回補做空部位")
     async def stock_cover(self, interaction: discord.Interaction):
@@ -1206,7 +1206,7 @@ class StockGroup(app_commands.Group):
             return
         view = StockSelectView(str(interaction.user.id), "cover")
         embed = discord.Embed(title="🔁 回補做空", description="請從下方選單選擇要回補的公司：", color=discord.Color.green())
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     # ── 查詢 ──
 
@@ -1217,12 +1217,12 @@ class StockGroup(app_commands.Group):
         if not holdings:
             await interaction.response.send_message("你目前沒有任何股票持倉。", ephemeral=True)
             return
-        await interaction.response.send_message(embed=_build_portfolio_embed(interaction.user, uid))
+        await interaction.response.send_message(embed=_build_portfolio_embed(interaction.user, uid), ephemeral=True)
 
     @app_commands.command(name="market", description="查看股市總覽")
     async def stock_market_cmd(self, interaction: discord.Interaction):
         embed = _build_market_embed()
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="history", description="查看公司股價歷史")
     @app_commands.describe(name="公司名稱")
@@ -1251,4 +1251,4 @@ class StockGroup(app_commands.Group):
                 inline=False
             )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)

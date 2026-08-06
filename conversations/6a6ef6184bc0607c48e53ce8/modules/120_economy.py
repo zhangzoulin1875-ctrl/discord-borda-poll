@@ -428,7 +428,7 @@ class EconomyGroup(app_commands.Group):
             timestamp=discord.utils.utcnow(),
         )
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="pay", description="轉帳給其他成員")
     @app_commands.describe(user="收款人", amount="轉帳金額")
@@ -467,7 +467,7 @@ class EconomyGroup(app_commands.Group):
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow(),
             )
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message("❌ 轉帳失敗。", ephemeral=True)
 
@@ -495,7 +495,7 @@ class EconomyGroup(app_commands.Group):
             color=discord.Color.gold(),
             timestamp=discord.utils.utcnow(),
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="set_currency", description="更改貨幣名稱（僅擁有者）")
     @app_commands.describe(name="新幣名")
@@ -543,7 +543,7 @@ class EconomyGroup(app_commands.Group):
             prefix = medal[i] if i < 3 else f"`{i+1}.`"
             desc_lines.append(f"{prefix} **{name}** — {bal} {currency_name()}")
         embed.description = "\n".join(desc_lines) if desc_lines else "無資料"
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="daily", description="每日簽到領取獎勵")
     async def eco_daily(self, interaction: discord.Interaction):
@@ -573,7 +573,7 @@ class EconomyGroup(app_commands.Group):
             color=discord.Color.gold(),
             timestamp=discord.utils.utcnow(),
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="info", description="查看經濟系統資訊")
     async def eco_info(self, interaction: discord.Interaction):
@@ -588,7 +588,7 @@ class EconomyGroup(app_commands.Group):
         embed = _build_economy_info_embed()
         if is_owner(interaction):
             embed.set_footer(text="提示：使用 /economy set_info_channel 可設定固定看板頻道，之後會自動即時更新")
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="set_info_channel", description="設定經濟系統資訊看板的固定頻道（僅擁有者）")
     @app_commands.describe(channel="要固定顯示看板的頻道")
