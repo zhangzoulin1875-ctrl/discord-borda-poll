@@ -147,6 +147,7 @@ GMT8 = timezone(timedelta(hours=8))
 # (confusing — most of those servers have nothing to do with this bot), so
 # it's now hardcoded to skip straight to this one guild.
 ICEA_GUILD_ID = "1425065927027720286"
+GUILD_ID = int(ICEA_GUILD_ID)  # 整數形式，供模組使用
 
 
 # ──────────────────────────────────────────────
@@ -8402,7 +8403,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -8466,6 +8467,7 @@ async def setup_hook():
     save_chat_ai_settings()  # Create file if not exists
     load_quiz_data()
     load_economy()
+    load_stock_market()
     load_refine_settings()
     load_refine_knowledge()
     save_quiz_data()  # Create files if not exists
@@ -8499,6 +8501,7 @@ async def setup_hook():
     asyncio.ensure_future(community_chronicle_loop())
     asyncio.ensure_future(token_log_loop())
     asyncio.ensure_future(economy_panel_loop())  # 經濟系統看板：重啟自動清理廢棄面板+即時更新
+    asyncio.ensure_future(stock_market_loop())  # AI 股票市場：每2小時一回合
     # Load community awareness + chronicle data
     _load_community_awareness()
     _load_awareness_settings()

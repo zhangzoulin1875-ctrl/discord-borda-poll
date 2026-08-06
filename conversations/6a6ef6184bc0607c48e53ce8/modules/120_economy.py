@@ -225,6 +225,43 @@ def _build_economy_info_embed() -> "discord.Embed":
               "`/economy mint` 發錢(擁有者) | `/economy set_currency` 改幣名(擁有者)",
         inline=False
     )
+    # ── 股市摘要（顯示在經濟面板下方）──
+    try:
+        active_companies = {k: v for k, v in stock_companies.items() if v.get("status") == "active"}
+        if active_companies:
+            total_market_cap = sum(c["share_price"] * c["shares_outstanding"] for c in active_companies.values())
+            sorted_cos = sorted(active_companies.values(), key=lambda c: c["share_price"] * c["shares_outstanding"], reverse=True)
+            top3_lines = []
+            for co in sorted_cos[:3]:
+                cap = co["share_price"] * co["shares_outstanding"]
+                last_price = co.get("last_turn_price", co["share_price"])
+                change = ((co["share_price"] - last_price) / last_price * 100) if last_price > 0 else 0
+                arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+                top3_lines.append(f"{arrow} {co['name']} — {_format_price(co['share_price'])} 元（{change:+.1f}%）")
+
+            next_turn_text = ""
+            next_turn_str = stock_market.get("next_turn", "")
+            if next_turn_str:
+                from datetime import datetime as _dt
+                try:
+                    next_dt = _dt.fromisoformat(next_turn_str)
+                    now_dt = _dt.now(GMT8)
+                    remaining = (next_dt - now_dt).total_seconds()
+                    if remaining > 0:
+                        h, m = int(remaining // 3600), int((remaining % 3600) // 60)
+                        next_turn_text = f"\n⏰ 下次開盤：{h}h{m}m後 | 回合 {stock_market.get('turn', 0)}"
+                except Exception:
+                    pass
+
+            embed.add_field(
+                name="📈 股票市場",
+                value=f"市值總計：**{_format_price(total_market_cap)} {currency_name()}** | {len(active_companies)} 家公司{next_turn_text}\n"
+                      + "\n".join(top3_lines),
+                inline=False
+            )
+    except Exception as e:
+        print(f"⚠️ 經濟面板股市摘要失敗：{e}")
+
     embed.set_footer(text="此看板即時更新，反映最新經濟數據")
     return embed
 

@@ -1,0 +1,901 @@
+# ═══════════════════════════════════════════════════════════════════
+# Module: 130_stock_market
+# AI 股票/公司系統 — 每2小時一回合，AI判斷公司政策影響市值
+# ═══════════════════════════════════════════════════════════════════
+
+import random as _stock_random
+from datetime import datetime, timedelta
+
+# ── 狀態 ──
+STOCK_FILE = os.path.join(DATA_DIR, "stock_market.json")
+
+COMPANY_CREATE_COST = 5000       # 創建公司費用
+SHARES_PER_COMPANY = 1000         # 每家公司總股數
+FOUNDER_SHARES = 200              # 創辦人初始持股
+INITIAL_SHARE_PRICE = 50.0        # IPO 初始股價
+STOCK_TURN_HOURS = 2              # 每回合間隔（小時）
+BANKRUPT_THRESHOLD = 0.5          # 股價低於此值觸發破產清算
+
+# {company_id: {name, founder_id, founder_name, description, shares_outstanding,
+#   share_price, market_cap, policy, status, created_date, last_turn_price, history: []}}
+stock_companies = {}
+
+# {user_id_str: {company_id: {"long": int, "short": int, "avg_cost_long": float, "avg_cost_short": float}}}
+stock_holdings = {}
+
+# {turn: int, next_turn: "ISO datetime", history: [{turn, timestamp, events: [...]}]}
+stock_market = {"turn": 0, "next_turn": "", "history": []}
+
+# 隨機市場事件池
+MARKET_EVENTS = [
+    "全球經濟復甦，消費需求大增", "原材料價格暴漲，成本壓力上升",
+    "新技術突破帶來產業升級機會", "政府收緊監管，合規成本增加",
+    "主要競爭對手倒閉，市場份額擴大", "供應鏈中斷，生產受阻",
+    "品牌形象危機，消費者信任下降", "海外市場開拓成功，營收創新高",
+    "人才大量流失，研發能力受損", "獲得大筆投資，擴張加速",
+    "行業整體衰退，前景不明", "政策利好，稅收優惠落地",
+    "產品缺陷召回，面臨集體訴訟", "與巨頭達成戰略合作",
+    "內部管理混亂，高層人事震盪", "專利糾紛敗訴，核心技術受限",
+    "市場投機熱潮湧入，估值泡沫化", "通貨膨脹加劇，購買力下降",
+    "匯率劇烈波動，進出口受影響", "消費者偏好轉變，產品滯銷",
+]
+
+
+# ── 存檔/載入 ──
+def save_stock_market():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        data = {
+            "companies": stock_companies,
+            "holdings": stock_holdings,
+            "market": stock_market,
+        }
+        _save_json_file(STOCK_FILE, data)
+    except Exception as e:
+        print(f"⚠️ 股市存檔失敗：{e}")
+
+
+def load_stock_market():
+    global stock_companies, stock_holdings, stock_market
+    try:
+        if os.path.exists(STOCK_FILE):
+            with open(STOCK_FILE, "r", encoding="utf-8") as f:
+                data = json_module.loads(f.read())
+            if isinstance(data.get("companies"), dict):
+                stock_companies = data["companies"]
+            if isinstance(data.get("holdings"), dict):
+                stock_holdings = data["holdings"]
+            if isinstance(data.get("market"), dict):
+                stock_market = data["market"]
+            print(f"📈 股市系統已載入：{len(stock_companies)} 家公司，第 {stock_market.get('turn', 0)} 回合")
+    except Exception as e:
+        print(f"⚠️ 股市載入失敗（使用預設值）：{e}")
+
+
+# ── 核心函數 ──
+def _gen_company_id():
+    import time as _t
+    return f"co_{int(_t.time())}_{_stock_random.randint(100,999)}"
+
+
+def get_active_companies():
+    return {k: v for k, v in stock_companies.items() if v.get("status") == "active"}
+
+
+def get_company_by_name(name: str):
+    """模糊搜尋公司（不區分大小寫）。"""
+    name_lower = name.strip().lower()
+    for cid, co in stock_companies.items():
+        if co["name"].lower() == name_lower:
+            return cid, co
+    # 部分匹配
+    for cid, co in stock_companies.items():
+        if name_lower in co["name"].lower():
+            return cid, co
+    return None, None
+
+
+def get_user_holdings(user_id_str: str) -> dict:
+    return stock_holdings.get(user_id_str, {})
+
+
+def get_company_shareholders(company_id: str) -> list:
+    """取得持有某公司股票的所有用戶 ID。"""
+    result = []
+    for uid, holdings in stock_holdings.items():
+        if company_id in holdings:
+            pos = holdings[company_id]
+            if pos.get("long", 0) > 0 or pos.get("short", 0) > 0:
+                result.append((uid, pos))
+    return result
+
+
+def _format_price(price: float) -> str:
+    if price >= 10000:
+        return f"{price:,.0f}"
+    elif price >= 100:
+        return f"{price:.1f}"
+    else:
+        return f"{price:.2f}"
+
+
+def _build_market_embed():
+    """建構股市總覽 embed。"""
+    active = get_active_companies()
+    embed = discord.Embed(
+        title="📈 股票市場總覽",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow(),
+    )
+
+    if not active:
+        embed.description = "目前沒有活躍的公司。使用 `/stock company create` 創建第一家！"
+        return embed
+
+    # 按市值排序
+    sorted_cos = sorted(active.values(), key=lambda c: c["share_price"] * c["shares_outstanding"], reverse=True)
+
+    total_cap = sum(c["share_price"] * c["shares_outstanding"] for c in sorted_cos)
+
+    next_turn = stock_market.get("next_turn", "")
+    countdown = ""
+    if next_turn:
+        try:
+            next_dt = datetime.fromisoformat(next_turn)
+            now = datetime.now(GMT8)
+            remaining = next_dt - now
+            if remaining.total_seconds() > 0:
+                h, m = int(remaining.total_seconds() // 3600), int((remaining.total_seconds() % 3600) // 60)
+                countdown = f"\n⏰ 下次開盤：{h}小時{m}分鐘後"
+            else:
+                countdown = "\n⏰ 即將開盤…"
+        except Exception:
+            pass
+
+    embed.description = f"📊 總市值：**{_format_price(total_cap)} {currency_name()}**\n🏢 活躍公司：**{len(sorted_cos)}** 家\n🔢 回合：**{stock_market.get('turn', 0)}**{countdown}"
+
+    for co in sorted_cos[:10]:
+        cap = co["share_price"] * co["shares_outstanding"]
+        last_price = co.get("last_turn_price", co["share_price"])
+        change = ((co["share_price"] - last_price) / last_price * 100) if last_price > 0 else 0
+        arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
+        embed.add_field(
+            name=f"{co['name']}",
+            value=f"{arrow} {_format_price(co['share_price'])} 元/股（{change:+.1f}%）\n市值：{_format_price(cap)} | 政策：{co.get('policy', '未設定')}",
+            inline=False
+        )
+
+    embed.set_footer(text="使用 /stock buy 等指令進行交易")
+    return embed
+
+
+# ── 交易視圖（下拉選單 + Modal）──
+
+class StockTradeModal(discord.ui.Modal, title="股票交易"):
+    def __init__(self, company_id: str, company_name: str, price: float, trade_type: str, user_id_str: str):
+        super().__init__(timeout=60)
+        self.company_id = company_id
+        self.company_name = company_name
+        self.price = price
+        self.trade_type = trade_type  # buy / sell / short / cover
+        self.user_id_str = user_id_str
+        self.quantity_input = discord.ui.TextInput(
+            label=f"數量（當前價格 {_format_price(price)} 元/股）",
+            placeholder="輸入要交易的股數…",
+            required=True,
+            max_length=8,
+        )
+        self.add_item(self.quantity_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            qty = int(self.quantity_input.value)
+        except ValueError:
+            await interaction.response.send_message("❌ 請輸入有效的數字。", ephemeral=True)
+            return
+
+        if qty <= 0:
+            await interaction.response.send_message("❌ 數量必須大於 0。", ephemeral=True)
+            return
+
+        co = stock_companies.get(self.company_id)
+        if not co or co.get("status") != "active":
+            await interaction.response.send_message("❌ 此公司已不存在或已破產。", ephemeral=True)
+            return
+
+        cost = int(qty * co["share_price"])
+        uid = self.user_id_str
+        _ensure_user(uid, interaction.user.display_name)
+        user_holdings = stock_holdings.setdefault(uid, {})
+        pos = user_holdings.setdefault(self.company_id, {"long": 0, "short": 0, "avg_cost_long": 0.0, "avg_cost_short": 0.0})
+
+        if self.trade_type == "buy":
+            if get_balance(uid) < cost:
+                await interaction.response.send_message(f"❌ 餘額不足。需要 {cost} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
+                return
+            # 扣錢、加股
+            add_balance(uid, -cost, interaction.user.display_name)
+            new_total = pos["long"] + qty
+            pos["avg_cost_long"] = ((pos["avg_cost_long"] * pos["long"]) + (co["share_price"] * qty)) / new_total if new_total > 0 else 0
+            pos["long"] = new_total
+            embed = discord.Embed(title="✅ 買入成功", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+            embed.add_field(name="公司", value=self.company_name, inline=True)
+            embed.add_field(name="數量", value=f"{qty} 股", inline=True)
+            embed.add_field(name="成交價", value=f"{_format_price(co['share_price'])} 元/股", inline=True)
+            embed.add_field(name="總成本", value=f"{cost} {currency_name()}", inline=True)
+            embed.add_field(name="持有股數", value=f"{pos['long']} 股", inline=True)
+            embed.add_field(name="餘額", value=f"{get_balance(uid)} {currency_name()}", inline=True)
+
+        elif self.trade_type == "sell":
+            if pos["long"] < qty:
+                await interaction.response.send_message(f"❌ 你只持有 {pos['long']} 股，不足以賣出 {qty} 股。", ephemeral=True)
+                return
+            revenue = int(qty * co["share_price"])
+            add_balance(uid, revenue, interaction.user.display_name)
+            pos["long"] -= qty
+            if pos["long"] == 0:
+                pos["avg_cost_long"] = 0.0
+            embed = discord.Embed(title="✅ 賣出成功", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+            embed.add_field(name="公司", value=self.company_name, inline=True)
+            embed.add_field(name="數量", value=f"{qty} 股", inline=True)
+            embed.add_field(name="成交價", value=f"{_format_price(co['share_price'])} 元/股", inline=True)
+            embed.add_field(name="總收入", value=f"{revenue} {currency_name()}", inline=True)
+            embed.add_field(name="剩餘持股", value=f"{pos['long']} 股", inline=True)
+            embed.add_field(name="餘額", value=f"{get_balance(uid)} {currency_name()}", inline=True)
+
+        elif self.trade_type == "short":
+            #做空：借股賣出，先拿到錢，之後要回補
+            revenue = int(qty * co["share_price"])
+            add_balance(uid, revenue, interaction.user.display_name)
+            new_short = pos["short"] + qty
+            pos["avg_cost_short"] = ((pos["avg_cost_short"] * pos["short"]) + (co["share_price"] * qty)) / new_short if new_short > 0 else 0
+            pos["short"] = new_short
+            embed = discord.Embed(title="✅ 做空成功", color=discord.Color.orange(), timestamp=discord.utils.utcnow())
+            embed.add_field(name="公司", value=self.company_name, inline=True)
+            embed.add_field(name="做空數量", value=f"{qty} 股", inline=True)
+            embed.add_field(name="成交價", value=f"{_format_price(co['share_price'])} 元/股", inline=True)
+            embed.add_field(name="收到資金", value=f"{revenue} {currency_name()}", inline=True)
+            embed.add_field(name="做空部位", value=f"{pos['short']} 股", inline=True)
+            embed.add_field(name="餘額", value=f"{get_balance(uid)} {currency_name()}", inline=True)
+            embed.set_footer(text="⚠️ 做空有無限虧損風險，請及時回補")
+
+        elif self.trade_type == "cover":
+            if pos["short"] < qty:
+                await interaction.response.send_message(f"❌ 你只做空了 {pos['short']} 股，不足以回補 {qty} 股。", ephemeral=True)
+                return
+            pay = int(qty * co["share_price"])
+            if get_balance(uid) < pay:
+                await interaction.response.send_message(f"❌ 餘額不足。回補需要 {pay} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
+                return
+            add_balance(uid, -pay, interaction.user.display_name)
+            pos["short"] -= qty
+            if pos["short"] == 0:
+                pos["avg_cost_short"] = 0.0
+            embed = discord.Embed(title="✅ 回補成功", color=discord.Color.green(), timestamp=discord.utils.utcnow())
+            embed.add_field(name="公司", value=self.company_name, inline=True)
+            embed.add_field(name="回補數量", value=f"{qty} 股", inline=True)
+            embed.add_field(name="成交價", value=f"{_format_price(co['share_price'])} 元/股", inline=True)
+            embed.add_field(name="支付金額", value=f"{pay} {currency_name()}", inline=True)
+            embed.add_field(name="剩餘做空", value=f"{pos['short']} 股", inline=True)
+            embed.add_field(name="餘額", value=f"{get_balance(uid)} {currency_name()}", inline=True)
+
+        save_stock_market()
+        await interaction.response.send_message(embed=embed)
+
+
+class StockSelectView(discord.ui.View):
+    """公司下拉選單 — 選擇後彈出 Modal 輸入數量。"""
+
+    def __init__(self, user_id_str: str, trade_type: str):
+        super().__init__(timeout=60)
+        self.user_id_str = user_id_str
+        self.trade_type = trade_type
+
+        active = get_active_companies()
+        options = []
+        for cid, co in list(active.items())[:25]:  # Discord select 最多 25 個
+            cap = co["share_price"] * co["shares_outstanding"]
+            options.append(discord.SelectOption(
+                label=co["name"],
+                description=f"{_format_price(co['share_price'])} 元/股 | 市值 {_format_price(cap)} | {co.get('policy', '無政策')}",
+                value=cid,
+            ))
+
+        if options:
+            select = discord.ui.Select(placeholder="選擇要交易的公司…", options=options, min_values=1, max_values=1)
+            select.callback = self._on_select
+            self.add_item(select)
+        else:
+            # 沒有公司可選
+            pass
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != self.user_id_str:
+            await interaction.response.send_message("這不是你的交易面板！", ephemeral=True)
+            return
+
+        company_id = interaction.data["values"][0]
+        co = stock_companies.get(company_id)
+        if not co:
+            await interaction.response.send_message("❌ 公司已不存在。", ephemeral=True)
+            return
+
+        modal = StockTradeModal(company_id, co["name"], co["share_price"], self.trade_type, self.user_id_str)
+        await interaction.response.send_modal(modal)
+
+
+# ── AI 市場回合 ──
+
+async def _ai_evaluate_company(co: dict, company_id: str) -> dict:
+    """呼叫 AI 評估一家公司的股價變動。回傳 {price_change, event, bankrupt}。"""
+    # 隨機抽取 1-2 個市場事件
+    events = _stock_random.sample(MARKET_EVENTS, k=_stock_random.randint(1, 2))
+    event_text = "；".join(events)
+
+    # 歷史走勢（最近 5 回合）
+    history = co.get("history", [])[-5:]
+    history_text = " → ".join(f"{h['price']:.1f}" for h in history) if history else "無（新上市公司）"
+
+    prompt = f"""你是一個股票市場模擬器。根據以下公司資訊和市場事件，判斷股價變動。
+
+公司名稱：{co['name']}
+公司描述：{co.get('description', '未提供')}
+創辦人：{co.get('founder_name', '未知')}
+當前政策：{co.get('policy', '未設定')}
+當前股價：{co['share_price']:.2f} 元
+市值：{co['share_price'] * co['shares_outstanding']:.0f} 元
+歷史走勢（最近5回合）：{history_text}
+
+市場事件：{event_text}
+
+請根據公司政策與市場事件的交互作用，判斷本回合股價變動幅度。
+規則：
+- 漲跌幅範圍 -80% ~ +60%
+- 政策與事件配合良好可大漲，政策與事件衝突會大跌
+- 政策模糊或無作為通常小跌
+- 如果公司政策極度糟糕或連續嚴重虧損，可以判定破產（bankrupt=true）
+- 破產只在公司政策明顯有害或連續大幅下跌後才觸發，不要輕易破產
+
+只回傳 JSON 格式（不要加 markdown code block）：
+{{"price_change": -15.3, "event": "簡短的事件影響描述（一句話）", "bankrupt": false}}"""
+
+    messages = [
+        {"role": "system", "content": "你是一個股票市場模擬器，負責根據公司政策和市場事件評估股價變動。只回傳JSON。"},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        result = await call_chat_api(
+            messages, dict(chat_ai_settings),
+            max_tokens=300,
+            timeout_total=30,
+            timeout_read=25,
+            is_background=True,
+            fallback_mode="disabled",  # 娛樂功能，主API故障時停用
+            fallback_user_id="stock_market",
+        )
+        if result.get("circuit_open"):
+            print(f"⚠️ 股市AI：熔斷器開啟，使用隨機走勢")
+            return _random_market_move(co, event_text)
+
+        text = result.get("content", "").strip()
+        # 清理可能的 markdown code block
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        parsed = json_module.loads(text)
+        price_change = float(parsed.get("price_change", 0))
+        event = parsed.get("event", event_text)
+        bankrupt = bool(parsed.get("bankrupt", False))
+
+        # 限制範圍
+        price_change = max(-80, min(60, price_change))
+
+        return {"price_change": price_change, "event": event, "bankrupt": bankrupt}
+
+    except Exception as e:
+        print(f"⚠️ 股市AI評估失敗（{co['name']}）：{e}，使用隨機走勢")
+        return _random_market_move(co, event_text)
+
+
+def _random_market_move(co: dict, event_text: str) -> dict:
+    """AI 不可用時的隨機走勢（備援）。"""
+    # 根據政策給微弱傾向
+    policy = co.get("policy", "")
+    bias = 0
+    if any(k in policy for k in ["擴張", "進取", "積極", "創新"]):
+        bias = 5
+    elif any(k in policy for k in ["保守", "穩健", "防守"]):
+        bias = -2
+
+    change = _stock_random.gauss(bias, 15)
+    change = max(-50, min(40, change))
+    return {"price_change": change, "event": event_text, "bankrupt": False}
+
+
+async def process_stock_market_turn():
+    """處理一個股市回合：AI 評估所有活躍公司，更新股價，處理破產。"""
+    active = get_active_companies()
+    if not active:
+        return
+
+    turn = stock_market.get("turn", 0) + 1
+    events_log = []
+    bankruptcies = []
+
+    for company_id, co in active.items():
+        # AI 評估
+        result = await _ai_evaluate_company(co, company_id)
+        old_price = co["share_price"]
+        change_pct = result["price_change"]
+        new_price = old_price * (1 + change_pct / 100)
+        new_price = max(0.01, new_price)
+
+        co["last_turn_price"] = old_price
+        co["share_price"] = round(new_price, 2)
+        co["market_cap"] = round(new_price * co["shares_outstanding"], 2)
+
+        event_desc = result["event"]
+        co.setdefault("history", []).append({
+            "turn": turn,
+            "price": new_price,
+            "change_pct": change_pct,
+            "event": event_desc,
+        })
+        # 只保留最近 20 回合
+        if len(co["history"]) > 20:
+            co["history"] = co["history"][-20:]
+
+        events_log.append({
+            "company": co["name"],
+            "old_price": old_price,
+            "new_price": new_price,
+            "change_pct": change_pct,
+            "event": event_desc,
+        })
+
+        # 破產判定
+        if result["bankrupt"] or new_price < BANKRUPT_THRESHOLD:
+            bankruptcies.append((company_id, co))
+
+    # 處理破產
+    for company_id, co in bankruptcies:
+        co["status"] = "bankrupt"
+        co["share_price"] = 0
+        shareholders = get_company_shareholders(company_id)
+        # 通知所有人
+        for uid, pos in shareholders:
+            long_shares = pos.get("long", 0)
+            short_shares = pos.get("short", 0)
+            # 多頭部位清零
+            pos["long"] = 0
+            pos["avg_cost_long"] = 0.0
+            # 空頭部位：以破產前最後價格結算（實際上他們已經在高價賣出了，回補成本為0）
+            if short_shares > 0:
+                # 空頭利潤 = (做空均價 - 0) * short_shares，但錢已經在做空時拿到了
+                # 破產時回補成本為0，所以做空者不需要再付錢，部位清零
+                pos["short"] = 0
+                pos["avg_cost_short"] = 0.0
+
+            print(f"📉 破產清算：{co['name']} — 用戶 {uid} 多頭 {long_shares} 股歸零，空頭 {short_shares} 股歸零")
+
+        # 發通知
+        await _notify_bankruptcy(co, shareholders)
+
+    # 更新回合
+    stock_market["turn"] = turn
+    next_dt = datetime.now(GMT8) + timedelta(hours=STOCK_TURN_HOURS)
+    stock_market["next_turn"] = next_dt.isoformat()
+    stock_market.setdefault("history", []).append({
+        "turn": turn,
+        "timestamp": datetime.now(GMT8).isoformat(),
+        "events": [{"company": e["company"], "change_pct": e["change_pct"], "event": e["event"]} for e in events_log],
+    })
+    if len(stock_market.get("history", [])) > 50:
+        stock_market["history"] = stock_market["history"][-50:]
+
+    save_stock_market()
+
+    # 發送回合結果到頻道
+    await _post_turn_result(events_log, bankruptcies, turn)
+
+
+async def _notify_bankruptcy(co: dict, shareholders: list):
+    """通知創辦人和股東公司破產。"""
+    guild = bot.get_guild(int(ICEA_GUILD_ID))
+    if not guild:
+        return
+
+    embed = discord.Embed(
+        title="💀 公司破產清算",
+        description=(
+            f"**{co['name']}** 已宣告破產！\n\n"
+            f"📊 最終股價：0 元\n"
+            f"📉 所有持股歸零，做空部位以零成本平倉\n"
+            f"👤 創辦人：{co.get('founder_name', '未知')}\n"
+            f"📝 破產原因：{co.get('history', [{}])[-1].get('event', '經營失敗')}"
+        ),
+        color=discord.Color.dark_red(),
+        timestamp=discord.utils.utcnow(),
+    )
+
+    # 發到經濟面板頻道
+    panel_ch = _get_economy_panel_channel()
+    if panel_ch:
+        try:
+            await panel_ch.send(embed=embed)
+        except Exception:
+            pass
+
+    # 嘗試 DM 創辦人和股東
+    notify_ids = set()
+    notify_ids.add(co.get("founder_id", ""))
+    for uid, _ in shareholders:
+        notify_ids.add(uid)
+
+    for uid in notify_ids:
+        if not uid:
+            continue
+        try:
+            member = guild.get_member(int(uid))
+            if member:
+                await member.send(embed=embed)
+        except Exception:
+            pass  # DM 可能被關閉
+
+
+async def _post_turn_result(events_log: list, bankruptcies: list, turn: int):
+    """回合結束後發送市場動態。"""
+    panel_ch = _get_economy_panel_channel()
+    if not panel_ch:
+        return
+
+    embed = discord.Embed(
+        title=f"📊 第 {turn} 回合市場動態",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow(),
+    )
+
+    lines = []
+    for e in events_log[:15]:
+        arrow = "📈" if e["change_pct"] > 0 else "📉" if e["change_pct"] < 0 else "➡️"
+        lines.append(f"{arrow} **{e['company']}** {_format_price(e['new_price'])} 元（{e['change_pct']:+.1f}%）— {e['event']}")
+
+    embed.description = "\n".join(lines) if lines else "本回合無交易"
+
+    if bankruptcies:
+        embed.add_field(
+            name="💀 本回合破產",
+            value="\n".join(f"**{co['name']}**" for _, co in bankruptcies),
+            inline=False
+        )
+
+    try:
+        await panel_ch.send(embed=embed)
+    except Exception as e:
+        print(f"⚠️ 股市回合結果發送失敗：{e}")
+
+
+# ── 背景循環 ──
+
+async def stock_market_loop():
+    """每 2 小時執行一次股市回合。"""
+    await bot.wait_until_ready()
+    await asyncio.sleep(5)
+
+    # 啟動時若沒有下次回合時間，設定一個
+    if not stock_market.get("next_turn"):
+        next_dt = datetime.now(GMT8) + timedelta(hours=STOCK_TURN_HOURS)
+        stock_market["next_turn"] = next_dt.isoformat()
+        save_stock_market()
+
+    while True:
+        next_turn_str = stock_market.get("next_turn", "")
+        try:
+            next_dt = datetime.fromisoformat(next_turn_str)
+            now = datetime.now(GMT8)
+            wait_sec = (next_dt - now).total_seconds()
+            if wait_sec > 0:
+                await asyncio.sleep(min(wait_sec, 3600))  # 最多睡1小時再檢查
+                continue
+        except Exception:
+            next_dt = datetime.now(GMT8) + timedelta(hours=STOCK_TURN_HOURS)
+            stock_market["next_turn"] = next_dt.isoformat()
+            await asyncio.sleep(60)
+            continue
+
+        # 執行回合
+        try:
+            await process_stock_market_turn()
+            print(f"📈 股市第 {stock_market.get('turn', 0)} 回合完成")
+        except Exception as e:
+            print(f"⚠️ 股市回合執行失敗：{e}")
+            # 失敗也要設定下次回合時間
+            next_dt = datetime.now(GMT8) + timedelta(hours=STOCK_TURN_HOURS)
+            stock_market["next_turn"] = next_dt.isoformat()
+            save_stock_market()
+
+
+# ── 指令群組 ──
+
+class StockGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="stock", description="AI 股票公司系統")
+
+    # ── 公司管理 ──
+
+    company = app_commands.Group(name="company", description="公司管理")
+
+    @company.command(name="create", description="創建新公司（費用 5000 琉璃幣）")
+    @app_commands.describe(name="公司名稱", description="公司描述（一句話）")
+    async def company_create(self, interaction: discord.Interaction, name: str, description: str = ""):
+        uid = str(interaction.user.id)
+        _ensure_user(uid, interaction.user.display_name)
+
+        if get_balance(uid) < COMPANY_CREATE_COST:
+            await interaction.response.send_message(f"❌ 創建公司需要 {COMPANY_CREATE_COST} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
+            return
+
+        # 檢查名稱不重複
+        existing_cid, _ = get_company_by_name(name)
+        if existing_cid:
+            await interaction.response.send_message(f"❌ 公司名稱「{name}」已存在。", ephemeral=True)
+            return
+
+        name = name.strip()[:30]
+        if not name:
+            await interaction.response.send_message("❌ 公司名稱不可為空。", ephemeral=True)
+            return
+
+        # 扣錢、建公司
+        add_balance(uid, -COMPANY_CREATE_COST, interaction.user.display_name)
+        company_id = _gen_company_id()
+        stock_companies[company_id] = {
+            "name": name,
+            "founder_id": uid,
+            "founder_name": interaction.user.display_name,
+            "description": description.strip()[:200] if description else "未提供",
+            "shares_outstanding": SHARES_PER_COMPANY,
+            "share_price": INITIAL_SHARE_PRICE,
+            "market_cap": INITIAL_SHARE_PRICE * SHARES_PER_COMPANY,
+            "policy": "未設定",
+            "status": "active",
+            "created_date": datetime.now(GMT8).strftime("%Y-%m-%d"),
+            "last_turn_price": INITIAL_SHARE_PRICE,
+            "history": [],
+        }
+
+        # 創辦人獲得初始持股
+        stock_holdings.setdefault(uid, {})[company_id] = {
+            "long": FOUNDER_SHARES,
+            "short": 0,
+            "avg_cost_long": INITIAL_SHARE_PRICE,
+            "avg_cost_short": 0.0,
+        }
+
+        save_stock_market()
+
+        embed = discord.Embed(
+            title="🎉 公司成立！",
+            description=(
+                f"**{name}** 已成功上市！\n\n"
+                f"👤 創辦人：{interaction.user.mention}\n"
+                f"📝 描述：{description.strip()[:200] if description else '未提供'}\n"
+                f"📊 初始股價：{INITIAL_SHARE_PRICE} 元/股\n"
+                f"📊 總股數：{SHARES_PER_COMPANY} 股\n"
+                f"📈 創辦人持股：{FOUNDER_SHARES} 股（{FOUNDER_SHARES*100//SHARES_PER_COMPANY}%）\n"
+                f"💰 創建費用：{COMPANY_CREATE_COST} {currency_name()}\n"
+                f"💡 使用 `/stock company policy` 設定公司政策來影響股價"
+            ),
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        await interaction.response.send_message(embed=embed)
+
+    @company.command(name="info", description="查看公司資訊")
+    @app_commands.describe(name="公司名稱")
+    async def company_info(self, interaction: discord.Interaction, name: str):
+        cid, co = get_company_by_name(name)
+        if not co:
+            await interaction.response.send_message(f"❌ 找不到公司「{name}」。", ephemeral=True)
+            return
+
+        status_emoji = "🟢 活躍" if co.get("status") == "active" else "🔴 破產"
+        cap = co["share_price"] * co["shares_outstanding"]
+        last_price = co.get("last_turn_price", co["share_price"])
+        change = ((co["share_price"] - last_price) / last_price * 100) if last_price > 0 else 0
+
+        embed = discord.Embed(
+            title=f"🏢 {co['name']} {status_emoji}",
+            color=discord.Color.blue() if co.get("status") == "active" else discord.Color.dark_red(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="創辦人", value=co.get("founder_name", "未知"), inline=True)
+        embed.add_field(name="股價", value=f"{_format_price(co['share_price'])} 元/股（{change:+.1f}%）", inline=True)
+        embed.add_field(name="市值", value=f"{_format_price(cap)} {currency_name()}", inline=True)
+        embed.add_field(name="總股數", value=f"{co['shares_outstanding']} 股", inline=True)
+        embed.add_field(name="政策", value=co.get("policy", "未設定"), inline=True)
+        embed.add_field(name="成立日期", value=co.get("created_date", "未知"), inline=True)
+        embed.add_field(name="描述", value=co.get("description", "未提供"), inline=False)
+
+        # 最近走勢
+        history = co.get("history", [])[-5:]
+        if history:
+            trend = " → ".join(f"{h['price']:.1f}({h['change_pct']:+.0f}%)" for h in history)
+            embed.add_field(name="近期走勢", value=trend, inline=False)
+
+        embed.set_footer(text=f"使用 /stock buy 購買此公司股票")
+        await interaction.response.send_message(embed=embed)
+
+    @company.command(name="policy", description="設定公司政策（僅創辦人）")
+    @app_commands.describe(name="公司名稱", policy="公司政策描述")
+    async def company_policy(self, interaction: discord.Interaction, name: str, policy: str):
+        cid, co = get_company_by_name(name)
+        if not co:
+            await interaction.response.send_message(f"❌ 找不到公司「{name}」。", ephemeral=True)
+            return
+
+        if str(interaction.user.id) != co.get("founder_id"):
+            await interaction.response.send_message("❌ 只有公司創辦人可以設定政策。", ephemeral=True)
+            return
+
+        if co.get("status") != "active":
+            await interaction.response.send_message("❌ 已破產的公司無法設定政策。", ephemeral=True)
+            return
+
+        policy = policy.strip()[:500]
+        co["policy"] = policy
+        save_stock_market()
+
+        embed = discord.Embed(
+            title="📋 公司政策已更新",
+            description=f"**{co['name']}** 的政策已更新為：\n\n{policy}",
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_footer(text="政策將在下次開盤時影響股價")
+        await interaction.response.send_message(embed=embed)
+
+    @company.command(name="list", description="列出所有公司")
+    async def company_list(self, interaction: discord.Interaction):
+        if not stock_companies:
+            await interaction.response.send_message("目前沒有任何公司。", ephemeral=True)
+            return
+
+        embed = discord.Embed(title="📋 公司列表", color=discord.Color.blue(), timestamp=discord.utils.utcnow())
+        for cid, co in list(stock_companies.items())[:25]:
+            status = "🟢" if co.get("status") == "active" else "🔴"
+            cap = co["share_price"] * co["shares_outstanding"]
+            embed.add_field(
+                name=f"{status} {co['name']}",
+                value=f"股價 {_format_price(co['share_price'])} 元 | 市值 {_format_price(cap)} | 創辦人 {co.get('founder_name', '?')}",
+                inline=False
+            )
+        await interaction.response.send_message(embed=embed)
+
+    # ── 股票交易 ──
+
+    @app_commands.command(name="buy", description="買入股票（下拉選單選擇公司）")
+    async def stock_buy(self, interaction: discord.Interaction):
+        active = get_active_companies()
+        if not active:
+            await interaction.response.send_message("目前沒有可交易的活躍公司。", ephemeral=True)
+            return
+        view = StockSelectView(str(interaction.user.id), "buy")
+        embed = discord.Embed(title="📈 買入股票", description="請從下方選單選擇要買入的公司：", color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @app_commands.command(name="sell", description="賣出持股")
+    async def stock_sell(self, interaction: discord.Interaction):
+        active = get_active_companies()
+        if not active:
+            await interaction.response.send_message("目前沒有可交易的公司。", ephemeral=True)
+            return
+        view = StockSelectView(str(interaction.user.id), "sell")
+        embed = discord.Embed(title="📉 賣出股票", description="請從下方選單選擇要賣出的公司：", color=discord.Color.orange())
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @app_commands.command(name="short", description="做空股票（借股賣出，賭股價下跌）")
+    async def stock_short(self, interaction: discord.Interaction):
+        active = get_active_companies()
+        if not active:
+            await interaction.response.send_message("目前沒有可交易的公司。", ephemeral=True)
+            return
+        view = StockSelectView(str(interaction.user.id), "short")
+        embed = discord.Embed(title="🩸 做空股票", description="請從下方選單選擇要做空的公司：\n⚠️ 做空有無限虧損風險", color=discord.Color.dark_orange())
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @app_commands.command(name="cover", description="回補做空部位")
+    async def stock_cover(self, interaction: discord.Interaction):
+        active = get_active_companies()
+        if not active:
+            await interaction.response.send_message("目前沒有可交易的公司。", ephemeral=True)
+            return
+        view = StockSelectView(str(interaction.user.id), "cover")
+        embed = discord.Embed(title="🔁 回補做空", description="請從下方選單選擇要回補的公司：", color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, view=view)
+
+    # ── 查詢 ──
+
+    @app_commands.command(name="portfolio", description="查看你的投資組合")
+    async def stock_portfolio(self, interaction: discord.Interaction):
+        uid = str(interaction.user.id)
+        holdings = get_user_holdings(uid)
+        if not holdings:
+            await interaction.response.send_message("你目前沒有任何股票持倉。", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"📊 {interaction.user.display_name} 的投資組合",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+
+        total_value = 0
+        total_cost = 0
+        for cid, pos in holdings.items():
+            co = stock_companies.get(cid)
+            if not co:
+                continue
+            long_shares = pos.get("long", 0)
+            short_shares = pos.get("short", 0)
+            if long_shares == 0 and short_shares == 0:
+                continue
+
+            long_value = long_shares * co["share_price"]
+            long_cost = long_shares * pos.get("avg_cost_long", 0)
+            long_pnl = long_value - long_cost
+            total_value += long_value
+            total_cost += long_cost
+
+            lines = []
+            if long_shares > 0:
+                lines.append(f"📊 多頭 {long_shares} 股 | 均成本 {pos.get('avg_cost_long', 0):.1f} | 現值 {_format_price(long_value)} | 盈虧 {long_pnl:+.0f}")
+
+            if short_shares > 0:
+                short_value = short_shares * co["share_price"]
+                short_pnl = (pos.get("avg_cost_short", 0) - co["share_price"]) * short_shares
+                lines.append(f"🩸 空頭 {short_shares} 股 | 做空均價 {pos.get('avg_cost_short', 0):.1f} | 現值 {_format_price(short_value)} | 盈虧 {short_pnl:+.0f}")
+
+            embed.add_field(name=f"{'🟢' if co.get('status')=='active' else '🔴'} {co['name']}", value="\n".join(lines), inline=False)
+
+        embed.add_field(name="💰 總持倉現值", value=f"{_format_price(total_value)} {currency_name()}", inline=True)
+        embed.add_field(name="📊 總成本", value=f"{_format_price(total_cost)} {currency_name()}", inline=True)
+        embed.add_field(name="📈 總盈虧", value=f"{total_value - total_cost:+.0f} {currency_name()}", inline=True)
+        embed.add_field(name="💰 現金餘額", value=f"{get_balance(uid)} {currency_name()}", inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="market", description="查看股市總覽")
+    async def stock_market_cmd(self, interaction: discord.Interaction):
+        embed = _build_market_embed()
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="history", description="查看公司股價歷史")
+    @app_commands.describe(name="公司名稱")
+    async def stock_history(self, interaction: discord.Interaction, name: str):
+        cid, co = get_company_by_name(name)
+        if not co:
+            await interaction.response.send_message(f"❌ 找不到公司「{name}」。", ephemeral=True)
+            return
+
+        history = co.get("history", [])
+        if not history:
+            await interaction.response.send_message(f"**{co['name']}** 目前沒有歷史走勢記錄（可能剛上市）。", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"📈 {co['name']} 股價歷史",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+
+        for h in history[-15:]:
+            arrow = "📈" if h["change_pct"] > 0 else "📉" if h["change_pct"] < 0 else "➡️"
+            embed.add_field(
+                name=f"第 {h['turn']} 回合 {arrow}",
+                value=f"股價 {_format_price(h['price'])} 元（{h['change_pct']:+.1f}%）\n{h.get('event', '')}",
+                inline=False
+            )
+
+        await interaction.response.send_message(embed=embed)
