@@ -8402,7 +8402,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -8465,6 +8465,7 @@ async def setup_hook():
     load_chat_ai_settings()
     save_chat_ai_settings()  # Create file if not exists
     load_quiz_data()
+    load_economy()
     load_refine_settings()
     load_refine_knowledge()
     save_quiz_data()  # Create files if not exists

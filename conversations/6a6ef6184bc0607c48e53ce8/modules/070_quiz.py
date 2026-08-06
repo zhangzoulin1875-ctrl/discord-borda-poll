@@ -343,6 +343,13 @@ class QuizAnswerView(discord.ui.View):
             quiz_scores[user_id_str] = user_entry
             save_quiz_data()
 
+            # 經濟系統獎勵
+            try:
+                eco_reward, eco_new_bal = reward_quiz_correct(user_id_str, interaction.user.display_name)
+                eco_msg = f"💰 獲得 {eco_reward} {currency_name()}！（餘額：{eco_new_bal}）"
+            except Exception:
+                eco_msg = None
+
             # Update the active question
             quiz_active_questions[str(self.message_id)]["answered_by"] = user_id_str
 
@@ -350,9 +357,10 @@ class QuizAnswerView(discord.ui.View):
             embed = interaction.message.embeds[0] if interaction.message.embeds else None
             if embed:
                 embed.color = discord.Color.green()
+                eco_line = f"\n{eco_msg}" if eco_msg else ""
                 embed.add_field(
                     name="🎉 搶答成功！",
-                    value=f"**{interaction.user.display_name}** 最先答對，獲得 **5 分**！\n"
+                    value=f"**{interaction.user.display_name}** 最先答對，獲得 **5 分**！{eco_line}\n"
                           f"正確答案：**{'ABCD'[correct_index]}. {self.question_data['options'][correct_index]}**",
                     inline=False
                 )

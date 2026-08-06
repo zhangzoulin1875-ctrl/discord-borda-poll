@@ -963,7 +963,7 @@ async def _process_turtle_soup_question(message, question, user_id, user_name):
 
         # 檢查是否破案
         if answer == "答對了！恭喜破案！":
-            await _end_turtle_soup(message.channel, solved=True, winner=user_name)
+            await _end_turtle_soup(message.channel, solved=True, winner=user_name, winner_id=user_id)
             return
 
         # 檢查是否用完提問
@@ -1014,7 +1014,7 @@ async def _drain_turtle_soup_queue(channel):
             msg, next_item["question"], next_item["user_id"], next_item["user_name"]
         )
 
-async def _end_turtle_soup(channel, solved: bool, winner: str = None):
+async def _end_turtle_soup(channel, solved: bool, winner: str = None, winner_id: str = None):
     """結束海龜湯遊戲。"""
     global _turtle_soup_state
 
@@ -1025,7 +1025,15 @@ async def _end_turtle_soup(channel, solved: bool, winner: str = None):
     )
 
     if solved:
-        embed.add_field(name="🎉 破案者", value=winner, inline=False)
+        winner_display = winner
+        eco_reward_msg = ""
+        if winner_id:
+            try:
+                eco_reward, eco_new_bal = reward_turtle_soup_win(winner_id, winner)
+                eco_reward_msg = f"\n💰 破案獎勵：**{eco_reward} {currency_name()}**（餘額：{eco_new_bal}）"
+            except Exception as e:
+                print(f"⚠️ 海龜湯經濟獎勵失敗：{e}")
+        embed.add_field(name="🎉 破案者", value=f"{winner_display}{eco_reward_msg}", inline=False)
     else:
         embed.add_field(name="😔 无人破案", value="提問次數已用完或遊戲結束", inline=False)
 
