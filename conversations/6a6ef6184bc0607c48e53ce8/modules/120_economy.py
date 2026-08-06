@@ -259,6 +259,20 @@ def _build_economy_info_embed() -> "discord.Embed":
                       + "\n".join(top3_lines),
                 inline=False
             )
+
+        # ── 最新一回合市場動態（整合進主面板，不再另外發訊息）──
+        last_lines = stock_market.get("last_turn_lines")
+        if last_lines:
+            turn_no = stock_market.get("last_turn_number", "?")
+            dynamics_text = "\n".join(last_lines)
+            bankrupt_names = stock_market.get("last_turn_bankruptcies") or []
+            if bankrupt_names:
+                dynamics_text += "\n💀 本回合破產：" + "、".join(bankrupt_names)
+            embed.add_field(
+                name=f"📊 第 {turn_no} 回合市場動態",
+                value=dynamics_text[:1024],
+                inline=False
+            )
     except Exception as e:
         print(f"⚠️ 經濟面板股市摘要失敗：{e}")
 

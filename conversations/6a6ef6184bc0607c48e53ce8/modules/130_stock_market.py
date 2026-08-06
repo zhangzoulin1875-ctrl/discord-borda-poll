@@ -1002,13 +1002,8 @@ async def _notify_bankruptcy(co: dict, shareholders: list):
         timestamp=discord.utils.utcnow(),
     )
 
-    # 發到經濟面板頻道
-    panel_ch = _get_economy_panel_channel()
-    if panel_ch:
-        try:
-            await panel_ch.send(embed=embed)
-        except Exception:
-            pass
+    # 破產訊息已整合進「本回合市場動態」欄位顯示在經濟面板裡（見 _post_turn_result），
+    # 不再另外發一則佔用頻道版面；這裡只保留給創辦人/股東的個人私訊通知。
 
     # 嘗試 DM 創辦人和股東
     notify_ids = set()
@@ -1028,35 +1023,24 @@ async def _notify_bankruptcy(co: dict, shareholders: list):
 
 
 async def _post_turn_result(events_log: list, bankruptcies: list, turn: int):
-    """回合結束後發送市場動態。"""
-    panel_ch = _get_economy_panel_channel()
-    if not panel_ch:
-        return
-
-    embed = discord.Embed(
-        title=f"📊 第 {turn} 回合市場動態",
-        color=discord.Color.blue(),
-        timestamp=discord.utils.utcnow(),
-    )
-
+    """回合結束後不再單獨發訊息佔用頻道版面，改為把本回合動態存起來，
+    直接整合進經濟看板主面板顯示（跟其他經濟動態走同一套即時更新機制）。"""
     lines = []
-    for e in events_log[:15]:
+    for e in events_log[:10]:
         arrow = "📈" if e["change_pct"] > 0 else "📉" if e["change_pct"] < 0 else "➡️"
         lines.append(f"{arrow} **{e['company']}** {_format_price(e['new_price'])} 元（{e['change_pct']:+.1f}%）— {e['event']}")
 
-    embed.description = "\n".join(lines) if lines else "本回合無交易"
+    stock_market["last_turn_number"] = turn
+    stock_market["last_turn_lines"] = lines
+    stock_market["last_turn_bankruptcies"] = [co["name"] for _, co in bankruptcies]
+    stock_market["last_turn_time"] = datetime.now(GMT8).isoformat()
+    save_stock_market()
 
-    if bankruptcies:
-        embed.add_field(
-            name="💀 本回合破產",
-            value="\n".join(f"**{co['name']}**" for _, co in bankruptcies),
-            inline=False
-        )
-
+    # 立即刷新經濟看板主面板，讓本回合動態馬上顯示出來
     try:
-        await panel_ch.send(embed=embed)
+        await refresh_economy_panel()
     except Exception as e:
-        print(f"⚠️ 股市回合結果發送失敗：{e}")
+        print(f"⚠️ 股市回合結果更新看板失敗：{e}")
 
 
 # ── 背景循環 ──
