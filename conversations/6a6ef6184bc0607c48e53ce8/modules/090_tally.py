@@ -333,7 +333,7 @@ async def _run_forum_tally(thread: discord.Thread, manual_legend_str: str = "", 
             and len(found) != n_candidates
             and _looks_like_possible_ballot(content, found, legend)
         ):
-            ai_result = await _ai_judge_ballot(content, legend, n_candidates)
+            ai_result = await safe_judge_ballot(content, legend, n_candidates)
             if ai_result["is_vote"] and ai_result["complete"]:
                 found = ai_result["ranking"]
                 ai_recovered.append({

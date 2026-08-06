@@ -269,7 +269,7 @@ async def _process_new_proposal(message: discord.Message, channel):
     print(f"📋 偵測到新提案：#{channel.name} by {message.author.display_name}")
 
     # Analyze
-    analysis = await _analyze_proposal(message.content, channel.name)
+    analysis = await safe_analyze_proposal(message.content, channel.name)
 
     # Create proposal record
     now = _time.time()
@@ -960,7 +960,7 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
     need_vision_check = not field_status.get("申請目的與願景", False)
     need_profile_check = not field_status.get("國家簡介", False)
     if need_vision_check or need_profile_check:
-        essay_result = await _verify_application_essays(message.content)
+        essay_result = await safe_verify_application_essays(message.content)
         if need_vision_check:
             field_status["申請目的與願景"] = essay_result.get("vision", False)
         if need_profile_check:

@@ -3555,6 +3555,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                 msg["_used_fallback"] = _used_fallback
             if "_diag" not in msg:
                 msg["_diag"] = _diag
+            try: _record_api_outcome(True)
+            except: pass
             return msg
         # Empty result without exception — let fallback handle it
         break
@@ -3650,6 +3652,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                                 _fb_msg["_used_fallback"] = True
                                 _fb_msg["_diag"] = _diag + [f"✅ 備援 API 成功：{_fb_model or _fb_url}"]
                                 print(f"✅ 備援 API 成功！({_fb_msg.get('content', '')[:60]}...)")
+                                try: _record_api_outcome(True)
+                                except: pass
                                 return _fb_msg
                             else:
                                 _diag.append(f"⚠️ 備援 API 也失敗：{_fb_msg.get('error', 'unknown')[:80]}")
@@ -3668,8 +3672,12 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
             msg["_used_fallback"] = _used_fallback
         if "_diag" not in msg:
             msg["_diag"] = _diag
+        try: _record_api_outcome(bool(msg.get("content") or msg.get("tool_calls")))
+        except: pass
         return msg
     _diag.append(f"❌ 最終失敗：{str(last_exc)[:100] if last_exc else '逾時'}")
+    try: _record_api_outcome(False)
+    except: pass
     if last_exc:
         return {"content": "", "error": f"AI 回應逾時或失敗：{last_exc}", "_used_model": _used_model or settings.get("model", "?"), "_used_fallback": _used_fallback, "_diag": _diag}
     return {"content": "", "error": "AI 回應逾時", "_used_model": _used_model or settings.get("model", "?"), "_used_fallback": _used_fallback, "_diag": _diag}
