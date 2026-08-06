@@ -498,80 +498,8 @@ class ChatGroup(app_commands.Group):
         embed.add_field(name="微國家百科", value=f"{'✅' if micro_on else '❌'} (最多{micro_max}篇)", inline=True)
         vm = chat_ai_settings.get("vision_model", "")
         embed.add_field(name="視覺模型（識圖）", value=f"`{vm}`" if vm else "❌ 未設定", inline=True)
-        # Reasoning 模型設定
-        _re_admin = chat_ai_settings.get("reasoning_admin_effort", "medium")
-        _re_chat = chat_ai_settings.get("reasoning_chat_effort", "low")
-        _re_ent = chat_ai_settings.get("reasoning_entertainment_effort", "low")
-        _re_t_on = chat_ai_settings.get("reasoning_enabled_timeout", 90)
-        _re_t_off = chat_ai_settings.get("reasoning_disabled_timeout", 25)
-        _effort_emoji = {"none": "🚫", "low": "🐢", "medium": "🤔", "high": "🧠", "auto": "⚡"}
-        embed.add_field(
-            name="🧠 Reasoning 控制",
-            value=f"行政: {_effort_emoji.get(_re_admin,'?')} `{_re_admin}` | 聊天: {_effort_emoji.get(_re_chat,'?')} `{_re_chat}`\n娛樂: {_effort_emoji.get(_re_ent,'?')} `{_re_ent}` | 逾時: {_re_t_on}s/{_re_t_off}s",
-            inline=False
-        )
-        # Emergency fallback mode status
-        try:
-            _em_status = get_emergency_status()
-            if _em_status["active"]:
-                embed.add_field(
-                    name="🚨 緊急備援模式",
-                    value=f"**啟用中**（連續 {_em_status['consecutive_failures']} 次完全失敗）\n行政功能已切換至演算法備援",
-                    inline=False
-                )
-                embed.color = discord.Color.red()
-            else:
-                embed.add_field(
-                    name="🛡️ 緊急備援",
-                    value=f"待命（近期失敗：{_em_status['consecutive_failures']}/{_em_status['threshold']}）",
-                    inline=True
-                )
-        except Exception:
-            pass
-        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat micropedia | /chat vision_model | /chat debug | /chat reasoning")
+        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat micropedia | /chat vision_model | /chat debug")
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="reasoning", description="設定 reasoning 模型思考強度（機器人擁有者限定）")
-    @app_commands.describe(
-        level="思考強度等級",
-        category="套用範圍：行政功能/聊天/娛樂"
-    )
-    @app_commands.choices(level=[
-        app_commands.Choice(name="🚫 關閉（最快）", value="none"),
-        app_commands.Choice(name="🐢 低（速度優先）", value="low"),
-        app_commands.Choice(name="🤔 中（均衡）", value="medium"),
-        app_commands.Choice(name="🧠 高（品質優先）", value="high"),
-    ])
-    @app_commands.choices(category=[
-        app_commands.Choice(name="行政功能（提案/計票/入盟）", value="admin"),
-        app_commands.Choice(name="聊天功能", value="chat"),
-        app_commands.Choice(name="娛樂功能（海龜湯/狼人殺/占卜）", value="entertainment"),
-        app_commands.Choice(name="全部統一設定", value="all"),
-    ])
-    async def chat_reasoning(self, interaction: discord.Interaction, level: app_commands.Choice[str], category: app_commands.Choice[str] = None):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        _cat = category.value if category else "all"
-        _level = level.value
-        if _cat == "all":
-            chat_ai_settings["reasoning_admin_effort"] = _level
-            chat_ai_settings["reasoning_chat_effort"] = _level
-            chat_ai_settings["reasoning_entertainment_effort"] = _level
-        elif _cat == "admin":
-            chat_ai_settings["reasoning_admin_effort"] = _level
-        elif _cat == "chat":
-            chat_ai_settings["reasoning_chat_effort"] = _level
-        elif _cat == "entertainment":
-            chat_ai_settings["reasoning_entertainment_effort"] = _level
-        save_chat_ai_settings()
-        _names = {"none": "🚫 關閉", "low": "🐢 低", "medium": "🤔 中", "high": "🧠 高"}
-        _cat_names = {"admin": "行政", "chat": "聊天", "entertainment": "娛樂", "all": "全部"}
-        await interaction.response.send_message(
-            f"🧠 Reasoning 強度已設定：{_names.get(_level, _level)}（範圍：{_cat_names.get(_cat, _cat)}）\n"
-            f"逾時上限：{chat_ai_settings.get('reasoning_enabled_timeout', 90)}s（開啟）/ {chat_ai_settings.get('reasoning_disabled_timeout', 25)}s（關閉）",
-            ephemeral=True
-        )
 
     @app_commands.command(name="micropedia", description="開關微國家百科查詢功能（機器人擁有者限定）")
     @app_commands.describe(action="開啟或關閉", max_results="每次查詢最多抓取幾篇文章（1-10）")
