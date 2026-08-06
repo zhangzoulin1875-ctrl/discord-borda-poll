@@ -8498,6 +8498,7 @@ async def setup_hook():
     asyncio.ensure_future(community_awareness_loop())
     asyncio.ensure_future(community_chronicle_loop())
     asyncio.ensure_future(token_log_loop())
+    asyncio.ensure_future(economy_panel_loop())  # 經濟系統看板：重啟自動清理廢棄面板+即時更新
     # Load community awareness + chronicle data
     _load_community_awareness()
     _load_awareness_settings()

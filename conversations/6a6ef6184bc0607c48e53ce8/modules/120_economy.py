@@ -17,6 +17,8 @@ economy_settings = {
     "daily_bonus_min": 50,            # 每日簽到最低
     "daily_bonus_max": 100,           # 每日簽到最高
     "daily_top3": [50, 30, 20],       # 每日問答前三名額外獎勵
+    "info_channel_id": None,          # 經濟資訊看板固定頻道（擁有者設定）
+    "info_message_id": None,          # 看板目前的訊息 ID（用於即時編輯）
 }
 
 # {user_id_str: {"balance": int, "username": str, "last_daily": "YYYY-MM-DD"}}
@@ -24,6 +26,9 @@ economy_balances = {}
 
 # 每日問答排行 {date: {user_id_str: {"name": str, "correct": int}}}
 economy_quiz_daily = {"date": "", "scores": {}}
+
+# 經濟看板即時刷新的防抖動任務（避免短時間內多次餘額變動觸發多次編輯）
+_economy_panel_refresh_task = None
 
 
 # ── 存檔/載入 ──
@@ -39,6 +44,30 @@ def save_economy():
         _save_json_file(ECONOMY_FILE, data)
     except Exception as e:
         print(f"⚠️ 經濟系統存檔失敗：{e}")
+    _schedule_economy_panel_refresh()  # 資料有變動 → 排程即時更新看板
+
+
+def _schedule_economy_panel_refresh():
+    """事件驅動的看板即時更新：任何餘額變動後排程一次刷新（2秒防抖動，
+    避免短時間內連續多次變動（例如每日排行結算連續發獎）觸發多次 API 編輯）。"""
+    global _economy_panel_refresh_task
+    if not economy_settings.get("info_channel_id"):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # 沒有正在運行的事件循環（例如啟動載入階段），略過
+    if _economy_panel_refresh_task is not None and not _economy_panel_refresh_task.done():
+        return  # 已有排程中的刷新任務，之後會用最新資料執行
+    _economy_panel_refresh_task = loop.create_task(_debounced_economy_panel_refresh())
+
+
+async def _debounced_economy_panel_refresh():
+    await asyncio.sleep(2)
+    try:
+        await refresh_economy_panel()
+    except Exception as e:
+        print(f"⚠️ 經濟看板即時刷新失敗：{e}")
 
 
 def load_economy():
@@ -164,6 +193,135 @@ def reward_turtle_soup_win(user_id_str: str, username: str = ""):
     reward = economy_settings["turtle_soup_reward"]
     new_bal = add_balance(user_id_str, reward, username)
     return reward, new_bal
+
+
+# ── 經濟資訊看板（固定頻道、即時更新）──
+ECONOMY_PANEL_EMBED_TITLE_MARKER = "經濟系統"  # 用於掃描/辨識殘留看板訊息
+
+
+def _build_economy_info_embed() -> "discord.Embed":
+    """建構經濟系統資訊看板的 embed 內容（指令與固定看板共用）。"""
+    total = sum(u.get("balance", 0) for u in economy_balances.values())
+    embed = discord.Embed(
+        title=f"💰 {currency_name()} 經濟系統",
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="幣名", value=currency_name(), inline=True)
+    embed.add_field(name="用戶數", value=str(len(economy_balances)), inline=True)
+    embed.add_field(name="貨幣總量", value=f"{total} {currency_name()}", inline=True)
+    embed.add_field(name="新用戶初始", value=f"{economy_settings['starting_balance']} {currency_name()}", inline=True)
+    embed.add_field(name="問答獎勵", value=f"{economy_settings['quiz_reward']} {currency_name()}/題", inline=True)
+    embed.add_field(name="海龜湯獎勵", value=f"{economy_settings['turtle_soup_reward']} {currency_name()}/破案", inline=True)
+    embed.add_field(
+        name="每日排行獎勵",
+        value=f"🥇 {economy_settings['daily_top3'][0]} | 🥈 {economy_settings['daily_top3'][1]} | 🥉 {economy_settings['daily_top3'][2]} {currency_name()}",
+        inline=False
+    )
+    embed.add_field(
+        name="可用指令",
+        value="`/economy balance` 餘額 | `/economy pay` 轉帳 | `/economy daily` 簽到\n"
+              "`/economy leaderboard` 排行榜 | `/economy info` 資訊\n"
+              "`/economy mint` 發錢(擁有者) | `/economy set_currency` 改幣名(擁有者)",
+        inline=False
+    )
+    embed.set_footer(text="此看板即時更新，反映最新經濟數據")
+    return embed
+
+
+def _get_economy_panel_channel():
+    """取得目前設定的經濟看板頻道物件（若已設定且仍存在）。"""
+    ch_id = economy_settings.get("info_channel_id")
+    if not ch_id:
+        return None
+    for guild in bot.guilds:
+        ch = guild.get_channel(int(ch_id))
+        if ch:
+            return ch
+    return None
+
+
+async def setup_economy_panel():
+    """(重新)發送經濟看板到設定的頻道，並清除任何殘留/過期的舊看板訊息。
+    用於：擁有者設定頻道時，以及每次機器人重啟時（自動偵測廢棄面板刪掉重開）。"""
+    channel = _get_economy_panel_channel()
+    if not channel:
+        return None
+
+    # 1) 用儲存的 message_id 快速刪除舊看板
+    old_msg_id = economy_settings.get("info_message_id")
+    if old_msg_id:
+        try:
+            old_msg = await channel.fetch_message(int(old_msg_id))
+            await old_msg.delete()
+            print(f"🧹 已刪除舊的經濟看板訊息（ID: {old_msg_id}）")
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            print(f"⚠️ 刪除舊經濟看板失敗（by ID）：{e}")
+
+    # 2) 安全網：掃描頻道近期歷史，清除任何殘留/廢棄的看板訊息
+    #    （涵蓋 message_id 遺失、或曾經手動重複執行導致殘留多則的情況）
+    try:
+        async for msg in channel.history(limit=30):
+            if msg.author.id == bot.user.id and msg.embeds:
+                if msg.embeds[0].title and ECONOMY_PANEL_EMBED_TITLE_MARKER in msg.embeds[0].title:
+                    try:
+                        await msg.delete()
+                        print(f"🧹 已清除殘留的經濟看板訊息（ID: {msg.id}）")
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"⚠️ 掃描舊經濟看板失敗：{e}")
+
+    # 3) 發送全新的看板訊息
+    try:
+        new_msg = await channel.send(embed=_build_economy_info_embed())
+        economy_settings["info_message_id"] = new_msg.id
+        save_economy()
+        print(f"✅ 經濟看板已（重新）發送至 #{channel.name}（訊息 ID: {new_msg.id}）")
+        return new_msg
+    except Exception as e:
+        print(f"❌ 發送經濟看板失敗：{e}")
+        return None
+
+
+async def refresh_economy_panel():
+    """就地編輯現有的經濟看板訊息以反映最新資料；若訊息已不存在則重新發送。"""
+    channel = _get_economy_panel_channel()
+    if not channel:
+        return
+
+    msg_id = economy_settings.get("info_message_id")
+    if not msg_id:
+        await setup_economy_panel()
+        return
+
+    try:
+        msg = await channel.fetch_message(int(msg_id))
+        await msg.edit(embed=_build_economy_info_embed())
+    except discord.NotFound:
+        await setup_economy_panel()
+    except Exception as e:
+        print(f"⚠️ 更新經濟看板失敗：{e}")
+
+
+async def economy_panel_loop():
+    """經濟看板背景循環：機器人重啟時自動清除廢棄面板並重新發送一次；
+    之後每 60 秒兜底刷新一次（即時性主要由 save_economy() 觸發的事件驅動
+    更新負責，這裡只是保險，避免漏掉任何未經過 save_economy() 的變動）。"""
+    await bot.wait_until_ready()
+    await asyncio.sleep(3)  # 稍等其他啟動流程（頻道快取等）就緒
+    try:
+        await setup_economy_panel()
+    except Exception as e:
+        print(f"⚠️ 經濟看板啟動初始化失敗：{e}")
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await refresh_economy_panel()
+        except Exception as e:
+            print(f"⚠️ 經濟看板定期刷新失敗：{e}")
 
 
 # ── 事件：新成員加入 ──
@@ -357,28 +515,33 @@ class EconomyGroup(app_commands.Group):
 
     @app_commands.command(name="info", description="查看經濟系統資訊")
     async def eco_info(self, interaction: discord.Interaction):
-        total = sum(u.get("balance", 0) for u in economy_balances.values())
-        embed = discord.Embed(
-            title=f"💰 {currency_name()} 經濟系統",
-            color=discord.Color.gold(),
-            timestamp=discord.utils.utcnow(),
-        )
-        embed.add_field(name="幣名", value=currency_name(), inline=True)
-        embed.add_field(name="用戶數", value=str(len(economy_balances)), inline=True)
-        embed.add_field(name="貨幣總量", value=f"{total} {currency_name()}", inline=True)
-        embed.add_field(name="新用戶初始", value=f"{economy_settings['starting_balance']} {currency_name()}", inline=True)
-        embed.add_field(name="問答獎勵", value=f"{economy_settings['quiz_reward']} {currency_name()}/題", inline=True)
-        embed.add_field(name="海龜湯獎勵", value=f"{economy_settings['turtle_soup_reward']} {currency_name()}/破案", inline=True)
-        embed.add_field(
-            name="每日排行獎勵",
-            value=f"🥇 {economy_settings['daily_top3'][0]} | 🥈 {economy_settings['daily_top3'][1]} | 🥉 {economy_settings['daily_top3'][2]} {currency_name()}",
-            inline=False
-        )
-        embed.add_field(
-            name="可用指令",
-            value="`/economy balance` 餘額 | `/economy pay` 轉帳 | `/economy daily` 簽到\n"
-                  "`/economy leaderboard` 排行榜 | `/economy info` 資訊\n"
-                  "`/economy mint` 發錢(擁有者) | `/economy set_currency` 改幣名(擁有者)",
-            inline=False
-        )
+        panel_channel = _get_economy_panel_channel()
+        if panel_channel:
+            await interaction.response.send_message(
+                f"📌 經濟系統資訊看板已固定在 {panel_channel.mention}，會即時更新，前往查看即可！",
+                ephemeral=True
+            )
+            return
+        # 尚未設定固定看板頻道 → 直接顯示一次性資訊（僅擁有者看得到頻道設定提示）
+        embed = _build_economy_info_embed()
+        if is_owner(interaction):
+            embed.set_footer(text="提示：使用 /economy set_info_channel 可設定固定看板頻道，之後會自動即時更新")
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="set_info_channel", description="設定經濟系統資訊看板的固定頻道（僅擁有者）")
+    @app_commands.describe(channel="要固定顯示看板的頻道")
+    async def eco_set_info_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+
+        economy_settings["info_channel_id"] = channel.id
+        economy_settings["info_message_id"] = None  # 強制重新發送（清除舊頻道殘留的關聯）
+        save_economy()
+
+        await interaction.response.send_message(f"⏳ 正在於 {channel.mention} 設定經濟看板...", ephemeral=True)
+        new_msg = await setup_economy_panel()
+        if new_msg:
+            await interaction.followup.send(f"✅ 經濟看板已設定至 {channel.mention}，將即時更新。", ephemeral=True)
+        else:
+            await interaction.followup.send(f"⚠️ 看板設定已儲存，但發送失敗，請確認機器人在 {channel.mention} 有發言權限。", ephemeral=True)
