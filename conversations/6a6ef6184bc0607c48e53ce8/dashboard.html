@@ -481,6 +481,29 @@
 
       <button onclick="saveScheduleSettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm mb-4">💾 儲存排程設定</button>
 
+      <!-- 娛樂用 AI 模型選擇 -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">🎮 娛樂功能 AI 模型選擇</h3>
+        <p class="text-xs text-gray-400 mb-4">為每個遊戲單獨指定模型（使用同一個 API URL/Key，只是模型名不同）。留空 = 使用主模型。可選用更便宜/快速的模型來節省用量，或更強的模型來提升品質。</p>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">🧠 AI 搶答遊戲模型</label>
+            <input id="ai-quiz-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
+            <p class="text-xs text-gray-500 mt-1">用於生成搶答題目（micropedia 百科知識單選題）</p>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">🍜 AI 海龜湯模型</label>
+            <input id="ai-turtle-soup-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
+            <p class="text-xs text-gray-500 mt-1">用於生成湯底、判斷回答、生成提示</p>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">🐺 AI 狼人殺模型</label>
+            <input id="ai-werewolf-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
+            <p class="text-xs text-gray-500 mt-1">用於 AI 旁白、AI 玩家發言與策略判斷</p>
+          </div>
+        </div>
+      </div>
+
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
 
       <!-- API 連接測試 -->
@@ -954,6 +977,10 @@ async function showChatAIPanel() {
   document.getElementById('ai-turtle-soup-enabled').checked = s.turtle_soup_enabled || false;
   document.getElementById('ai-turtle-soup-channel').value = s.turtle_soup_channel_id || '';
   document.getElementById('ai-turtle-soup-difficulty').value = s.turtle_soup_difficulty || 'medium';
+  // 娛樂功能模型
+  document.getElementById('ai-quiz-model').value = s.quiz_model || '';
+  document.getElementById('ai-turtle-soup-model').value = s.turtle_soup_model || '';
+  document.getElementById('ai-werewolf-model').value = s.werewolf_model || '';
   // Fallback API
   document.getElementById('ai-fallback-enabled').checked = s.fallback_enabled || false;
   document.getElementById('ai-fallback-url').value = s.fallback_api_url || '';
@@ -1034,6 +1061,10 @@ async function saveChatAISettings() {
     entertainment_unavailable_msg: document.getElementById('ai-entertainment-unavailable-msg').value.trim(),
     circuit_cooldown_msg: document.getElementById('ai-circuit-cooldown-msg').value.trim(),
   };
+  // 娛樂功能模型
+  data.quiz_model = document.getElementById('ai-quiz-model').value.trim();
+  data.turtle_soup_model = document.getElementById('ai-turtle-soup-model').value.trim();
+  data.werewolf_model = document.getElementById('ai-werewolf-model').value.trim();
   // AI 網警
   data.ai_mod_enabled = document.getElementById('ai-mod-enabled').checked;
   data.ai_mod_model = document.getElementById('ai-mod-model').value.trim();

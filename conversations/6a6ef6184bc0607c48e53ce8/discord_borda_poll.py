@@ -1666,6 +1666,10 @@ chat_ai_settings = {
     # ── AI 網警：嚴重違規自動處置 ──
     "ai_mod_severe_enabled": False,       # 啟用嚴重違規自動刪除+警告
     "ai_mod_severe_rules": "",           # 嚴重違規判定規則（留空=用預設）
+    # ── 娛樂功能 AI 模型選擇（留空 = 用主模型）──
+    "quiz_model": "",                   # AI 搶答遊戲模型
+    "turtle_soup_model": "",             # AI 海龜湯模型
+    "werewolf_model": "",                # AI 狼人殺模型
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -7245,6 +7249,9 @@ async def api_get_chat_ai_settings(request):
         "ai_mod_exempt_roles": chat_ai_settings.get("ai_mod_exempt_roles", []),
         "ai_mod_severe_enabled": chat_ai_settings.get("ai_mod_severe_enabled", False),
         "ai_mod_severe_rules": chat_ai_settings.get("ai_mod_severe_rules", ""),
+        "quiz_model": chat_ai_settings.get("quiz_model", ""),
+        "turtle_soup_model": chat_ai_settings.get("turtle_soup_model", ""),
+        "werewolf_model": chat_ai_settings.get("werewolf_model", ""),
     })
 
 
@@ -7375,6 +7382,12 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["ai_mod_severe_enabled"] = bool(body["ai_mod_severe_enabled"])
     if "ai_mod_severe_rules" in body:
         chat_ai_settings["ai_mod_severe_rules"] = body["ai_mod_severe_rules"]
+    if "quiz_model" in body:
+        chat_ai_settings["quiz_model"] = body["quiz_model"]
+    if "turtle_soup_model" in body:
+        chat_ai_settings["turtle_soup_model"] = body["turtle_soup_model"]
+    if "werewolf_model" in body:
+        chat_ai_settings["werewolf_model"] = body["werewolf_model"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -8435,7 +8448,7 @@ async def _ww_narrate(scene: str, extra: str = "") -> str:
     settings = {
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
-        "model": chat_ai_settings["model"],
+        "model": chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
@@ -15253,8 +15266,10 @@ async def _generate_quiz_question() -> dict | None:
     ]
 
     try:
+        _quiz_settings = dict(chat_ai_settings)
+        _quiz_settings["model"] = chat_ai_settings.get("quiz_model") or chat_ai_settings["model"]
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings, max_tokens=600, fallback_mode="disabled"),
+            call_chat_api(messages, _quiz_settings, max_tokens=600, fallback_mode="disabled"),
             timeout=30
         )
     except asyncio.TimeoutError:
@@ -20463,7 +20478,7 @@ async def _generate_turtle_soup(difficulty: str) -> tuple:
     settings = {
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
-        "model": chat_ai_settings["model"],
+        "model": chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
@@ -20653,7 +20668,7 @@ async def _generate_turtle_soup_hint(truth: str, qa_history: list, level: int = 
     settings = {
         "api_url": chat_ai_settings["api_url"],
         "api_key": chat_ai_settings["api_key"],
-        "model": chat_ai_settings["model"],
+        "model": chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
         settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
