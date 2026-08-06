@@ -221,7 +221,7 @@ def _build_economy_info_embed() -> "discord.Embed":
     embed.add_field(
         name="可用指令",
         value="`/economy balance` 餘額 | `/economy pay` 轉帳 | `/economy daily` 簽到\n"
-              "`/economy leaderboard` 排行榜 | `/economy info` 資訊\n"
+              "`/economy leaderboard` 排行榜 | `/economy info` 資訊 | `/economy fortune` 🔮占卜\n"
               "`/economy mint` 發錢(擁有者) | `/economy set_currency` 改幣名(擁有者)",
         inline=False
     )
@@ -706,6 +706,189 @@ class EconomyGroup(app_commands.Group):
 
         view = RouletteConfirmView(user_id_str, bet, bullets)
         await interaction.response.send_message(embed=embed, view=view)
+
+
+    # ── AI 占卜 ──
+    _fortune_cooldowns = {}  # {user_id_str: last_play_timestamp}
+    FORTUNE_COST = 100
+    FORTUNE_COOLDOWN_SEC = 60  # 每人每次間隔 60 秒防止刷屏
+
+    @app_commands.command(name="fortune", description="🔮 AI 占卜 — 花費 100 琉璃幣，讓 AI 為你占卜命運")
+    @app_commands.describe(
+        user="占卜對象（預設：自己）",
+        user2="第二個對象（選填，占卜兩者之間的命運）"
+    )
+    async def eco_fortune(self, interaction: discord.Interaction, user: discord.Member = None, user2: discord.Member = None):
+        import time as _ftime
+
+        user_id_str = str(interaction.user.id)
+        _ensure_user(user_id_str, interaction.user.display_name)
+
+        # 冷卻檢查
+        now = _ftime.time()
+        last_play = EconomyGroup._fortune_cooldowns.get(user_id_str, 0)
+        if now - last_play < EconomyGroup.FORTUNE_COOLDOWN_SEC:
+            remaining = int(EconomyGroup.FORTUNE_COOLDOWN_SEC - (now - last_play))
+            await interaction.response.send_message(
+                f"🔮 水晶球還在冷卻中，等 {remaining} 秒再來。", ephemeral=True
+            )
+            return
+
+        # 餘額檢查
+        bal = get_balance(user_id_str)
+        if bal < EconomyGroup.FORTUNE_COST:
+            await interaction.response.send_message(
+                f"❌ 餘額不足。你只有 {bal} {currency_name()}，占卜需要 {EconomyGroup.FORTUNE_COST}。", ephemeral=True
+            )
+            return
+
+        # 確定占卜對象
+        target1 = user if user else interaction.user
+        target2 = user2
+
+        # 不允許佔自己+自己
+        if target2 and target2.id == target1.id:
+            await interaction.response.send_message("❌ 不能占卜同一個人兩次啦。", ephemeral=True)
+            return
+        if target1.bot or (target2 and target2.bot):
+            await interaction.response.send_message("❌ 機器人沒有命運可以占卜。", ephemeral=True)
+            return
+
+        # 扣款
+        add_balance(user_id_str, -EconomyGroup.FORTUNE_COST, interaction.user.display_name)
+        EconomyGroup._fortune_cooldowns[user_id_str] = now
+
+        # 先回應佔位訊息（AI 需要時間生成）
+        is_relationship = target2 is not None
+        if is_relationship:
+            title = f"🔮 {target1.display_name} 與 {target2.display_name} 的命運占卜"
+        else:
+            title = f"🔮 {target1.display_name} 的命運占卜"
+
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title=title,
+                description="水晶球正在凝聚能量…✨",
+                color=discord.Color.purple(),
+            )
+        )
+
+        # 收集上下文：用戶記憶
+        def _gather_context(uid_str, display_name):
+            mem = user_memories.get(uid_str, {})
+            facts = mem.get("facts", [])
+            interaction_count = mem.get("interaction_count", 0)
+            ctx_parts = [f"姓名：{display_name}"]
+            if interaction_count:
+                ctx_parts.append(f"與機器人互動次數：{interaction_count}")
+            if facts:
+                ctx_parts.append("已知資訊：" + "；".join(facts[:8]))
+            return "。".join(ctx_parts) if len(ctx_parts) > 1 else ctx_parts[0]
+
+        target1_ctx = _gather_context(str(target1.id), target1.display_name)
+        target2_ctx = _gather_context(str(target2.id), target2.display_name) if target2 else None
+
+        # 建構占卜 prompt
+        import random as _fortune_rng
+        fortune_types = ["塔羅", "星象", "易經卦象", "靈數", "咖啡渣"]
+        fortune_type = _fortune_rng.choice(fortune_types)
+        fortune_topics = ["事業", "財運", "感情", "人際關係", "健康", "未來一週", "隱藏的才能", "即將到來的轉機"]
+        fortune_topic = _fortune_rng.choice(fortune_topics)
+
+        if is_relationship:
+            prompt = (
+                f"你是一位神秘的占卜師，請用{fortune_type}的方式，為以下兩個人之間的關係進行占卜。\n\n"
+                f"占卜主題：{fortune_topic}\n"
+                f"對象一：{target1_ctx}\n"
+                f"對象二：{target2_ctx}\n\n"
+                f"請用幽默、神秘但友善的語氣，寫一段 200-400 字的占卜結果。"
+                f"可以根據他們的已知資訊做一些有趣的推測和聯想，但不要透露你是在看資料——要像真的在占卜一樣。"
+                f"開頭用占卜的儀式感引入，中間是解讀，結尾給一個有趣的「命運小提醒」。"
+                f"全部用中文，不要用 markdown 格式。"
+            )
+        else:
+            prompt = (
+                f"你是一位神秘的占卜師，請用{fortune_type}的方式，為以下對象進行占卜。\n\n"
+                f"占卜主題：{fortune_topic}\n"
+                f"對象：{target1_ctx}\n\n"
+                f"請用幽默、神秘但友善的語氣，寫一段 200-400 字的占卜結果。"
+                f"可以根據已知資訊做一些有趣的推測和聯想，但不要透露你是在看資料——要像真的在占卜一樣。"
+                f"開頭用占卜的儀式感引入，中間是解讀，結尾給一個有趣的「命運小提醒」。"
+                f"全部用中文，不要用 markdown 格式。"
+            )
+
+        # AI 呼叫（娛樂功能，fallback_mode=disabled）
+        settings = {
+            "api_url": chat_ai_settings["api_url"],
+            "api_key": chat_ai_settings["api_key"],
+            "model": chat_ai_settings.get("fortune_model") or chat_ai_settings["model"],
+        }
+
+        messages = [{"role": "user", "content": prompt}]
+
+        try:
+            result = await asyncio.wait_for(
+                call_chat_api(
+                    messages, settings,
+                    max_tokens=800,
+                    timeout_total=40,
+                    timeout_read=35,
+                    is_background=False,
+                    fallback_mode="disabled",
+                ),
+                timeout=45,
+            )
+        except asyncio.TimeoutError:
+            result = {"content": "", "error": "timeout"}
+
+        fortune_text = result.get("content", "").strip()
+        if not fortune_text or result.get("circuit_open"):
+            # 退款
+            add_balance(user_id_str, EconomyGroup.FORTUNE_COST, interaction.user.display_name)
+            del EconomyGroup._fortune_cooldowns[user_id_str]
+            await interaction.edit_original_response(embed=discord.Embed(
+                title=title,
+                description=_get_entertainment_unavailable_msg() + "\n💰 已退還占卜費用。",
+                color=discord.Color.red(),
+            ))
+            return
+
+        # 清理可能的 markdown
+        fortune_text = fortune_text.replace("**", "").replace("##", "").replace("`", "")
+
+        embed = discord.Embed(
+            title=title,
+            description=fortune_text[:4096],
+            color=discord.Color.purple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(
+            name="🔮 占卜資訊",
+            value=f"方式：{fortune_type} | 主題：{fortune_topic} | 費用：{EconomyGroup.FORTUNE_COST} {currency_name()}",
+            inline=False
+        )
+        if is_relationship:
+            embed.add_field(
+                name="👁️ 占卜對象",
+                value=f"{target1.mention} × {target2.mention}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="👁️ 占卜對象",
+                value=target1.mention,
+                inline=False
+            )
+        embed.set_footer(text="⚠️ 占卜結果僅供娛樂，請勿認真")
+
+        try:
+            await interaction.edit_original_response(embed=embed)
+        except Exception:
+            # 如果 edit 失敗（超時），嘗試 followup
+            try:
+                await interaction.followup.send(embed=embed)
+            except Exception:
+                pass
 
 
 # ── 俄羅斯轉盤 ──

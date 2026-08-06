@@ -1671,6 +1671,7 @@ chat_ai_settings = {
     "quiz_model": "",                   # AI 搶答遊戲模型
     "turtle_soup_model": "",             # AI 海龜湯模型
     "werewolf_model": "",                # AI 狼人殺模型
+    "fortune_model": "",                 # AI 占卜模型
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -7253,6 +7254,7 @@ async def api_get_chat_ai_settings(request):
         "quiz_model": chat_ai_settings.get("quiz_model", ""),
         "turtle_soup_model": chat_ai_settings.get("turtle_soup_model", ""),
         "werewolf_model": chat_ai_settings.get("werewolf_model", ""),
+        "fortune_model": chat_ai_settings.get("fortune_model", ""),
     })
 
 
@@ -7389,6 +7391,8 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["turtle_soup_model"] = body["turtle_soup_model"]
     if "werewolf_model" in body:
         chat_ai_settings["werewolf_model"] = body["werewolf_model"]
+    if "fortune_model" in body:
+        chat_ai_settings["fortune_model"] = body["fortune_model"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
