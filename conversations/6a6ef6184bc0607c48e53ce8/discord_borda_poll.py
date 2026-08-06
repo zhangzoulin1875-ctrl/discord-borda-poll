@@ -8889,9 +8889,9 @@ async def _ww_begin_game(channel):
             f"請盡快開啟「允許來自伺服器成員的私訊」，若收不到 DM 請私訊管理員協助。"
         )
 
-    # 補 AI 玩家
+    # 補 AI 玩家（以「目前總人數」為基準，避免測試模式已預先塞入的 AI 被重複疊加）
     real_players = [p for p in _ww_state["players"] if not p["is_ai"]]
-    ai_needed = 6 - len(real_players)
+    ai_needed = 6 - len(_ww_state["players"])
     if ai_needed > 0:
         ai_names = ["AI-老王", "AI-小美", "AI-阿哲", "AI-婷婷", "AI-大偉"]
         for i in range(ai_needed):
@@ -8918,13 +8918,14 @@ async def _ww_begin_game(channel):
     narrate = await _ww_narrate("遊戲開始，所有人抵達村莊，夜幕即將降臨")
     narrate_text = f"\n\n> {narrate}" if narrate else ""
 
+    ai_count = len([p for p in _ww_state["players"] if p["is_ai"]])
     embed = discord.Embed(
         title="🐺 狼人殺 · 遊戲開始！",
         description=(
             f"本局共 **{len(_ww_state['players'])} 人**"
-            f"（真人 {len(real_players)} + AI {ai_needed if ai_needed > 0 else 0}）\n\n"
+            f"（真人 {len(real_players)} + AI {ai_count}）\n\n"
             f"🎭 角色配置：2 狼人 + 1 預言家 + 3 村民\n\n"
-            "每個人的身分已透過 **僅自己可見的訊息** 發送，請查看你的 DM。{narrate_text}"
+            f"每個人的身分已透過 **僅自己可見的訊息** 發送，請查看你的 DM。{narrate_text}"
         ),
         color=discord.Color.dark_red(),
         timestamp=discord.utils.utcnow(),
@@ -9314,6 +9315,11 @@ async def _ww_day_phase(channel):
 
     _ww_state["phase_detail"] = "day_discuss"
 
+    # 提前計算存活玩家名單（討論發言與投票階段都需要用到）
+    alive = _ww_alive_players()
+    human_alive = [p for p in alive if not p["is_ai"]]
+    ai_alive = [p for p in alive if p["is_ai"]]
+
     embed = discord.Embed(
         title=f"💬 第 {_ww_state['day']} 天 · 討論時間",
         description=(
@@ -9340,10 +9346,6 @@ async def _ww_day_phase(channel):
     # 進入投票
     _ww_state["phase_detail"] = "day_vote"
     _ww_state["votes"] = {}
-
-    alive = _ww_alive_players()
-    human_alive = [p for p in alive if not p["is_ai"]]
-    ai_alive = [p for p in alive if p["is_ai"]]
 
     # 發送投票面板
     embed = discord.Embed(
