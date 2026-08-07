@@ -6642,12 +6642,18 @@ import re as _t2i_re
 
 # 生圖請求偵測關鍵詞（用於聊天自動偵測）
 _T2I_TRIGGERS = [
-    # 中文：明確的生圖指令
+    # 中文：明確的生圖指令（結尾要求出現「圖/圖片」字樣）
     r"(?:幫我|請)?畫一?(?:張|個|幅)?(.+)",
     r"生成一?(?:張|幅)?(.+?)(?:的)?圖(?:片)?",
     r"產生一?(?:張|幅)?(.+?)(?:的)?圖(?:片)?",
     r"製作一?(?:張|幅)?(.+?)(?:的)?圖(?:片)?",
     r"畫圖[：: ]+(.+)",
+    # 中文：用「張/幅」這種圖畫專用量詞時，不需要再出現「圖」字
+    # （例如「生成一張國旗」「製作一幅風景」——量詞本身已經暗示是圖像）
+    r"生成一?(?:張|幅)(.+)",
+    r"產生一?(?:張|幅)(.+)",
+    r"製作一?(?:張|幅)(.+)",
+    r"畫一?(?:張|幅)(.+)",
     # 英文
     r"draw (?:me )?(?:a |an |the )?(.+)",
     r"generate (?:a |an |the )?(.+?)(?:image|picture|pic)",
@@ -6665,6 +6671,12 @@ _T2I_NEGATIVE = [
 # T2I 冷卻追蹤
 _t2i_cooldowns: dict = {}  # user_id -> last_generation_timestamp
 _t2i_daily_usage: dict = {}  # user_id -> {date: count}
+
+# pollinations.ai 免費額度限制「同一 IP 同時只能有 1 個請求在跑」，多人同時 /draw
+# 或聊天觸發生圖時若同時送出會直接收到 HTTP 429 "Queue full (max: 1)"。
+# 用一個全域鎖把所有 pollinations 請求序列化（真正排隊送出，而不是同時搶著送），
+# 避免使用者看到 429 錯誤——代價是多人同時生圖時後面的人要多等一下（正常且預期）。
+_t2i_pollinations_lock = asyncio.Lock()
 
 def _check_t2i_rate_limit(user_id: str, settings: dict) -> tuple:
     """Check if user can generate an image. Returns (allowed, reason)."""
@@ -6785,39 +6797,55 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        try:
-            timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=100)
-            async with aiohttp.ClientSession(timeout=timeout) as sess:
-                async with sess.get(poll_url, params=params, headers=headers) as resp:
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        print(f"🎨 T2I (pollinations) 失敗 (HTTP {resp.status}): {err_text[:300]}")
-                        return {"success": False, "error": f"API 回應 HTTP {resp.status}: {err_text[:200]}"}
+        # pollinations 免費額度同時只允許 1 個請求在跑，用全域鎖排隊送出——
+        # 多人同時 /draw 時後面的人會在這裡等，而不是一起送出去互相 429。
+        # 另外保留 2 次 429 重試（隨機延遲），防範鎖之外仍偶發撞到限流的邊界情況
+        # （例如伺服器端還有其他來源共用同一組 IP 額度）。
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            async with _t2i_pollinations_lock:
+                try:
+                    timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=100)
+                    async with aiohttp.ClientSession(timeout=timeout) as sess:
+                        async with sess.get(poll_url, params=params, headers=headers) as resp:
+                            if resp.status == 429:
+                                err_text = await resp.text()
+                                print(f"🎨 T2I (pollinations) 429 限流 (第{attempt}次): {err_text[:200]}")
+                                should_retry = attempt < max_attempts
+                            elif resp.status != 200:
+                                err_text = await resp.text()
+                                print(f"🎨 T2I (pollinations) 失敗 (HTTP {resp.status}): {err_text[:300]}")
+                                return {"success": False, "error": f"API 回應 HTTP {resp.status}: {err_text[:200]}"}
+                            else:
+                                content_type = (resp.headers.get("Content-Type") or "").lower()
+                                image_bytes = await resp.read()
 
-                    content_type = (resp.headers.get("Content-Type") or "").lower()
-                    image_bytes = await resp.read()
+                                if not content_type.startswith("image/") and len(image_bytes) < 2000:
+                                    # 太小又不是圖片格式，八成是錯誤訊息本體
+                                    print(f"🎨 T2I (pollinations) 回應非圖片: {image_bytes[:300]}")
+                                    return {"success": False, "error": f"API 未回傳圖片: {image_bytes[:200]}"}
 
-                    if not content_type.startswith("image/") and len(image_bytes) < 2000:
-                        # 太小又不是圖片格式，八成是錯誤訊息本體
-                        print(f"🎨 T2I (pollinations) 回應非圖片: {image_bytes[:300]}")
-                        return {"success": False, "error": f"API 未回傳圖片: {image_bytes[:200]}"}
+                                ext = "jpg"
+                                if "png" in content_type:
+                                    ext = "png"
+                                elif "webp" in content_type:
+                                    ext = "webp"
+                                image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.{ext}")
+                                with open(image_path, "wb") as f:
+                                    f.write(image_bytes)
+                                print(f"🎨 T2I (pollinations) 成功: {prompt[:50]}... seed={seed}")
+                                return {"success": True, "image_path": image_path}
+                except asyncio.TimeoutError:
+                    return {"success": False, "error": "文生圖 API 逾時（超過 120 秒）"}
+                except Exception as e:
+                    print(f"🎨 T2I (pollinations) 異常: {type(e).__name__}: {e}")
+                    return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
 
-                    ext = "jpg"
-                    if "png" in content_type:
-                        ext = "png"
-                    elif "webp" in content_type:
-                        ext = "webp"
-                    image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.{ext}")
-                    with open(image_path, "wb") as f:
-                        f.write(image_bytes)
-                    print(f"🎨 T2I (pollinations) 成功: {prompt[:50]}... seed={seed}")
-                    return {"success": True, "image_path": image_path}
+            # 429 時鎖外等一下再重試（讓鎖釋放給其他排隊中的請求，且給伺服器端喘息時間）
+            if attempt < max_attempts:
+                await asyncio.sleep(1.5 * attempt + _random.random())
 
-        except asyncio.TimeoutError:
-            return {"success": False, "error": "文生圖 API 逾時（超過 120 秒）"}
-        except Exception as e:
-            print(f"🎨 T2I (pollinations) 異常: {type(e).__name__}: {e}")
-            return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
+        return {"success": False, "error": "文生圖 API 目前太忙（多次請求都被限流），請稍後再試"}
 
     # ══════════════════════════════════════════════════════════════
     # 分支 2：OpenAI 相容 POST /v1/images/generations
