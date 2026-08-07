@@ -17,8 +17,17 @@ INACTIVITY_DEMOTE_TURNS = 3   # 軍官/小隊長連續怠職超過此回合數�
 DEPOSIT_PER_PLAYER = 100     # 每人押金（琉璃幣）
 OFFICERS_PER_SIDE = 2
 SQUAD_LEADERS_PER_SIDE = 5
-ARTILLERY_COST = 500          # 每次砲擊/空襲花費
+ARTILLERY_COST = 500          # 每次砲擊/空襲花費（已廢棄，改用補給點數）
 MAX_ARTILLERY_PER_TURN = 2   # 每回合每方最多呼叫2次
+
+# ── 呼叫支援類型 ──
+_SUPPORT_TYPES = {
+    "artillery":   {"name": "砲擊",     "emoji": "💥", "cost": 3, "desc": "重型火砲覆蓋射擊敵方陣地"},
+    "air_raid":    {"name": "空襲",     "emoji": "✈️", "cost": 4, "desc": "早期飛機轟炸敵方集結點或補給線"},
+    "gas":         {"name": "毒氣",     "emoji": "🟢", "cost": 3, "desc": "釋放毒氣攻擊敵方壕溝，壓制敵軍"},
+    "smoke":       {"name": "煙幕掩護", "emoji": "💨", "cost": 2, "desc": "施放煙幕掩護我方進攻或撤退"},
+    "recon":       {"name": "空中偵查", "emoji": "🔭", "cost": 2, "desc": "偵察敵方陣地佈防與兵力部署"},
+}
 PROGRESS_WIN_THRESHOLD = 100 # 進度達100%即勝利
 MORALE_DEFEAT_THRESHOLD = 0  # 士氣降至0即敗北
 
@@ -667,7 +676,7 @@ class CyberWarPanelView(discord.ui.View):
 
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @discord.ui.button(label="呼叫砲擊", style=discord.ButtonStyle.danger, emoji="💥", custom_id="cw_artillery_btn")
+    @discord.ui.button(label="呼叫支援", style=discord.ButtonStyle.danger, emoji="💥", custom_id="cw_artillery_btn")
     async def artillery_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not _cyber_war_state.get("active"):
             await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
@@ -679,22 +688,24 @@ class CyberWarPanelView(discord.ui.View):
             return
         fkey, role, fac = info
         if role != "officer":
-            await interaction.response.send_message("❌ 只有軍官可以呼叫砲擊/空襲。", ephemeral=True)
+            await interaction.response.send_message("❌ 只有軍官可以呼叫支援。", ephemeral=True)
             return
 
         turn = str(_cyber_war_state.get("turn", 0))
         arty = _cyber_war_state.get("artillery", {}).setdefault(turn, {}).setdefault(fkey, [])
         if len(arty) >= MAX_ARTILLERY_PER_TURN:
-            await interaction.response.send_message(f"❌ 本回合砲擊/空襲已達上限（{MAX_ARTILLERY_PER_TURN}次）。", ephemeral=True)
+            await interaction.response.send_message(f"❌ 本回合呼叫支援已達上限（{MAX_ARTILLERY_PER_TURN}次）。", ephemeral=True)
             return
 
-        bal = get_balance(uid)
-        cost = ARTILLERY_COST
-        if bal < cost:
-            await interaction.response.send_message(f"❌ 琉璃幣不足。呼叫砲擊需要 {cost} {currency_name()}，你目前只有 {bal}。", ephemeral=True)
-            return
-
-        await interaction.response.send_modal(CyberWarArtilleryModal(uid, fkey, interaction.user.display_name, turn))
+        supply_pts = fac.get("supply_points", 0)
+        await interaction.response.send_message(
+            f"💥 **呼叫支援**\n"
+            f"⚡ 目前補給點數：**{supply_pts}**\n"
+            f"📅 本回合已呼叫：{len(arty)}/{MAX_ARTILLERY_PER_TURN}次\n\n"
+            f"請選擇支援類型：",
+            view=_SupportSelectView(uid, fkey, interaction.user.display_name, turn),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="管理行動", style=discord.ButtonStyle.secondary, emoji="🎖️", custom_id="cw_manage_btn")
     async def manage_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -898,7 +909,7 @@ class CyberWarPanelView(discord.ui.View):
             "本遊戲以第一次世界大戰（1914-1918）為背景。所有行動必須符合一戰時代的科技與戰術。\n\n"
             "🎭 **身分制度**\n"
             "開局所有人預設為**士兵**，可透過「🔄 換身分」按鈕升任：\n"
-            "  🎖️ **軍官**（每陣營2人）— 統籌全局，向所有小隊長發布統一指令，可呼叫砲擊/空襲\n"
+            "  🎖️ **軍官**（每陣營2人）— 統籌全局，向所有小隊長發布統一指令，可呼叫支援火力\n"
             "  📋 **小隊長**（每陣營6人，每軍官帶3人）— 執行軍官指令，向麾下8名士兵發布統一指令\n"
             "  🔫 **士兵**（四兵種平均分配）— 執行小隊長指令，提交行動\n\n"
             "🔫 **四兵種**\n"
@@ -909,7 +920,7 @@ class CyberWarPanelView(discord.ui.View):
             "📋 **各身分責任**\n"
             "**軍官**：\n"
             "  • 用「🎖️ 管理行動」向所有小隊長發布一條統一指令\n"
-            "  • 用「💥 呼叫砲擊」消耗琉璃幣進行火力支援\n"
+            "  • 用「💥 呼叫支援」消耗補給點數進行火力支援（砲擊/空襲/毒氣/煙幕/偵查）\n"
             "  • 連續3回合未發指令 → 自動降為士兵，釋出名額\n\n"
             "**小隊長**：\n"
             "  • 用「🎖️ 管理行動」向麾下士兵發布一條統一指令\n"
@@ -1081,60 +1092,9 @@ class _CWTestView(discord.ui.View):
         turn = s.get("turn", 1)
         turn_str = str(turn)
 
-        # 為所有未行動的玩家隨機生成一戰風格行動
-        _ww1_random_actions = [
-            "率領小隊向敵方壕溝發起衝鋒，利用手榴彈壓制敵軍火力點",
-            "在防線前沿挖掘新壕溝，加固鐵絲網與沙袋陣地",
-            "操作馬克沁機槍壓制敵方衝鋒步兵，掩護友軍撤退",
-            "趁夜色潛入無人區偵察敵軍佈防，繪製敵方陣地草圖",
-            "組織突擊小隊攜帶火焰噴射器清理敵方地道",
-            "在後方野戰醫院救治傷員，穩定重傷士兵狀況",
-            "冒著砲火將彈藥與口糧送到前沿陣地，補給即將耗盡的小隊",
-            "呼叫砲兵對敵方集結點進行覆蓋射擊，隨後發起步兵衝鋒",
-            "利用毒氣面罩防護，在芥子毒氣掩護下推進至敵方第二道防線",
-            "架設野戰電話線路，確保前線與指揮部的通訊暢通",
-            "派出偵察兵滲透敵後，搜集敵軍補給線與砲兵陣地位置",
-            "組織工兵爆破敵方地下坑道，阻止敵軍挖掘接近我方陣地",
-            "在戰壕轉角設置狙擊點，精準射殺敵方軍官與機槍手",
-            "率領騎兵繞到敵方側翼，襲擊其運輸車隊",
-            "操作迫擊炮轟擊敵方機槍巢，為步兵衝鋒開闢通道",
-        ]
-
-        for fkey in ("A", "B"):
-            fac = s["factions"][fkey]
-            actions = s.setdefault("actions", {}).setdefault(turn_str, {}).setdefault(fkey, {})
-            orders = s.get("orders", {}).get(turn_str, {}).get(fkey, {})
-
-            # 軍官：如果沒指令，隨機生成
-            for officer in fac.get("officers", []):
-                if officer["id"] not in actions and not orders.get(officer["id"]):
-                    orders[officer["id"]] = _cw_random.choice(_ww1_random_actions)
-            # 小隊長：如果沒指令，隨機生成
-            for sl in fac.get("squad_leaders", []):
-                if sl["id"] not in actions and not orders.get(sl["id"]):
-                    orders[sl["id"]] = _cw_random.choice(_ww1_random_actions)
-            # 士兵：如果沒行動，隨機生成
-            for soldier in fac.get("soldiers", []):
-                if soldier["id"] not in actions:
-                    spec = soldier.get("specialty", "")
-                    if spec == "突擊兵":
-                        pool = [a for a in _ww1_random_actions if "衝鋒" in a or "突擊" in a or "火焰" in a]
-                    elif spec == "醫療兵":
-                        pool = [a for a in _ww1_random_actions if "救治" in a or "醫" in a]
-                    elif spec == "支援兵":
-                        pool = [a for a in _ww1_random_actions if "補給" in a or "彈藥" in a or "口糧" in a]
-                    elif spec == "偵查兵":
-                        pool = [a for a in _ww1_random_actions if "偵察" in a or "偵查" in a or "滲透" in a or "偵" in a]
-                    else:
-                        pool = _ww1_random_actions
-                    actions[soldier["id"]] = _cw_random.choice(pool if pool else _ww1_random_actions)
-
-            # 確保 orders 存回
-            s.setdefault("orders", {}).setdefault(turn_str, {})[fkey] = orders
-
         save_cyber_war()
         await interaction.edit_original_response(
-            content=f"⏩ 已為所有玩家隨機生成行動，正在執行第{turn}回合AI結算...",
+            content=f"⏩ 正在執行第{turn}回合AI結算（僅依據已下達的軍官指令與玩家行動）...",
             view=None
         )
 
@@ -1645,6 +1605,124 @@ class CyberWarOrderModal(discord.ui.Modal, title="🎖️ 發布統一指令"):
         )
 
 # ── 砲擊輸入 Modal ──
+class _SupportSelectView(discord.ui.View):
+    """呼叫支援子面板 — 5種支援類型，消耗補給點數。"""
+    def __init__(self, officer_uid, fkey, officer_name, turn_str):
+        super().__init__(timeout=300)
+        self.officer_uid = officer_uid
+        self.fkey = fkey
+        self.officer_name = officer_name
+        self.turn_str = turn_str
+
+    def _get_fac(self):
+        return _cyber_war_state.get("factions", {}).get(self.fkey, {})
+
+    def _check_and_open_modal(self, interaction, support_type):
+        fac = self._get_fac()
+        info = _SUPPORT_TYPES.get(support_type, {})
+        cost = info.get("cost", 0)
+        supply_pts = fac.get("supply_points", 0)
+        if supply_pts < cost:
+            return False, None
+        return True, cost
+
+    async def _do_support(self, interaction, support_type):
+        fac = self._get_fac()
+        info = _SUPPORT_TYPES.get(support_type, {})
+        cost = info.get("cost", 0)
+        supply_pts = fac.get("supply_points", 0)
+        if supply_pts < cost:
+            await interaction.response.edit_message(
+                content=f"❌ 補給點數不足。{info['emoji']} {info['name']}需要{cost}點，你只有{supply_pts}點。",
+                view=self,
+            )
+            return
+        # 扣點
+        fac["supply_points"] = supply_pts - cost
+        save_cyber_war()
+        await interaction.response.send_modal(
+            CyberWarSupportModal(self.officer_uid, self.fkey, self.officer_name, self.turn_str, support_type)
+        )
+
+    @discord.ui.button(label="砲擊(3點)", style=discord.ButtonStyle.danger, emoji="💥", custom_id="cw_sup_arty")
+    async def sup_arty(self, interaction, button):
+        await self._do_support(interaction, "artillery")
+
+    @discord.ui.button(label="空襲(4點)", style=discord.ButtonStyle.danger, emoji="✈️", custom_id="cw_sup_air")
+    async def sup_air(self, interaction, button):
+        await self._do_support(interaction, "air_raid")
+
+    @discord.ui.button(label="毒氣(3點)", style=discord.ButtonStyle.success, emoji="🟢", custom_id="cw_sup_gas")
+    async def sup_gas(self, interaction, button):
+        await self._do_support(interaction, "gas")
+
+    @discord.ui.button(label="煙幕(2點)", style=discord.ButtonStyle.secondary, emoji="💨", custom_id="cw_sup_smoke")
+    async def sup_smoke(self, interaction, button):
+        await self._do_support(interaction, "smoke")
+
+    @discord.ui.button(label="偵查(2點)", style=discord.ButtonStyle.primary, emoji="🔭", custom_id="cw_sup_recon")
+    async def sup_recon(self, interaction, button):
+        await self._do_support(interaction, "recon")
+
+
+class CyberWarSupportModal(discord.ui.Modal, title="💥 呼叫支援"):
+    target_text = discord.ui.TextInput(
+        label="目標/方向",
+        style=discord.TextStyle.short,
+        placeholder="例如：敵方右翼陣地 / 敵方補給線 / 敵方指揮所",
+        required=True,
+        max_length=200,
+    )
+    strategy_text = discord.ui.TextInput(
+        label="戰術描述（可選）",
+        style=discord.TextStyle.paragraph,
+        placeholder="描述你的支援策略...",
+        required=False,
+        max_length=300,
+    )
+
+    def __init__(self, officer_uid, fkey, officer_name, turn_str, support_type):
+        self.officer_uid = officer_uid
+        self.fkey = fkey
+        self.officer_name = officer_name
+        self.turn_str = turn_str
+        self.support_type = support_type
+        sup = _SUPPORT_TYPES.get(support_type, {})
+        self.title = f"{sup.get('emoji','💥')} 呼叫{sup.get('name','支援')}"
+        super().__init__()
+
+    async def on_submit(self, interaction: discord.Interaction):
+        target = self.target_text.value.strip()
+        strategy = self.strategy_text.value.strip() or "無"
+        sup = _SUPPORT_TYPES.get(self.support_type, {})
+        cost = sup.get("cost", 0)
+        sup_name = sup.get("name", "支援")
+        sup_emoji = sup.get("emoji", "💥")
+
+        arty = _cyber_war_state.setdefault("artillery", {}).setdefault(self.turn_str, {}).setdefault(self.fkey, [])
+        arty.append({
+            "officer_uid": self.officer_uid,
+            "officer_name": self.officer_name,
+            "type": self.support_type,
+            "type_name": sup_name,
+            "target": target,
+            "strategy": strategy,
+            "cost": cost,
+        })
+        save_cyber_war()
+        try:
+            await refresh_war_panel()
+        except Exception:
+            pass
+        fac = _cyber_war_state.get("factions", {}).get(self.fkey, {})
+        await interaction.response.send_message(
+            f"{sup_emoji} **{sup_name}**已呼叫！\n"
+            f"目標：{target}\n"
+            f"消耗補給點數：{cost}點（剩餘{fac.get('supply_points',0)}點）",
+            ephemeral=True,
+        )
+
+
 class CyberWarArtilleryModal(discord.ui.Modal, title="💥 呼叫砲擊/空襲"):
     target_text = discord.ui.TextInput(
         label="攻擊目標/方向",
@@ -1859,9 +1937,10 @@ async def _ai_evaluate_turn(turn: int):
 
         arty = artillery.get(fkey, [])
         if arty:
-            lines.append("  砲擊/空襲：")
+            lines.append("  呼叫支援：")
             for at in arty:
-                lines.append(f"    → 目標：{at['target']}（{at.get('strategy', '')[:80]}）")
+                sup_name = at.get("type_name", at.get("type", "支援"))
+                lines.append(f"    → [{sup_name}] 目標：{at['target']}（{at.get('strategy', '')[:80]}）")
         if not lines:
             lines.append("  （無行動）")
         return "\n".join(lines)
@@ -1897,7 +1976,7 @@ async def _ai_evaluate_turn(turn: int):
         "合法的一戰行動範例：步兵衝鋒、壕溝戰、砲兵轟擊、毒氣攻擊、早期飛機偵察/轟炸、\n"
         "  騎兵突襲、地下坑道爆破、海上封鎖、潛艇攻擊、宣傳戰、情報收集等。\n\n"
         "其他判定規則：\n"
-        "考慮因素：行動的具體性、與上級指令的一致性、砲擊效果、補給消耗等。\n"
+        "考慮因素：行動的具體性、與上級指令的一致性、支援火力效果（砲擊/空襲/毒氣/煙幕/偵查各有不同效果）、補給消耗等。\n"
         "注意：標註〔服從小隊長/軍官指令〕的行動表示該玩家本人未提交行動，由上級統一指令代為執行，效果權重應低於玩家親自撰寫的行動。\n"
         "兵種特性：突擊兵進攻加成、醫療兵減少傷亡/恢復士氣、支援兵提供補給、偵查兵降低敵方突襲效果。\n"
         "陣地影響：\n"
