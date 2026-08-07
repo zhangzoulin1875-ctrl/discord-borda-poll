@@ -2754,6 +2754,11 @@ def save_chat_ai_settings():
     try:
         os.makedirs(os.path.dirname(CHAT_AI_DATA_FILE), exist_ok=True)
         _save_json_file(CHAT_AI_DATA_FILE, chat_ai_settings, indent=None)
+        # 立即同步到 Drive（不等 60 秒週期迴圈），避免重啟/重新部署時競態遺失資料
+        try:
+            asyncio.ensure_future(_immediate_drive_upload("chat_ai_settings.json"))
+        except RuntimeError:
+            pass  # 沒有 running event loop（例如同步呼叫路徑），週期迴圈仍會補上
     except Exception as e:
         print(f"⚠️ Failed to save chat AI settings: {e}")
 
@@ -7363,6 +7368,33 @@ async def sync_to_drive():
     elif ok_count > 0:
         print(f"✅ Drive 同步完成：{ok_count} 上傳，{skip_count} 跳過（共 {len(json_filenames)} 個檔案）")
     # If everything was skipped, stay quiet — no point spamming logs every 20s
+
+
+async def _immediate_drive_upload(filename: str):
+    """立即上傳單一檔案到 Drive（fire-and-forget，不等待週期性同步迴圈）。
+    用於關鍵設定變更後（如 chat_ai_settings.json），避免「剛存檔→伺服器碰巧
+    重啟/重新部署→尚未同步到 Drive→重啟時從 Drive 拉回舊資料覆蓋掉」的競態，
+    這正是 AI 池資料在使用者換瀏覽器/重啟後消失的根因：本地檔案寫入是同步的，
+    但 Drive 上傳要等最多 60 秒的週期迴圈，如果這段時間內容器重啟，
+    load_from_drive() 會用 Drive 上的舊版本蓋掉本地剛存的新資料。"""
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") and not os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"):
+        return
+    try:
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        filepath = os.path.join(data_dir, filename)
+        if not os.path.exists(filepath):
+            return
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+        success = await _drive_upload(filename, content)
+        if success:
+            import hashlib as _hashlib
+            _drive_file_hashes[filename] = _hashlib.md5(content.encode("utf-8")).hexdigest()
+            print(f"✅ 即時同步 {filename} 到 Drive 成功")
+        else:
+            print(f"⚠️ 即時同步 {filename} 到 Drive 失敗（將由週期迴圈補上）")
+    except Exception as e:
+        print(f"⚠️ 即時同步 {filename} 例外：{e}（將由週期迴圈補上）")
 
 
 async def load_from_drive():
