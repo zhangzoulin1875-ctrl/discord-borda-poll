@@ -1001,9 +1001,11 @@ class _CWTestView(discord.ui.View):
 
     @discord.ui.button(label="調整進度差>30%", style=discord.ButtonStyle.danger, emoji="⚖️", custom_id="cw_test_gap")
     async def force_gap(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 先立即回應（3秒內），避免 Discord 互動超時
+        await interaction.response.defer()
         s = _cyber_war_state
         if not s.get("active"):
-            await interaction.response.edit_message(content="❌ 戰局已結束。", view=None)
+            await interaction.edit_original_response(content="❌ 戰局已結束。", view=None)
             return
 
         fac_a = s["factions"]["A"]
@@ -1033,7 +1035,7 @@ class _CWTestView(discord.ui.View):
             msg += f"💀 {fac_b['name']} 的巨獸已被摧毀，無法再次部署"
         else:
             msg += "⚠️ 未觸發部署（可能巨獸已存在或已被摧毀，該局限一台）"
-        await interaction.response.edit_message(content=msg, view=None)
+        await interaction.edit_original_response(content=msg, view=None)
 
     @discord.ui.button(label="查看巨獸狀態", style=discord.ButtonStyle.secondary, emoji="🦾", custom_id="cw_test_beast")
     async def beast_status(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1062,12 +1064,14 @@ class _CWTestView(discord.ui.View):
     @discord.ui.button(label="立刻部署巨獸", style=discord.ButtonStyle.danger, emoji="🦾", custom_id="cw_test_deploy_beast")
     async def deploy_beast(self, interaction: discord.Interaction, button: discord.ui.Button):
         """直接部署戰爭巨獸到弱勢方（不需要調整進度差，也不需要等回合結算）。"""
+        # 先立即回應（3秒內），避免 Discord 互動超時
+        await interaction.response.defer()
         s = _cyber_war_state
         if not s.get("active"):
-            await interaction.response.edit_message(content="❌ 戰局已結束。", view=None)
+            await interaction.edit_original_response(content="❌ 戰局已結束。", view=None)
             return
         if s.get("winner"):
-            await interaction.response.edit_message(content="❌ 戰局已分出勝負。", view=None)
+            await interaction.edit_original_response(content="❌ 戰局已分出勝負。", view=None)
             return
 
         fac_a = s["factions"]["A"]
@@ -1089,13 +1093,13 @@ class _CWTestView(discord.ui.View):
 
         if wb and not wb.get("destroyed"):
             beast_name = _WAR_BEASTS.get(wb.get("type", ""), {}).get("name", "?")
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"⚠️ {wf['flag']} {wf['name']} 已有巨獸：{beast_name}（HP:{wb.get('hp',0)}），每方限一台。",
                 view=None
             )
             return
         if wb_destroyed:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"💀 {wf['flag']} {wf['name']} 的巨獸已被摧毀，無法再次部署。",
                 view=None
             )
@@ -1115,7 +1119,7 @@ class _CWTestView(discord.ui.View):
         save_cyber_war()
         await refresh_war_panel()
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=f"🦾 **已立刻部署戰爭巨獸！**\n"
                     f"  弱勢方：{wf['flag']} {wf['name']}（進度{a_prog if weaker == 'A' else b_prog}% vs 對方{b_prog if weaker == 'A' else a_prog}%）\n"
                     f"  巨獸：{beast_info['emoji']} {beast_info['name']}（HP:{WAR_BEAST_HP}）\n"
@@ -1209,6 +1213,8 @@ class _RoleSwitchView(discord.ui.View):
         self._fkey = fkey
 
     async def _on_select(self, interaction: discord.Interaction):
+        # 先立即回應（3秒內），避免 Discord 互動超時
+        await interaction.response.defer()
         try:
             val = self._select.values[0]
             if ":" in val:
@@ -1216,11 +1222,13 @@ class _RoleSwitchView(discord.ui.View):
             else:
                 new_role, specialty = val, ""
             ok, msg = _switch_role(self._uid, new_role, specialty)
-            await interaction.response.edit_message(content=msg, view=None)
+            await interaction.edit_original_response(content=msg, view=None)
         except Exception as e:
             print(f"⚠️ 賽博一戰換身分失敗：{e}")
-            if not interaction.response.is_done():
-                await interaction.response.edit_message(content=f"❌ 切換失敗：{e}", view=None)
+            try:
+                await interaction.edit_original_response(content=f"❌ 切換失敗：{e}", view=None)
+            except Exception:
+                pass
 
 # ── 下注 Modal ──
 class CyberWarBetModal(discord.ui.Modal, title="💰 下注 / 追加 / 撤回"):
@@ -1863,6 +1871,10 @@ async def _process_turn_end():
         if s.get("phase") == "processing":
             s["turn"] = turn + 1
             s["phase"] = "command"
+            # 第一回合結束後鎖定押金（即使是例外路徑也要鎖定！）
+            if turn == 1:
+                s["deposits_locked"] = True
+                s["total_deposits"] = sum(d.get("amount", 0) for d in s.get("deposits", {}).values())
             now = datetime.now(_TZ)
             next = now + timedelta(hours=s.get("turn_interval_hours", TURN_INTERVAL_HOURS))
             s["next_turn_time"] = next.isoformat()
