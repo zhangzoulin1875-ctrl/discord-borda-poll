@@ -12,7 +12,7 @@ CYBER_WAR_FILE = os.path.join(DATA_DIR, "cyber_war_data.json")
 
 # ── 常量 ──
 GAME_DURATION_DAYS = 3
-TURN_INTERVAL_HOURS = 8       # 每回合 8 小時 → 3天共9回合
+TURN_INTERVAL_HOURS = 1       # 每回合 1 小時 → 3天共72回合
 DEPOSIT_PER_PLAYER = 100     # 每人押金（琉璃幣）
 OFFICERS_PER_SIDE = 2
 SQUAD_LEADERS_PER_SIDE = 5
@@ -22,23 +22,30 @@ PROGRESS_WIN_THRESHOLD = 100 # 進度達100%即勝利
 MORALE_DEFEAT_THRESHOLD = 0  # 士氣降至0即敗北
 
 # ── 陣營 & 戰場 ──
-# 德國固定為一方，對手隨機
-_FACTION_OPPONENTS = [
-    ("英國", "UK", "🇬🇧"),
-    ("法國", "FR", "🇫🇷"),
-    ("美國", "US", "🇺🇸"),
-    ("俄國", "RU", "🇷🇺"),
-    ("義大利", "IT", "🇮🇹"),
-    ("日本", "JP", "🇯🇵"),
-    ("鄂圖曼帝國", "OT", "🇹🇷"),
-    ("奧匈帝國", "AH", "🇦🇹"),
-]
-_FACTION_GERMANY = ("德國", "DE", "🇩🇪")
-
-_BATTLEFIELDS = [
-    "索姆河", "馬恩河", "凡爾登", "伊普爾", "坦能堡",
-    "加里波利", "卡波雷托", "帕森達勒", "康布雷", "聖米耶爾",
-    "加札", "洛林", "亞眠", "香檳", "戈里斯",
+# 歷史正確配對：每個戰場對應當時實際交戰的雙方
+_BATTLE_SCENARIOS = [
+    # 西線
+    ("索姆河",   ("德國", "DE", "🇩🇪"), ("英國", "UK", "🇬🇧")),
+    ("索姆河",   ("德國", "DE", "🇩🇪"), ("法國", "FR", "🇫🇷")),
+    ("馬恩河",   ("德國", "DE", "🇩🇪"), ("法國", "FR", "🇫🇷")),
+    ("馬恩河",   ("德國", "DE", "🇩🇪"), ("英國", "UK", "🇬🇧")),
+    ("凡爾登",   ("德國", "DE", "🇩🇪"), ("法國", "FR", "🇫🇷")),
+    ("伊普爾",   ("德國", "DE", "🇩🇪"), ("英國", "UK", "🇬🇧")),
+    ("帕森達勒", ("德國", "DE", "🇩🇪"), ("英國", "UK", "🇬🇧")),
+    ("康布雷",   ("德國", "DE", "🇩🇪"), ("英國", "UK", "🇬🇧")),
+    ("聖米耶爾", ("德國", "DE", "🇩🇪"), ("美國", "US", "🇺🇸")),
+    ("亞眠",     ("德國", "DE", "🇩🇪"), ("法國", "FR", "🇫🇷")),
+    ("香檳",     ("德國", "DE", "🇩🇪"), ("法國", "FR", "🇫🇷")),
+    ("洛林",     ("德國", "DE", "🇩🇪"), ("法國", "FR", "🇫🇷")),
+    # 東線
+    ("坦能堡",   ("德國", "DE", "🇩🇪"), ("俄國", "RU", "🇷🇺")),
+    ("戈里斯",   ("德國", "DE", "🇩🇪"), ("俄國", "RU", "🇷🇺")),
+    # 義大利戰線
+    ("卡波雷托", ("德國", "DE", "🇩🇪"), ("義大利", "IT", "🇮🇹")),
+    # 其他戰線（增加多樣性）
+    ("加里波利", ("英國", "UK", "🇬🇧"), ("鄂圖曼帝國", "OT", "🇹🇷")),
+    ("加札",     ("英國", "UK", "🇬🇧"), ("鄂圖曼帝國", "OT", "🇹🇷")),
+    ("伊松佐",   ("義大利", "IT", "🇮🇹"), ("奧匈帝國", "AH", "🇦🇹")),
 ]
 
 # ── 設定 & 狀態 ──
@@ -70,6 +77,8 @@ _cyber_war_state = {
 }
 
 _ROLE_NAMES = {"officer": "軍官", "squad_leader": "小隊長", "soldier": "士兵"}
+_SOLDIER_SPECIALTIES = ["突擊兵", "醫療兵", "支援兵", "偵查兵"]
+_SPECIALTY_EMOJI = {"突擊兵": "🔫", "醫療兵": "💊", "支援兵": "🔧", "偵查兵": "🔭", "士兵": "🎖️"}
 
 # ── 持久化 ──
 def save_cyber_war():
@@ -99,6 +108,51 @@ def load_cyber_war():
             print(f"⚔️ 賽博一戰資料已載入（active={_cyber_war_state.get('active')}）")
     except Exception as e:
         print(f"⚠️ 載入賽博一戰資料失敗：{e}")
+
+def _switch_role(uid_str: str, new_role: str, specialty: str = ""):
+    """切換玩家角色。回傳 (success, message)。"""
+    if not _cyber_war_state.get("active"):
+        return False, "目前沒有進行中的戰局。"
+    info = _get_player_role(uid_str)
+    if not info:
+        return False, "你不在本局參戰名單中。"
+    fkey, current_role, fac = info
+
+    if new_role == current_role and (not specialty or (current_role == "soldier" and fac.get("specialty", "") == specialty)):
+        return False, "你已經是這個身分了。"
+
+    # 移除當前角色
+    if current_role == "officer":
+        fac["officers"] = [o for o in fac.get("officers", []) if o["id"] != uid_str]
+    elif current_role == "squad_leader":
+        fac["squad_leaders"] = [sl for sl in fac.get("squad_leaders", []) if sl["id"] != uid_str]
+    elif current_role == "soldier":
+        fac["soldiers"] = [s for s in fac.get("soldiers", []) if s["id"] != uid_str]
+
+    # 加入新角色
+    if new_role == "officer":
+        current_officers = len(fac.get("officers", []))
+        if current_officers >= OFFICERS_PER_SIDE:
+            return False, f"軍官已滿（{current_officers}/{OFFICERS_PER_SIDE}），無法切換。"
+        fac["officers"].append({"id": uid_str, "name": info[2].get("name", "?")})
+    elif new_role == "squad_leader":
+        current_sls = len(fac.get("squad_leaders", []))
+        if current_sls >= SQUAD_LEADERS_PER_SIDE:
+            return False, f"小隊長已滿（{current_sls}/{SQUAD_LEADERS_PER_SIDE}），無法切換。"
+        # 指派到一個軍官
+        officers = fac.get("officers", [])
+        officer_id = officers[current_sls % len(officers)]["id"] if officers else ""
+        fac["squad_leaders"].append({"id": uid_str, "name": info[2].get("name", "?"), "officer_id": officer_id})
+    elif new_role == "soldier":
+        # 指派到一個小隊長
+        sls = fac.get("squad_leaders", [])
+        soldier_count = len(fac.get("soldiers", []))
+        sl_id = sls[soldier_count % len(sls)]["id"] if sls else ""
+        spec = specialty if specialty in _SOLDIER_SPECIALTIES else _cw_random.choice(_SOLDIER_SPECIALTIES)
+        fac["soldiers"].append({"id": uid_str, "name": info[2].get("name", "?"), "squad_leader_id": sl_id, "specialty": spec})
+
+    save_cyber_war()
+    return True, f"✅ 已切換為{ {'officer': '軍官', 'squad_leader': '小隊長', 'soldier': f'士兵（{specialty}）'}.get(new_role, new_role)}"
 
 # ── 時間工具 ──
 _TZ = timezone(timedelta(hours=8))
@@ -149,11 +203,9 @@ async def _start_new_game(guild):
     if len(members) < 4:
         return False, "伺服器成員太少（至少需要4人），無法開始遊戲。"
 
-    # 隨機戰場
-    battlefield = _cw_random.choice(_BATTLEFIELDS)
-
-    # 隨機對手（德國 vs ?）
-    opponent = _cw_random.choice(_FACTION_OPPONENTS)
+    # 隨機選一個歷史正確的戰場+陣營配對
+    scenario = _cw_random.choice(_BATTLE_SCENARIOS)
+    battlefield, fac_a_info, fac_b_info = scenario
 
     # 隨機倍率 50~75
     multiplier = _cw_random.randint(50, 75)
@@ -185,10 +237,12 @@ async def _start_new_game(guild):
             m = member_list[i]
             sl_officer = officers[i % len(officers)]["id"] if officers else ""
             squad_leaders.append({"id": str(m.id), "name": m.display_name, "officer_id": sl_officer})
+        _specialties = _cw_random.sample(_SOLDIER_SPECIALTIES * ((n - n_officers - n_sl) // 4 + 1), n - n_officers - n_sl) if n > n_officers + n_sl else []
         for i in range(n_officers + n_sl, n):
             m = member_list[i]
             sl = squad_leaders[(i - n_officers) % len(squad_leaders)]["id"] if squad_leaders else ""
-            soldiers.append({"id": str(m.id), "name": m.display_name, "squad_leader_id": sl})
+            spec = _specialties[i - n_officers - n_sl] if i - n_officers - n_sl < len(_specialties) else _cw_random.choice(_SOLDIER_SPECIALTIES)
+            soldiers.append({"id": str(m.id), "name": m.display_name, "squad_leader_id": sl, "specialty": spec})
 
         return {
             "name": faction_info[0],
@@ -204,8 +258,8 @@ async def _start_new_game(guild):
             "defeated": False,
         }
 
-    fac_a = _build_faction("A", _FACTION_GERMANY, side_a_members)
-    fac_b = _build_faction("B", opponent, side_b_members)
+    fac_a = _build_faction("A", fac_a_info, side_a_members)
+    fac_b = _build_faction("B", fac_b_info, side_b_members)
 
     # 押金改為自由投注 — 不自動扣款，玩家自行下注
     now = datetime.now(_TZ)
@@ -234,7 +288,7 @@ async def _start_new_game(guild):
         "turn_summary": "",
     }
     save_cyber_war()
-    return True, f"✅ 第{_cyber_war_state['game_id']}局賽博一戰已開始！\n戰場：{battlefield}\n陣營：{fac_a['flag']} {fac_a['name']} vs {fac_b['flag']} {fac_b['name']}\n參戰人數：{len(all_players)}\n押金：自由投注（第一回合後鎖定）\n倍率：{multiplier}x\n回合間隔：{TURN_INTERVAL_HOURS}小時\n結束時間：{_fmt_dt(end.isoformat())}"
+    return True, f"✅ 第{_cyber_war_state['game_id']}局賽博一戰已開始！\n戰場：{battlefield}\n陣營：{fac_a['flag']} {fac_a['name']} vs {fac_b['flag']} {fac_b['name']}\n參戰人數：{len(all_players)}\n押金：自由投注（第一回合後鎖定）\n倍率：{multiplier}x\n回合間隔：{TURN_INTERVAL_HOURS}小時（第1回合後鎖定押金）\n結束時間：{_fmt_dt(end.isoformat())}"
 
 # ── 角色查詢 ──
 def _get_player_role(uid_str: str):
@@ -261,21 +315,24 @@ def _get_subordinates(faction_key: str, uid_str: str, role: str):
     return []
 
 def _get_superior_order(faction_key: str, uid_str: str, role: str, turn: int):
-    """取得上級給的指令。"""
+    """取得上級的統一指令。指令格式簡化後，value 為字串（非 dict）。"""
     orders = _cyber_war_state.get("orders", {}).get(str(turn), {}).get(faction_key, {})
     if role == "squad_leader":
-        for officer_uid, sl_orders in orders.items():
-            if uid_str in sl_orders:
-                return sl_orders[uid_str], _get_officer_name(faction_key, officer_uid)
+        # 找該小隊長所屬軍官的指令
+        fac = _cyber_war_state["factions"].get(faction_key, {})
+        sl = next((x for x in fac.get("squad_leaders", []) if x["id"] == uid_str), None)
+        if sl:
+            officer_id = sl.get("officer_id", "")
+            if officer_id in orders and isinstance(orders[officer_id], str):
+                return orders[officer_id], _get_officer_name(faction_key, officer_id)
     elif role == "soldier":
         # 找該士兵所屬小隊長的指令
         fac = _cyber_war_state["factions"].get(faction_key, {})
         soldier = next((s for s in fac.get("soldiers", []) if s["id"] == uid_str), None)
         if soldier:
             sl_id = soldier.get("squad_leader_id", "")
-            for officer_uid, sl_orders in orders.items():
-                if sl_id in sl_orders and isinstance(sl_orders[sl_id], dict) and uid_str in sl_orders[sl_id]:
-                    return sl_orders[sl_id][uid_str], _get_sl_name(faction_key, sl_id)
+            if sl_id in orders and isinstance(orders[sl_id], str):
+                return orders[sl_id], _get_sl_name(faction_key, sl_id)
     return None, ""
 
 def _get_officer_name(faction_key, officer_uid):
@@ -356,7 +413,7 @@ def _build_war_embed():
         return (
             f"{f['flag']} **{f['name']}**{defeated}\n"
             f"```\n推進 [{bar}] {prog}%\n士氣 ❤️ {morale}  補給 📦 {supplies}\n"
-            f"軍官 {n_off} | 小隊長 {n_sl} | 士兵 {n_sol}\n"
+            f"軍官 {n_off}/{OFFICERS_PER_SIDE} | 小隊長 {n_sl}/{SQUAD_LEADERS_PER_SIDE} | 士兵 {n_sol}\n"
             f"本回合砲擊/空襲：{arty}/{MAX_ARTILLERY_PER_TURN}```"
         )
 
@@ -484,34 +541,29 @@ class CyberWarPanelView(discord.ui.View):
             await interaction.response.send_message("❌ 只有軍官和小隊長可以使用「管理行動」。", ephemeral=True)
             return
 
-        # 顯示即時戰況 + 下屬列表 → 選擇下屬 → Modal 輸入指令
-        subs = _get_subordinates(fkey, uid, role)
-        if not subs:
-            await interaction.response.send_message("❌ 你沒有下屬可以分配指令。", ephemeral=True)
-            return
-
         turn = _cyber_war_state.get("turn", 0)
-        fac_a = _cyber_war_state["factions"].get(fkey, {})
-        fac_b = _cyber_war_state["factions"].get("B" if fkey == "A" else "A", {})
+        fac_enemy = _cyber_war_state["factions"].get("B" if fkey == "A" else "A", {})
+        subs = _get_subordinates(fkey, uid, role)
+        sub_names = ", ".join(s["name"] for s in subs[:10])
+
+        # 顯示已下達的統一指令（如果有）
+        orders = _cyber_war_state.get("orders", {}).get(str(turn), {}).get(fkey, {})
+        existing = orders.get(uid, "")
+        existing_text = f"\n📢 你已下達的指令：{existing[:200]}" if existing else "\n⚠️ 你尚未下達指令"
 
         lines = [
             f"🎖️ 你是 {fac['flag']} {fac['name']} 的 **{'軍官' if role == 'officer' else '小隊長'}**",
             f"📅 第 {turn} 回合",
             f"\n📊 即時戰況：",
-            f"  我方推進：{fac_a.get('progress', 0)}% | 士氣：{fac_a.get('morale', 100)}",
-            f"  敵方推進：{fac_b.get('progress', 0)}% | 士氣：{fac_b.get('morale', 100)}",
-            f"\n👥 你的下屬："
+            f"  我方推進：{fac.get('progress', 0)}% | 士氣：{fac.get('morale', 100)}",
+            f"  敵方推進：{fac_enemy.get('progress', 0)}% | 士氣：{fac_enemy.get('morale', 100)}",
+            f"\n👥 你的下屬：{sub_names}",
+            existing_text,
+            f"\n📌 指令為**統一命令**，發布給所有下屬。",
         ]
-        # 使用 Select 讓使用者選擇要分配指令的對象
-        options = []
-        for sub in subs[:25]:  # Discord select max 25
-            options.append(discord.SelectOption(
-                label=sub["name"],
-                value=sub["id"],
-                description=f"ID: {sub['id'][:8]}"
-            ))
-        view = _OrderTargetSelect(uid, fkey, role, turn, options)
-        await interaction.response.send_message("\n".join(lines), view=view, ephemeral=True)
+        await interaction.response.send_modal(
+            CyberWarOrderModal(uid, fkey, role, turn, "", "")
+        )
 
     @discord.ui.button(label="行動指令", style=discord.ButtonStyle.success, emoji="📝", custom_id="cw_action_btn")
     async def action_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -557,39 +609,73 @@ class CyberWarPanelView(discord.ui.View):
             CyberWarBetModal(uid, interaction.user.display_name, fkey, current_dep, bal)
         )
 
-# ── 下屬選擇 Select ──
-class _OrderTargetSelect(discord.ui.View):
-    def __init__(self, commander_uid, fkey, role, turn, options):
+    @discord.ui.button(label="換身分", style=discord.ButtonStyle.secondary, emoji="🔄", custom_id="cw_switch_role_btn")
+    async def switch_role_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        info = _get_player_role(uid)
+        if not info:
+            await interaction.response.send_message("❌ 你不在本局參戰名單中。", ephemeral=True)
+            return
+        fkey, role, fac = info
+        # 顯示可選身分
+        n_off = len(fac.get("officers", []))
+        n_sl = len(fac.get("squad_leaders", []))
+        cur_spec = ""
+        if role == "soldier":
+            soldier = next((s for s in fac.get("soldiers", []) if s["id"] == uid), None)
+            if soldier:
+                cur_spec = soldier.get("specialty", "士兵")
+
+        lines = [
+            f"🔄 **換身分**",
+            f"你目前的身分：{_ROLE_NAMES.get(role, '?')}" + (f"（{cur_spec}）" if role == "soldier" and cur_spec else ""),
+            f"",
+            f"📊 目前陣營 {fac['flag']} {fac['name']} 名額：",
+            f"  軍官：{n_off}/{OFFICERS_PER_SIDE}",
+            f"  小隊長：{n_sl}/{SQUAD_LEADERS_PER_SIDE}",
+            f"",
+            f"從下方選擇你想切換的身分：",
+        ]
+        view = _RoleSwitchView(uid, fkey, n_off, n_sl)
+        await interaction.response.send_message("\n".join(lines), view=view, ephemeral=True)
+
+# ── 換身分 Select ──
+class _RoleSwitchView(discord.ui.View):
+    def __init__(self, uid, fkey, n_officers, n_sls):
         super().__init__(timeout=120)
-        self.commander_uid = commander_uid
-        self.fkey = fkey
-        self.role = role
-        self.turn = turn
+        options = []
+        # 軍官
+        if n_officers < OFFICERS_PER_SIDE:
+            options.append(discord.SelectOption(label=f"軍官（剩餘{OFFICERS_PER_SIDE - n_officers}名額）", value="officer", emoji="🎖️"))
+        # 小隊長
+        if n_sls < SQUAD_LEADERS_PER_SIDE:
+            options.append(discord.SelectOption(label=f"小隊長（剩餘{SQUAD_LEADERS_PER_SIDE - n_sls}名額）", value="squad_leader", emoji="📋"))
+        # 士兵專長
+        for spec in _SOLDIER_SPECIALTIES:
+            emoji = _SPECIALTY_EMOJI.get(spec, "🎖️")
+            options.append(discord.SelectOption(label=f"士兵 — {spec}", value=f"soldier:{spec}", emoji=emoji))
 
         select = discord.ui.Select(
-            placeholder="選擇要分配指令的下屬...",
+            placeholder="選擇想切換的身分...",
             options=options,
-            min_values=1,
-            max_values=1,
+            min_values=1, max_values=1,
         )
         select.callback = self._on_select
         self.add_item(select)
+        self._uid = uid
+        self._fkey = fkey
 
     async def _on_select(self, interaction: discord.Interaction):
-        target_id = interaction.data["select_values"][0]
-        fac = _cyber_war_state["factions"].get(self.fkey, {})
-        target_name = "?"
-        if self.role == "officer":
-            sl = next((x for x in fac.get("squad_leaders", []) if x["id"] == target_id), None)
-            if sl:
-                target_name = sl["name"]
+        val = interaction.data["select_values"][0]
+        if ":" in val:
+            new_role, specialty = val.split(":", 1)
         else:
-            s = next((x for x in fac.get("soldiers", []) if x["id"] == target_id), None)
-            if s:
-                target_name = s["name"]
-        await interaction.response.send_modal(
-            CyberWarOrderModal(self.commander_uid, self.fkey, self.role, self.turn, target_id, target_name)
-        )
+            new_role, specialty = val, ""
+        ok, msg = _switch_role(self._uid, new_role, specialty)
+        await interaction.response.edit_message(content=msg, view=None)
 
 # ── 下注 Modal ──
 class CyberWarBetModal(discord.ui.Modal, title="💰 下注 / 追加 / 撤回"):
@@ -661,12 +747,12 @@ class CyberWarBetModal(discord.ui.Modal, title="💰 下注 / 追加 / 撤回"):
                 ephemeral=True,
             )
 
-# ── 指令輸入 Modal ──
-class CyberWarOrderModal(discord.ui.Modal, title="🎖️ 分配指令"):
+# ── 統一指令輸入 Modal ──
+class CyberWarOrderModal(discord.ui.Modal, title="🎖️ 發布統一指令"):
     order_text = discord.ui.TextInput(
-        label="指令內容",
+        label="統一指令（發給所有下屬）",
         style=discord.TextStyle.paragraph,
-        placeholder="根據即時戰況，向下屬下達具體指令...",
+        placeholder="根據即時戰況，向你的所有下屬發布統一指令...",
         required=True,
         max_length=500,
     )
@@ -676,34 +762,19 @@ class CyberWarOrderModal(discord.ui.Modal, title="🎖️ 分配指令"):
         self.fkey = fkey
         self.role = role
         self.turn = turn
-        self.target_id = target_id
-        self.target_name = target_name
         super().__init__()
 
     async def on_submit(self, interaction: discord.Interaction):
         order = self.order_text.value.strip()
         turn_str = str(self.turn)
+        # 統一指令：直接用 commander_uid 作 key，value 為指令字串（非 dict）
         orders = _cyber_war_state.setdefault("orders", {})
         turn_orders = orders.setdefault(turn_str, {})
         fac_orders = turn_orders.setdefault(self.fkey, {})
-
-        if self.role == "officer":
-            # officer → squad_leader
-            officer_orders = fac_orders.setdefault(self.commander_uid, {})
-            officer_orders[self.target_id] = order
-        else:
-            # squad_leader → soldier
-            # 需要找到該 sl 的 officer，結構: officer_uid → {sl_uid: {soldier_uid: order}}
-            # 但為了簡化，直接用 sl_uid 作 key 存
-            sl_orders = fac_orders.setdefault(self.commander_uid, {})
-            if not isinstance(sl_orders, dict):
-                sl_orders = {}
-                fac_orders[self.commander_uid] = sl_orders
-            sl_orders[self.target_id] = order
-
+        fac_orders[self.commander_uid] = order  # 統一指令，字串而非 dict
         save_cyber_war()
         await interaction.response.send_message(
-            f"✅ 已向 **{self.target_name}** 下達指令：\n> {order[:200]}",
+            f"✅ 統一指令已發布：\n> {order[:300]}",
             ephemeral=True,
         )
 
@@ -847,7 +918,12 @@ async def _ai_evaluate_turn(turn: int):
             role_info = _get_player_role(uid)
             role = role_info[1] if role_info else "unknown"
             name = role_info[2]["name"] if role_info and len(role_info) > 2 else uid
-            lines.append(f"  [{role}] {name}：{action[:150]}")
+            spec = ""
+            if role == "soldier":
+                soldier = next((s for s in fac.get("soldiers", []) if s["id"] == uid), None)
+                if soldier and soldier.get("specialty"):
+                    spec = f"（{soldier['specialty']}）"
+            lines.append(f"  [{role}{spec}] {name}：{action[:150]}")
         arty = artillery.get(fkey, [])
         if arty:
             lines.append("  砲擊/空襲：")
@@ -870,6 +946,7 @@ async def _ai_evaluate_turn(turn: int):
         f"{fac_b.get('name','B')}方行動：\n{side_b_text}\n\n"
         "請根據雙方行動質量、策略、砲擊支援等因素，判定本回合戰況變化。\n"
         "考慮因素：行動的具體性、與上級指令的一致性、砲擊效果、補給消耗等。\n"
+        "兵種特性：突擊兵進攻加成、醫療兵減少傷亡/恢復士氣、支援兵提供補給、偵查兵降低敵方突襲效果。\n"
         "推進進度變化範圍：-10到+15，士氣變化：-20到+10，補給變化：-15到+5。\n\n"
         "請用以下格式回覆（不要加其他文字）：\n"
         "===A_PROGRESS_DELTA===\n數字\n"
