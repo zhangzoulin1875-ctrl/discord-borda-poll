@@ -71,25 +71,50 @@ _DEFAULT_DIVISION_TEMPLATES = [
 ]
 
 _MAP_TEMPLATE_FILE = os.path.join(DATA_DIR, "hoi4_map_template.json")
-_map_template_cache = None
+_MAP_INDEX_FILE = os.path.join(DATA_DIR, "hoi4_map_index.json")
+_map_index_cache = None
 
-def _load_map_template():
-    """讀取寫死的真實地圖模板（不規則多邊形省份 + 鄰接關係），每次開局重置所有權但保留地理形狀。
-    這個檔案是預先用 Voronoi 演算法產生的有機大陸地圖，不是格子地圖，也不需要 scipy/shapely 這種
-    重量級依賴跑在 Render 上——地圖資料已經算好存成靜態 JSON 隨程式碼一起部署。"""
-    global _map_template_cache
-    if _map_template_cache is not None:
-        return _map_template_cache
+def _load_map_index():
+    """讀取「輕量地圖索引」——跟 hoi4_map_template.json 內容一樣，但完全不含 polygon 座標。
+    這是2026-08-07記憶體OOM修復新增的：原本遊戲邏輯（開局產生省份、驗證鄰接）也是呼叫會載入
+    含polygon的完整地圖模板，但polygon是4001省份×多邊形嵌套list結構，用json.loads()解析成
+    Python物件後從22MB原始JSON文字暴增到170MB+常駐記憶體（list-of-list-of-[float,float]的
+    物件開銷極大），這份常駐cache疊加地圖API的序列化cache，直接把Render免費方案512MB記憶體
+    上限炸掉導致容器OOM重啟（連帶讓沒持久化的COOKIE_SECRET失效、使用者遇到登入循環）。
+    遊戲邏輯其實只需要id/name/country/type/centroid/neighbors/area，完全不需要polygon，
+    所以拆成一份不到1MB的輕量索引檔，遊戲邏輯只讀這份，polygon只在/api/game/hoi4/map端點
+    以「不解析、直接回傳原始檔案bytes」的方式提供給前端畫地圖用（見 api_hoi4_map）。
+    若輕量索引檔不存在（例如手動更新過地圖但忘了重建索引），退回從完整模板即時抽取欄位、
+    抽完立刻丟棄完整模板，只把輕量結果存進cache，避免完整版polygon資料長駐記憶體。"""
+    global _map_index_cache
+    if _map_index_cache is not None:
+        return _map_index_cache
+    try:
+        with open(_MAP_INDEX_FILE, "r", encoding="utf-8") as f:
+            _map_index_cache = json_module.loads(f.read())
+        return _map_index_cache
+    except Exception as e:
+        print("鋼鐵風暴 輕量地圖索引載入失敗，退回從完整模板抽取: {}".format(e))
     try:
         with open(_MAP_TEMPLATE_FILE, "r", encoding="utf-8") as f:
-            _map_template_cache = json_module.loads(f.read())
+            full_tpl = json_module.loads(f.read())
+        lite = {}
+        for pid, p in full_tpl.items():
+            lite[pid] = {
+                "id": p.get("id", pid), "name": p.get("name", ""),
+                "country": p.get("country", ""), "type": p.get("type", "plains"),
+                "centroid": p.get("centroid", [0, 0]), "neighbors": p.get("neighbors", []),
+                "area": p.get("area", 1.0),
+            }
+        del full_tpl  # 完整版含polygon，用完立刻釋放，不留常駐cache
+        _map_index_cache = lite
     except Exception as e:
-        print("鋼鐵風暴 地圖模板載入失敗，改用備援格子地圖: {}".format(e))
-        _map_template_cache = None
-    return _map_template_cache
+        print("鋼鐵風暴 地圖模板載入完全失敗，改用備援格子地圖: {}".format(e))
+        _map_index_cache = None
+    return _map_index_cache
 
 def _generate_default_provinces():
-    tpl = _load_map_template()
+    tpl = _load_map_index()
     if tpl:
         provinces = {}
         resource_types = ["steel","oil","rubber","tungsten","aluminum"]
@@ -1077,40 +1102,39 @@ async def api_hoi4_state(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
-_hoi4_map_json_cache = None  # pre-serialized JSON string, built once (data never changes)
+_hoi4_map_raw_bytes = None  # 原始檔案 bytes，完全不經過 json.loads() 解析
 
 async def api_hoi4_map(request):
-    """地圖多邊形 API — 只回傳省份的 polygon + centroid + neighbors + name + type。
-    資料量大(~22MB)但永遠不變：第一次請求時序列化成字串快取起來，之後每次請求
-    直接回傳快取字串，避免每次都重新複製4001省份的多邊形資料 + json.dumps()
-    造成的重複記憶體尖峰（在Render免費方案512MB限制下，重複這個操作容易
-    OOM觸發容器重啟，而重啟又會讓沒有持久化的COOKIE_SECRET跟著失效，
-    導致使用者遇到「Discord登入完又被踢回登入頁」的問題）。"""
-    global _hoi4_map_json_cache
+    """地圖多邊形 API —— 直接把 data/hoi4_map_template.json 的原始 bytes 讀出來當 response body
+    回傳，中間完全不經過 json.loads()/json.dumps()。
+
+    2026-08-07 記憶體OOM事故根因：這份22MB原始JSON文字，如果用json.loads()解析成Python
+    物件（原本的作法），因為polygon欄位是深度嵌套的 list-of-list-of-[float,float] 結構，
+    每個座標點在CPython都變成一個獨立的list物件+2個float物件，物件開銷極大，解析完常駐
+    記憶體會暴增到170MB以上（用tracemalloc量過），而且這個解析結果一旦快取(_map_template_cache)
+    就永遠占著這塊記憶體不釋放。疊加上一輪修的「序列化字串cache」(又是24MB)，兩份一起長駐
+    輕鬆突破Render免費方案512MB上限，導致容器被砍掉重開——重開又讓沒持久化的COOKIE_SECRET
+    失效，變成使用者反饋的「Discord登入完又被踢回登入頁」。
+
+    修法：這個端點的用途純粹是「把靜態檔案內容原封不動送給前端」，前端本來就會自己
+    JSON.parse()，我們完全不需要在伺服器端也解析一次——直接讀檔案bytes、快取bytes
+    （不快取解析後的物件），用 web.Response(body=...) 原樣回傳。記憶體成本只有檔案
+    本身的大小（~22MB），不會有物件解析的10倍膨脹。真正需要解析後欄位的遊戲邏輯
+    （開局產生省份等）改用不含polygon的輕量索引 _load_map_index()（見上方，<1MB）。"""
+    global _hoi4_map_raw_bytes
     try:
-        if _hoi4_map_json_cache is None:
-            tpl = _load_map_template()
-            if not tpl:
-                return web.json_response({"error": "地圖模板未載入"}, status=500)
-            result = {}
-            for pid, p in tpl.items():
-                result[pid] = {
-                    "id": p["id"],
-                    "name": p.get("name", ""),
-                    "type": p.get("type", "plains"),
-                    "country": p.get("country", ""),
-                    "polygon": p.get("polygon", []),
-                    "centroid": p.get("centroid", [0, 0]),
-                    "neighbors": p.get("neighbors", []),
-                }
-            _hoi4_map_json_cache = json_module.dumps(result, ensure_ascii=False)
-            print(f"🗺️ HOI4 地圖 JSON 已快取（{len(_hoi4_map_json_cache)} bytes），之後請求直接回傳快取")
-        return web.Response(text=_hoi4_map_json_cache, content_type="application/json")
+        if _hoi4_map_raw_bytes is None:
+            with open(_MAP_TEMPLATE_FILE, "rb") as f:
+                _hoi4_map_raw_bytes = f.read()
+            print(f"🗺️ HOI4 地圖原始檔案已快取為 bytes（{len(_hoi4_map_raw_bytes)} bytes，未解析），之後請求直接回傳")
+        return web.Response(body=_hoi4_map_raw_bytes, content_type="application/json")
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_mapdebug(request):
-    """診斷地圖模板載入問題：回報檔案是否存在、大小、讀取/解析錯誤細節。"""
+    """診斷地圖模板載入問題：回報檔案是否存在、大小、讀取/解析錯誤細節。
+    2026-08-07修正：不再對22MB完整模板做json.loads()完整解析（那正是造成OOM的元凶之一），
+    改用輕量正則計數province數量，只在小索引檔上做真正的json.loads()驗證。"""
     import traceback
     info = {"file_path": _MAP_TEMPLATE_FILE, "cwd": os.getcwd()}
     try:
@@ -1121,18 +1145,24 @@ async def api_hoi4_mapdebug(request):
     except Exception as e:
         info["stat_error"] = str(e)
     try:
-        with open(_MAP_TEMPLATE_FILE, "r", encoding="utf-8") as f:
+        with open(_MAP_TEMPLATE_FILE, "rb") as f:
             raw = f.read()
         info["read_bytes"] = len(raw)
-        tpl = json_module.loads(raw)
-        info["parsed_ok"] = True
-        info["province_count"] = len(tpl)
-        info["sample_key"] = list(tpl.keys())[0] if tpl else None
+        # 不做完整 json.loads()，只用輕量計數估算省份數量，避免解析出170MB+的物件圖
+        info["approx_province_count"] = raw.count(b'"id": "p')
+        info["parsed_ok"] = raw.startswith(b"{") and raw.rstrip().endswith(b"}")
     except Exception as e:
         info["parsed_ok"] = False
         info["error_type"] = type(e).__name__
         info["error_msg"] = str(e)
         info["traceback"] = traceback.format_exc()[-2000:]
+    try:
+        idx = _load_map_index()
+        info["map_index_ok"] = idx is not None
+        info["map_index_province_count"] = len(idx) if idx else 0
+    except Exception as e:
+        info["map_index_ok"] = False
+        info["map_index_error"] = str(e)
     return web.json_response(info)
 
 async def api_hoi4_reset(request):
