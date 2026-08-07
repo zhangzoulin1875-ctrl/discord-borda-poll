@@ -498,8 +498,8 @@
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <label class="block text-sm text-gray-400 mb-1">生圖 API URL</label>
-          <input id="ai-t2i-api-url" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/images/generations">
+          <label class="block text-sm text-gray-400 mb-1">生圖 API URL <span class="text-xs text-gray-500">（支援 OpenAI 格式 / Pollinations / Hugging Face / Google Imagen）</span></label>
+          <input id="ai-t2i-api-url" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api-inference.huggingface.co 或 https://api.openai.com/v1/images/generations">
         </div>
         <div>
           <label class="block text-sm text-gray-400 mb-1">生圖 API Key</label>
@@ -509,7 +509,7 @@
       <div class="grid grid-cols-3 gap-3">
         <div>
           <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
-          <input id="ai-t2i-model" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="dall-e-3, flux-1, ...">
+          <input id="ai-t2i-model" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="dall-e-3, black-forest-labs/FLUX.1-dev, ...">
         </div>
         <div>
           <label class="block text-sm text-gray-400 mb-1">圖片尺寸</label>

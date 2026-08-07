@@ -7132,7 +7132,104 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
             return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
 
     # ══════════════════════════════════════════════════════════════
-    # 分支 3：OpenAI 相容 POST /v1/images/generations
+    # 分支 3：Hugging Face Inference API（api-inference.huggingface.co 或 router.huggingface.co）
+    # ══════════════════════════════════════════════════════════════
+    # HF 的文生圖 API 跟 OpenAI 完全不同：
+    #   - URL: POST https://api-inference.huggingface.co/models/{model}
+    #          或 POST https://router.huggingface.co/hf-inference/models/{model}
+    #   - Body: {"inputs": "prompt text", "parameters": {"width": W, "height": H, "seed": S}}
+    #   - Response: 原始圖片二進位（raw bytes），不是 JSON
+    #   - Auth: Bearer hf_xxxx
+    # 注意：model 是放在 URL path 裡，不是 JSON body 裡。
+    if "huggingface.co" in api_url.lower():
+        if not model:
+            return {"success": False, "error": "文生圖 API 未設定完整（需要模型名稱，例如 black-forest-labs/FLUX.1-dev）"}
+        if not api_key:
+            return {"success": False, "error": "Hugging Face API 需要 API Token（hf_...）"}
+
+        # 組裝 URL — 使用者可能填了完整 URL 或只填 base URL
+        hf_url = api_url.rstrip("/")
+        if "/models/" in hf_url:
+            # 使用者填了含 /models/ 的 URL → 替換末段為實際 model
+            parts = hf_url.split("/models/", 1)
+            hf_url = parts[0] + "/models/" + model
+        else:
+            # 使用者只填 base URL → 加上 /models/{model}
+            hf_url = hf_url + "/models/" + model
+
+        payload = {
+            "inputs": prompt[:1000],
+            "parameters": {
+                "width": w,
+                "height": h,
+                "seed": seed,
+            },
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+        # HF 模型第一次呼叫可能需要 cold start（模型載入），給 180 秒
+        try:
+            timeout = aiohttp.ClientTimeout(total=180, connect=15, sock_read=150)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(hf_url, json=payload, headers=headers) as resp:
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        print(f"🎨 T2I (HuggingFace) 失敗 (HTTP {resp.status}): {err_text[:300]}")
+                        if resp.status == 503:
+                            return {"success": False, "error": "Hugging Face 模型正在載入中（cold start），請稍後再試"}
+                        return {"success": False, "error": f"Hugging Face API 回應 HTTP {resp.status}: {err_text[:200]}"}
+
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
+                    image_bytes = await resp.read()
+
+                    # HF 正常回應是 image/png 或 image/jpeg 的二進位
+                    if content_type.startswith("image/"):
+                        ext = "png"
+                        if "jpeg" in content_type or "jpg" in content_type:
+                            ext = "jpg"
+                        elif "webp" in content_type:
+                            ext = "webp"
+                        image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.{ext}")
+                        with open(image_path, "wb") as f:
+                            f.write(image_bytes)
+                        print(f"🎨 T2I (HuggingFace) 成功: {prompt[:50]}... model={model} seed={seed}")
+                        return {"success": True, "image_path": image_path, "model": model}
+
+                    # HF 有時回 JSON 錯誤而非圖片
+                    if content_type.startswith("application/json"):
+                        try:
+                            err_data = await resp.json()
+                            err_msg = err_data.get("error") or str(err_data)[:200]
+                        except Exception:
+                            err_msg = image_bytes[:200].decode("utf-8", errors="replace")
+                        print(f"🎨 T2I (HuggingFace) 回應非圖片: {err_msg}")
+                        return {"success": False, "error": f"Hugging Face API 回應錯誤: {err_msg}"}
+
+                    # 未知 Content-Type 但內容看起來像圖片（magic number 偵測）
+                    if image_bytes[:4] == b"\x89PNG" or image_bytes[:2] == b"\xff\xd8":
+                        ext = "png" if image_bytes[:4] == b"\x89PNG" else "jpg"
+                        image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.{ext}")
+                        with open(image_path, "wb") as f:
+                            f.write(image_bytes)
+                        print(f"🎨 T2I (HuggingFace) 成功（magic number 偵測）: {prompt[:50]}... model={model} seed={seed}")
+                        return {"success": True, "image_path": image_path, "model": model}
+
+                    # 既不是圖片也不是 JSON
+                    err_preview = image_bytes[:300].decode("utf-8", errors="replace")
+                    print(f"🎨 T2I (HuggingFace) 未知回應類型 ({content_type}): {err_preview}")
+                    return {"success": False, "error": f"Hugging Face API 回應無法識別 (Content-Type={content_type}): {err_preview[:150]}"}
+
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Hugging Face API 逾時（超過 180 秒，可能模型正在 cold start）"}
+        except Exception as e:
+            print(f"🎨 T2I (HuggingFace) 異常: {type(e).__name__}: {e}")
+            return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
+
+    # ══════════════════════════════════════════════════════════════
+    # 分支 4：OpenAI 相容 POST /v1/images/generations
     # ══════════════════════════════════════════════════════════════
     if not model:
         return {"success": False, "error": "文生圖 API 未設定完整（需要模型名稱）"}
