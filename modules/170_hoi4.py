@@ -1056,8 +1056,38 @@ class StormGroup(app_commands.Group):
 # ════════════════════════════════════════════════════════════════════════════
 
 async def api_hoi4_state(request):
-    try: return web.json_response(hoi4_state)
-    except Exception as e: return web.json_response({"error": str(e)}, status=500)
+    """遊戲狀態 API — 不含省份多邊形資料（太大），前端用 /api/game/hoi4/map 獨立載入地圖形狀。"""
+    try:
+        import copy
+        slim = copy.deepcopy(hoi4_state)
+        # Strip polygon data from provinces to reduce response size from ~22MB to ~200KB
+        for pid, p in slim.get("provinces", {}).items():
+            p.pop("polygon", None)
+        return web.json_response(slim)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def api_hoi4_map(request):
+    """地圖多邊形 API — 只回傳省份的 polygon + centroid + neighbors + name + type。
+    資料量大(~22MB)但永遠不變，前端載入一次後快取。"""
+    try:
+        tpl = _load_map_template()
+        if not tpl:
+            return web.json_response({"error": "地圖模板未載入"}, status=500)
+        result = {}
+        for pid, p in tpl.items():
+            result[pid] = {
+                "id": p["id"],
+                "name": p.get("name", ""),
+                "type": p.get("type", "plains"),
+                "country": p.get("country", ""),
+                "polygon": p.get("polygon", []),
+                "centroid": p.get("centroid", [0, 0]),
+                "neighbors": p.get("neighbors", []),
+            }
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_mapdebug(request):
     """診斷地圖模板載入問題：回報檔案是否存在、大小、讀取/解析錯誤細節。"""
@@ -1332,6 +1362,7 @@ _load_hoi4_state()
 
 HOI4_API_ROUTES = [
     ("/api/game/hoi4/state", "GET", api_hoi4_state),
+    ("/api/game/hoi4/map", "GET", api_hoi4_map),
     ("/api/game/hoi4/reset", "POST", api_hoi4_reset),
     ("/api/game/hoi4/map-debug", "GET", api_hoi4_mapdebug),
     ("/api/game/hoi4/join", "POST", api_hoi4_join),

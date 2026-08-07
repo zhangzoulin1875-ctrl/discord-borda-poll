@@ -495,10 +495,18 @@ function toast(msg) {
 }
 
 // === INIT ===
+let mapData = null;  // province polygons (large, loaded once)
+
 async function init() {
   const meResp = await api('/api/me');
   if (meResp.error || !meResp.user_id) { showLogin(); return; }
   me = meResp;
+  // Load map polygons once (large ~22MB but static)
+  try {
+    const resp = await fetch('/api/game/hoi4/map');
+    mapData = await resp.json();
+    console.log('Map loaded:', Object.keys(mapData).length, 'provinces');
+  } catch(e) { console.error('Map load failed:', e); }
   await refresh();
   setInterval(refresh, 15000);
 }
@@ -620,7 +628,22 @@ function renderLog() {
 function renderMap() {
   if (!S || !S.provinces) return;
   const svg = document.getElementById('map-svg');
-  const provinces = S.provinces;
+  // Merge polygon data from mapData (loaded once) with game state (frequent updates)
+  const provinces = {};
+  for (const [pid, p] of Object.entries(S.provinces)) {
+    provinces[pid] = Object.assign({}, p, (mapData && mapData[pid]) || {});
+    // Game state has the authoritative owner/type info, mapData has the polygon shape
+    provinces[pid].owner = p.owner;
+    provinces[pid].type = p.type || (mapData && mapData[pid] && mapData[pid].type) || 'plains';
+  }
+  // Also include provinces from mapData that aren't in state yet (unclaimed, pre-game)
+  if (mapData) {
+    for (const [pid, p] of Object.entries(mapData)) {
+      if (!provinces[pid]) {
+        provinces[pid] = Object.assign({}, p, {owner: null, victory_points: 0, fortifications: 0, infrastructure: 1, resources: {}});
+      }
+    }
+  }
   const owned = myCid ? new Set(S.countries[myCid].provinces_owned||[]) : new Set();
   
   let parts = '';
