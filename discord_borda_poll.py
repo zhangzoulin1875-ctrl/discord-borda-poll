@@ -6731,15 +6731,22 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
     """Call T2I API to generate an image from a text prompt.
     Returns: {"success": True, "image_url": "...", "revised_prompt": "..."} or
              {"success": False, "error": "..."}
+
+    Handles two response shapes:
+      1. JSON (OpenAI-style): {"data": [{"url"/"b64_json": ...}]}
+      2. Raw image bytes (e.g. pollinations.ai): HTTP 200 with Content-Type: image/*
+         — the response body itself IS the image, no JSON wrapper.
     """
+    import random as _random
+
     api_url = settings.get("t2i_api_url", "").strip()
     api_key = settings.get("t2i_api_key", "").strip()
     model = settings.get("t2i_model", "").strip()
     size = settings.get("t2i_size", "1024x1024")
     quality = settings.get("t2i_quality", "standard")
 
-    if not api_url or not api_key or not model:
-        return {"success": False, "error": "文生圖 API 未設定完整（需要 URL、Key 和模型名稱）"}
+    if not api_url or not model:
+        return {"success": False, "error": "文生圖 API 未設定完整（需要 URL 和模型名稱）"}
 
     # Normalize URL — accept both /images/generations and base URLs
     url = api_url
@@ -6749,21 +6756,33 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
         else:
             url = url.rstrip("/") + "/v1/images/generations"
 
+    # 隨機 seed — 避免同樣的 prompt 每次都生成同一張圖（pollinations.ai 等
+    # 部分供應商在沒有 seed 或 seed 固定時，對相同 prompt 回傳快取過的相同結果）
+    seed = _random.randint(1, 2_147_483_647)
+
+    try:
+        w, h = size.split("x")
+        w, h = int(w), int(h)
+    except Exception:
+        w, h = 1024, 1024
+
     payload = {
         "model": model,
         "prompt": prompt[:1000],  # Most APIs cap at 1000 chars
         "n": 1,
         "size": size,
+        "width": w,
+        "height": h,
+        "seed": seed,
     }
     # DALL-E specific: quality parameter
     if quality and "dall-e" in model.lower():
         payload["quality"] = quality
         payload["response_format"] = "url"
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     try:
         timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=100)
@@ -6774,7 +6793,41 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
                     print(f"🎨 T2I API 失敗 (HTTP {resp.status}): {err_text[:300]}")
                     return {"success": False, "error": f"API 回應 HTTP {resp.status}: {err_text[:200]}"}
 
-                data = await resp.json()
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+
+                # ── 情況 1：伺服器直接回傳圖片二進位（非 JSON）──
+                # 例如 pollinations.ai 成功時 Content-Type 是 image/jpeg、image/png 等，
+                # 這種情況絕對不能呼叫 resp.json()，直接把整個 body 當圖片下載存檔。
+                if content_type.startswith("image/"):
+                    image_bytes = await resp.read()
+                    ext = "png"
+                    if "jpeg" in content_type or "jpg" in content_type:
+                        ext = "jpg"
+                    elif "webp" in content_type:
+                        ext = "webp"
+                    elif "gif" in content_type:
+                        ext = "gif"
+                    image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.{ext}")
+                    with open(image_path, "wb") as f:
+                        f.write(image_bytes)
+                    print(f"🎨 T2I 成功（原始圖片回應，Content-Type={content_type}）: {prompt[:50]}... seed={seed}")
+                    return {"success": True, "image_path": image_path}
+
+                # ── 情況 2：JSON 包裝格式（OpenAI 相容）──
+                try:
+                    data = await resp.json()
+                except Exception as je:
+                    # 宣稱是 JSON 但解析失敗，或 Content-Type 判斷有誤：
+                    # fallback 直接把 body 當圖片存檔，總比丟一個解析錯誤訊息給使用者好。
+                    raw_body = await resp.read()
+                    if raw_body[:8] not in (b"", b"null"):
+                        image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.png")
+                        with open(image_path, "wb") as f:
+                            f.write(raw_body)
+                        print(f"🎨 T2I 成功（JSON 解析失敗但已當圖片存檔，Content-Type={content_type}）: {prompt[:50]}...")
+                        return {"success": True, "image_path": image_path}
+                    print(f"🎨 T2I JSON 解析失敗: {je}")
+                    return {"success": False, "error": f"回應無法解析（Content-Type={content_type}）: {je}"}
 
                 # Handle different response formats:
                 # OpenAI: {"data": [{"url": "...", "revised_prompt": "..."}]}
@@ -6801,7 +6854,7 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
                 if b64_data and not image_url:
                     import base64 as _b64
                     image_bytes = _b64.b64decode(b64_data)
-                    image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}.png")
+                    image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.png")
                     with open(image_path, "wb") as f:
                         f.write(image_bytes)
 
@@ -6813,7 +6866,7 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
                 if revised_prompt:
                     result["revised_prompt"] = revised_prompt
 
-                print(f"🎨 T2I 成功: {prompt[:50]}... → {'URL' if image_url else 'b64 file'}")
+                print(f"🎨 T2I 成功: {prompt[:50]}... → {'URL' if image_url else 'b64 file'} seed={seed}")
                 return result
 
     except asyncio.TimeoutError:
@@ -9096,61 +9149,31 @@ async def api_test_all_functions(request):
     results.append(await _test_vision(fallback_url, fallback_key, fallback_vis_m, "🔄 備援視覺識圖"))
 
     # 12. 文生圖模型 — t2i_model, label "🎨 文生圖" (skip if not enabled/configured)
+    # 直接呼叫 _generate_image()，跟正式生圖共用同一段解析邏輯（JSON / 原始圖片二進位皆可），
+    # 避免測試端點跟正式端點各寫一份、日後其中一邊修好另一邊沒同步的問題。
     if chat_ai_settings.get("t2i_enabled"):
-        t2i_url = chat_ai_settings.get("t2i_api_url", "").strip()
-        t2i_key = chat_ai_settings.get("t2i_api_key", "").strip()
         t2i_model = chat_ai_settings.get("t2i_model", "").strip()
-        if not t2i_model:
-            results.append({"label": "🎨 文生圖", "type": "image", "status": "skipped", "model": "", "error": "文生圖模型未設定，跳過"})
-        elif not t2i_url or not t2i_key:
-            results.append({"label": "🎨 文生圖", "type": "image", "status": "error", "model": t2i_model, "error": "文生圖 API URL 或 Key 未設定"})
+        if not t2i_model or not chat_ai_settings.get("t2i_api_url", "").strip():
+            results.append({"label": "🎨 文生圖", "type": "image", "status": "skipped", "model": t2i_model, "error": "文生圖 API 未設定完整，跳過"})
         else:
-            # Test T2I with a simple prompt
-            url = t2i_url
-            if not url.endswith("/images/generations"):
-                if url.endswith("/v1"):
-                    url += "/images/generations"
-                else:
-                    url = url.rstrip("/") + "/v1/images/generations"
-            t2i_payload = {
-                "model": t2i_model,
-                "prompt": "a simple red circle on white background",
-                "n": 1,
-                "size": chat_ai_settings.get("t2i_size", "1024x1024"),
-            }
-            if "dall-e" in t2i_model.lower():
-                t2i_payload["quality"] = chat_ai_settings.get("t2i_quality", "standard")
-                t2i_payload["response_format"] = "url"
-            t2i_headers = {"Authorization": f"Bearer {t2i_key}", "Content-Type": "application/json"}
             t2_t0 = _time.monotonic()
-            try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120, sock_read=100)) as t2_sess:
-                    async with t2_sess.post(url, json=t2i_payload, headers=t2i_headers) as t2_resp:
-                        t2_elapsed = int((_time.monotonic() - t2_t0) * 1000)
-                        if t2_resp.status != 200:
-                            t2_err = await t2_resp.text()
-                            results.append({"label": "🎨 文生圖", "type": "image", "status": "error",
-                                            "http_status": t2_resp.status, "latency_ms": t2_elapsed,
-                                            "model": t2i_model, "error": f"HTTP {t2_resp.status}: {t2_err[:200]}"})
-                        else:
-                            t2_data = await t2_resp.json()
-                            t2_items = t2_data.get("data") or t2_data.get("images") or t2_data.get("output") or []
-                            if t2_items and (t2_items[0].get("url") or t2_items[0].get("b64_json")):
-                                results.append({"label": "🎨 文生圖", "type": "image", "status": "ok",
-                                                "latency_ms": t2_elapsed, "model": t2i_model,
-                                                "response_snippet": "圖片生成成功"})
-                            else:
-                                results.append({"label": "🎨 文生圖", "type": "image", "status": "error",
-                                                "latency_ms": t2_elapsed, "model": t2i_model,
-                                                "error": f"回應格式無法識別: {str(t2_data)[:200]}"})
-            except asyncio.TimeoutError:
-                results.append({"label": "🎨 文生圖", "type": "image", "status": "timeout",
-                                "latency_ms": int((_time.monotonic() - t2_t0) * 1000),
-                                "model": t2i_model, "error": "請求逾時（120 秒）"})
-            except Exception as e:
+            t2_result = await _generate_image("a simple red circle on white background", chat_ai_settings)
+            t2_elapsed = int((_time.monotonic() - t2_t0) * 1000)
+            if t2_result.get("success"):
+                results.append({"label": "🎨 文生圖", "type": "image", "status": "ok",
+                                "latency_ms": t2_elapsed, "model": t2i_model,
+                                "response_snippet": "圖片生成成功"})
+                # 清掉測試產生的暫存檔
+                _t2i_test_path = t2_result.get("image_path")
+                if _t2i_test_path:
+                    try:
+                        os.remove(_t2i_test_path)
+                    except Exception:
+                        pass
+            else:
                 results.append({"label": "🎨 文生圖", "type": "image", "status": "error",
-                                "latency_ms": int((_time.monotonic() - t2_t0) * 1000),
-                                "model": t2i_model, "error": str(e)[:300]})
+                                "latency_ms": t2_elapsed, "model": t2i_model,
+                                "error": t2_result.get("error", "未知錯誤")})
     else:
         results.append({"label": "🎨 文生圖", "type": "image", "status": "skipped", "model": "", "error": "文生圖功能未啟用，跳過"})
 
