@@ -151,15 +151,32 @@ def _switch_role(uid_str: str, new_role: str, specialty: str = ""):
         current_sls = len(fac.get("squad_leaders", []))
         if current_sls >= SQUAD_LEADERS_PER_SIDE:
             return False, f"小隊長已滿（{current_sls}/{SQUAD_LEADERS_PER_SIDE}），無法切換。"
-        # 指派到一個軍官（若沒有軍官則留空）
+        # 平均分配軍官：每個軍官分3個小隊長，輪流指派
         officers = fac.get("officers", [])
-        officer_id = officers[current_sls % len(officers)]["id"] if officers else ""
+        if officers:
+            # 找目前旗下小隊長最少的軍官，確保平均分配
+            officer_sl_counts = {o["id"]: 0 for o in officers}
+            for sl in fac.get("squad_leaders", []):
+                oid = sl.get("officer_id", "")
+                if oid in officer_sl_counts:
+                    officer_sl_counts[oid] += 1
+            officer_id = min(officer_sl_counts, key=officer_sl_counts.get)
+        else:
+            officer_id = ""
         fac["squad_leaders"].append({"id": uid_str, "name": player_name, "officer_id": officer_id, "inactive_turns": 0})
     elif new_role == "soldier":
-        # 指派到一個小隊長（若沒有小隊長則留空）
+        # 指派到麾下士兵最少的小隊長（目標每隊8人），若沒有小隊長則留空
         sls = fac.get("squad_leaders", [])
-        soldier_count = len(fac.get("soldiers", []))
-        sl_id = sls[soldier_count % len(sls)]["id"] if sls else ""
+        if sls:
+            sl_soldier_counts = {sl["id"]: 0 for sl in sls}
+            for s in fac.get("soldiers", []):
+                sid = s.get("squad_leader_id", "")
+                if sid in sl_soldier_counts:
+                    sl_soldier_counts[sid] += 1
+            # 找最少人的小隊長
+            sl_id = min(sl_soldier_counts, key=sl_soldier_counts.get)
+        else:
+            sl_id = ""
         spec = specialty if specialty in _SOLDIER_SPECIALTIES else _cw_random.choice(_SOLDIER_SPECIALTIES)
         fac["soldiers"].append({"id": uid_str, "name": player_name, "squad_leader_id": sl_id, "specialty": spec})
 
@@ -307,7 +324,15 @@ async def _start_new_game(guild):
         squad_leaders = []
         soldiers = []
         n = len(member_list)
-        _specialties = _cw_random.sample(_SOLDIER_SPECIALTIES * (n // 4 + 1), n) if n > 0 else []
+        # 四兵種平均分配：盡量讓突擊/醫療/支援/偵查數量一致
+        _specialties = []
+        if n > 0:
+            base = n // 4
+            rem = n % 4
+            for spec in _SOLDIER_SPECIALTIES:
+                _specialties.extend([spec] * base)
+            _specialties.extend(_cw_random.sample(_SOLDIER_SPECIALTIES, rem))
+            _cw_random.shuffle(_specialties)
         for i, m in enumerate(member_list):
             spec = _specialties[i] if i < len(_specialties) else _cw_random.choice(_SOLDIER_SPECIALTIES)
             soldiers.append({"id": str(m.id), "name": m.display_name, "squad_leader_id": "", "specialty": spec})
@@ -987,7 +1012,13 @@ async def _ai_evaluate_turn(turn: int):
     def _collect_side(fkey, fac):
         lines = []
         a = actions.get(fkey, {})
+        # 取得本回合統一指令
+        fac_orders = s.get("orders", {}).get(turn_str, {}).get(fkey, {})
+
+        # 先列出有提交行動的玩家
+        acted_uids = set()
         for uid, action in a.items():
+            acted_uids.add(uid)
             role_info = _get_player_role(uid)
             role = role_info[1] if role_info else "unknown"
             name = role_info[2]["name"] if role_info and len(role_info) > 2 else uid
@@ -997,6 +1028,47 @@ async def _ai_evaluate_turn(turn: int):
                 if soldier and soldier.get("specialty"):
                     spec = f"（{soldier['specialty']}）"
             lines.append(f"  [{role}{spec}] {name}：{action[:150]}")
+
+        # 小隊長指令直接注入未行動士兵——小隊長發了統一指令但士兵沒打行動，
+        # 視為該士兵服從指令執行（權重低於親自行動，但不是「無行動」）
+        for sl in fac.get("squad_leaders", []):
+            sl_id = sl["id"]
+            sl_order = fac_orders.get(sl_id, "")
+            if not sl_order or not isinstance(sl_order, str):
+                continue
+            sl_name = sl.get("name", "?")
+            for soldier in fac.get("soldiers", []):
+                if soldier.get("squad_leader_id") == sl_id and soldier["id"] not in acted_uids:
+                    acted_uids.add(soldier["id"])
+                    spec = soldier.get("specialty", "")
+                    spec_text = f"（{spec}）" if spec else ""
+                    lines.append(f"  [soldier{spec_text}] {soldier['name']}：〔服從小隊長{sl_name}指令〕{sl_order[:100]}")
+
+        # 軍官指令注入未行動小隊長（同理）
+        for officer in fac.get("officers", []):
+            off_id = officer["id"]
+            off_order = fac_orders.get(off_id, "")
+            if not off_order or not isinstance(off_order, str):
+                continue
+            off_name = officer.get("name", "?")
+            for sl in fac.get("squad_leaders", []):
+                if sl.get("officer_id") == off_id and sl["id"] not in acted_uids:
+                    acted_uids.add(sl["id"])
+                    lines.append(f"  [squad_leader] {sl['name']}：〔服從軍官{off_name}指令〕{off_order[:100]}")
+
+        # 列出完全無行動且無上級指令的玩家
+        for officer in fac.get("officers", []):
+            if officer["id"] not in acted_uids:
+                lines.append(f"  [officer] {officer.get('name','?')}：（無行動）")
+        for sl in fac.get("squad_leaders", []):
+            if sl["id"] not in acted_uids:
+                lines.append(f"  [squad_leader] {sl.get('name','?')}：（無行動）")
+        for soldier in fac.get("soldiers", []):
+            if soldier["id"] not in acted_uids:
+                spec = soldier.get("specialty", "")
+                spec_text = f"（{spec}）" if spec else ""
+                lines.append(f"  [soldier{spec_text}] {soldier['name']}：（無行動）")
+
         arty = artillery.get(fkey, [])
         if arty:
             lines.append("  砲擊/空襲：")
@@ -1019,6 +1091,7 @@ async def _ai_evaluate_turn(turn: int):
         f"{fac_b.get('name','B')}方行動：\n{side_b_text}\n\n"
         "請根據雙方行動質量、策略、砲擊支援等因素，判定本回合戰況變化。\n"
         "考慮因素：行動的具體性、與上級指令的一致性、砲擊效果、補給消耗等。\n"
+        "注意：標註〔服從小隊長/軍官指令〕的行動表示該玩家本人未提交行動，由上級統一指令代為執行，效果權重應低於玩家親自撰寫的行動。\n"
         "兵種特性：突擊兵進攻加成、醫療兵減少傷亡/恢復士氣、支援兵提供補給、偵查兵降低敵方突襲效果。\n"
         "推進進度變化範圍：-10到+15，士氣變化：-20到+10，補給變化：-15到+5。\n\n"
         "請用以下格式回覆（不要加其他文字）：\n"
