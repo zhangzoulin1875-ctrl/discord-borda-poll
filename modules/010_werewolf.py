@@ -111,10 +111,11 @@ _WW_NARRATOR_PROMPT = """你是一個狼人殺遊戲的主持人（旁白）。�
 async def _ww_narrate(scene: str, extra: str = "") -> str:
     """生成 AI 旁白文字。"""
     prompt = _WW_NARRATOR_PROMPT.format(scene=scene, extra=extra)
+    _ww_url, _ww_key, _ww_model = _resolve_role_endpoint("werewolf", chat_ai_settings)
     settings = {
-        "api_url": chat_ai_settings["api_url"],
-        "api_key": chat_ai_settings["api_key"],
-        "model": chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
+        "api_url": _ww_url or chat_ai_settings["api_url"],
+        "api_key": _ww_key or chat_ai_settings["api_key"],
+        "model": _ww_model or chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
         "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
@@ -994,10 +995,11 @@ async def _ww_ai_discuss(ai_player: dict) -> tuple[str, str | None] | None:
             f"直接輸出發言內容，不要加任何前綴或說明。"
         )
 
+    _ww_url, _ww_key, _ww_model = _resolve_role_endpoint("werewolf", chat_ai_settings)
     settings = {
-        "api_url": chat_ai_settings["api_url"],
-        "api_key": chat_ai_settings["api_key"],
-        "model": chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
+        "api_url": _ww_url or chat_ai_settings["api_url"],
+        "api_key": _ww_key or chat_ai_settings["api_key"],
+        "model": _ww_model or chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
         "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:

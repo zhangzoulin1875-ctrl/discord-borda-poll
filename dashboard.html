@@ -421,8 +421,7 @@
         </div>
         <div class="grid grid-cols-2 gap-3 mb-3">
           <div>
-            <label class="block text-sm text-gray-400 mb-1">審查模型（留空=用主模型）</label>
-            <input type="text" id="ai-mod-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="gpt-4o-mini">
+            <p class="text-sm text-gray-400">審查模型：從上方「模型分配 → AI 網警模型」選擇</p>
           </div>
           <div>
             <label class="block text-sm text-gray-400 mb-1">靈敏度</label>
@@ -431,16 +430,6 @@
               <option value="medium">中（預設）</option>
               <option value="high">高（敏感偵測）</option>
             </select>
-          </div>
-        </div>
-        <div class="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <label class="block text-sm text-gray-400 mb-1">獨立 API URL（留空=用主 API）</label>
-            <input type="text" id="ai-mod-api-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1">
-          </div>
-          <div>
-            <label class="block text-sm text-gray-400 mb-1">獨立 API Key（留空=用主 API）</label>
-            <input type="password" id="ai-mod-api-key" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="輸入可覆蓋">
           </div>
         </div>
         <div class="grid grid-cols-2 gap-3 mb-3">
@@ -544,29 +533,6 @@
       </div>
 
       <button onclick="saveScheduleSettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm mb-4">💾 儲存排程設定</button>
-
-      <!-- 娛樂用 AI 模型選擇 -->
-      <div class="bg-[#2b2d31] rounded-xl p-5">
-        <h3 class="font-semibold mb-1">🎮 娛樂功能 AI 模型選擇</h3>
-        <p class="text-xs text-gray-400 mb-4">為每個遊戲單獨指定模型（使用同一個 API URL/Key，只是模型名不同）。留空 = 使用主模型。可選用更便宜/快速的模型來節省用量，或更強的模型來提升品質。</p>
-        <div class="space-y-4">
-          <div>
-            <label class="block text-sm text-gray-400 mb-1">🧠 AI 搶答遊戲模型</label>
-            <input id="ai-quiz-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
-            <p class="text-xs text-gray-500 mt-1">用於生成搶答題目（micropedia 百科知識單選題）</p>
-          </div>
-          <div>
-            <label class="block text-sm text-gray-400 mb-1">🍜 AI 海龜湯模型</label>
-            <input id="ai-turtle-soup-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
-            <p class="text-xs text-gray-500 mt-1">用於生成湯底、判斷回答、生成提示</p>
-          </div>
-          <div>
-            <label class="block text-sm text-gray-400 mb-1">🐺 AI 狼人殺模型</label>
-            <input id="ai-werewolf-model" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="留空 = 用主模型">
-            <p class="text-xs text-gray-500 mt-1">用於 AI 旁白、AI 玩家發言與策略判斷</p>
-          </div>
-        </div>
-      </div>
 
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
 
@@ -1017,14 +983,6 @@ async function showChatAIPanel() {
   const s = await api('/api/chat-ai-settings');
   if (s.error) { if (s.status === 401) { showOnly('login-view'); return; } alert('載入 AI 設定失敗：' + s.error); return; }
   document.getElementById('ai-enabled').checked = s.enabled || false;
-  document.getElementById('ai-api-url').value = s.api_url || '';
-  document.getElementById('ai-api-key').placeholder = s.api_key_masked ? `已設定（${s.api_key_masked}）輸入新值可覆蓋` : '輸入 API Key';
-  document.getElementById('ai-api-key').value = ''; // 防止瀏覽器密碼管理器自動填入舊值造成誤覆蓋
-  setTimeout(() => { document.getElementById('ai-api-key').value = ''; }, 300); // 部分瀏覽器的自動填入是延遲的，補一次
-  document.getElementById('ai-model').value = s.model || 'gpt-4o-mini';
-  document.getElementById('ai-model-chain').value = s.model_fallback_chain || '';
-  document.getElementById('ai-vision-model').value = s.vision_model || '';
-  document.getElementById('ai-vision-chain').value = s.vision_fallback_chain || '';
   document.getElementById('ai-system-prompt').value = s.system_prompt || '';
   document.getElementById('ai-cooldown').value = s.cooldown_seconds ?? 60;
   document.getElementById('ai-min-interval').value = s.min_response_interval ?? 0;
@@ -1049,27 +1007,17 @@ async function showChatAIPanel() {
   document.getElementById('ai-turtle-soup-enabled').checked = s.turtle_soup_enabled || false;
   document.getElementById('ai-turtle-soup-channel').value = s.turtle_soup_channel_id || '';
   document.getElementById('ai-turtle-soup-difficulty').value = s.turtle_soup_difficulty || 'medium';
-  // 娛樂功能模型
-  document.getElementById('ai-chat-model').value = s.chat_model || '';
-  document.getElementById('ai-admin-model').value = s.admin_model || '';
-  document.getElementById('ai-entertainment-model').value = s.entertainment_model || '';
   // ── 總 AI 池載入 ──
   aiPoolData = (s.ai_pool || []).map(e => ({...e}));
   renderPoolList();
   renderAllRoleSelects(s);
   // 載入降級鏈
-  fallbackChainData = (s.fallback_chain_entries || []).map(e => ({api_url: e.api_url, api_key: '', model: e.model, _masked_key: e.api_key_masked || ''}));
+  fallbackChainData = (s.model_chains?.main || []).map(e => ({pool_id: e.pool_id, model: e.model}));
   renderFallbackChain();
-  document.getElementById('ai-quiz-model').value = s.quiz_model || '';
-  document.getElementById('ai-turtle-soup-model').value = s.turtle_soup_model || '';
-  document.getElementById('ai-werewolf-model').value = s.werewolf_model || '';
-  // Fallback API
+  visionChainData = (s.model_chains?.vision || []).map(e => ({pool_id: e.pool_id, model: e.model}));
+  renderVisionChain();
+  // Fallback API settings
   document.getElementById('ai-fallback-enabled').checked = s.fallback_enabled || false;
-  document.getElementById('ai-fallback-url').value = s.fallback_api_url || '';
-  document.getElementById('ai-fallback-key').placeholder = s.fallback_api_key_masked ? `已設定（${s.fallback_api_key_masked}）輸入新值可覆蓋` : '輸入備援 API Key';
-  document.getElementById('ai-fallback-key').value = '';
-  setTimeout(() => { document.getElementById('ai-fallback-key').value = ''; }, 300);
-  document.getElementById('ai-fallback-model').value = s.fallback_model || '';
   document.getElementById('ai-fallback-daily-limit').value = s.fallback_daily_limit || 10;
   document.getElementById('ai-fallback-rate-per-min').value = s.fallback_rate_per_min || 6;
   document.getElementById('ai-fallback-owner-exempt').checked = s.fallback_owner_exempt ?? true;
@@ -1080,27 +1028,21 @@ async function showChatAIPanel() {
   document.getElementById('ai-circuit-cooldown-msg').value = s.circuit_cooldown_msg || '';
   // AI 網警
   document.getElementById('ai-mod-enabled').checked = s.ai_mod_enabled || false;
-  document.getElementById('ai-mod-model').value = s.ai_mod_model || '';
-  document.getElementById('ai-mod-api-url').value = s.ai_mod_api_url || '';
-  const _modKey = document.getElementById('ai-mod-api-key');
-  _modKey.placeholder = s.ai_mod_api_key_masked ? `已設定（${s.ai_mod_api_key_masked}）輸入新值可覆蓋` : '輸入可覆蓋';
-  _modKey.value = '';
-  setTimeout(() => { _modKey.value = ''; }, 300);
+  document.getElementById('ai-mod-confidence').value = s.ai_mod_confidence || 'medium';
   document.getElementById('ai-mod-report-channel').value = s.ai_mod_report_channel || '';
   document.getElementById('ai-mod-custom-rules').value = s.ai_mod_custom_rules || '';
-  document.getElementById('ai-mod-confidence').value = s.ai_mod_confidence || 'medium';
   document.getElementById('ai-mod-cooldown').value = s.ai_mod_cooldown ?? 30;
   document.getElementById('ai-mod-max-tokens').value = s.ai_mod_max_tokens ?? 150;
   document.getElementById('ai-mod-timeout').value = s.ai_mod_timeout ?? 10;
-  // 嚴重違規
   document.getElementById('ai-mod-severe-enabled').checked = s.ai_mod_severe_enabled || false;
-  document.getElementById('ai-mod-exempt-roles').value = (s.ai_mod_exempt_roles || []).join(',');
   document.getElementById('ai-mod-severe-rules').value = s.ai_mod_severe_rules || '';
+  document.getElementById('ai-mod-exempt-roles').value = (s.ai_mod_exempt_roles || []).join(', ');
 }
 
 // ── 總 AI 池管理 ──
 let aiPoolData = [];
 let fallbackChainData = [];
+let visionChainData = [];
 
 function renderPoolList() {
   const container = document.getElementById('ai-pool-list');
@@ -1122,7 +1064,7 @@ function renderPoolList() {
              value="${entry.api_url || ''}"
              onchange="aiPoolData[${idx}].api_url = this.value">
       <input class="w-full bg-[#2b2d31] text-white rounded px-2 py-1.5 text-sm outline-none focus:ring-1 ring-[#5865f2]"
-             type="password" placeholder="API Key${entry.api_key_masked ? '（已設定：' + entry.api_key_masked + '，輸入新值可覆蓋）' : ''}"
+             type="password" placeholder="API Key${entry.api_key_masked ? '（已設定：' + entry.api_key_masked + '，輸入新值可覆蓋）' : '（輸入 API Key）'}"
              value=""
              onchange="aiPoolData[${idx}].api_key = this.value">
       <input class="w-full bg-[#2b2d31] text-white rounded px-2 py-1.5 text-sm outline-none focus:ring-1 ring-[#5865f2]"
@@ -1146,7 +1088,7 @@ function removePoolEntry(idx) {
 }
 
 function buildRoleOptions(selectedVal) {
-  let opts = '<option value="">-- 不指定（使用主模型/主 API） --</option>';
+  let opts = '<option value="">-- 繼承上層角色 --</option>';
   aiPoolData.forEach(entry => {
     const models = (entry.models || '').split(',').map(m => m.trim()).filter(m => m);
     models.forEach(m => {
@@ -1160,30 +1102,24 @@ function buildRoleOptions(selectedVal) {
 
 function renderAllRoleSelects(s) {
   const settings = s || {};
-  // Find current selections from legacy fields
-  function findPoolVal(apiUrl, model) {
-    if (!model) return '';
-    const entry = aiPoolData.find(e => e.api_url === apiUrl);
-    if (entry) return entry.id + '||' + model;
+  const roles = settings.model_roles || {};
+  function roleVal(role) {
+    const binding = roles[role];
+    if (binding && binding.pool_id && binding.model) return binding.pool_id + '||' + binding.model;
     return '';
   }
-  // Main model
-  document.getElementById('role-main').innerHTML = buildRoleOptions(findPoolVal(settings.api_url, settings.model));
-  // Backup model
-  document.getElementById('role-backup').innerHTML = buildRoleOptions(findPoolVal(settings.fallback_api_url, settings.fallback_model));
-  // Chat model
-  document.getElementById('role-chat').innerHTML = buildRoleOptions(findPoolVal(settings.chat_api_url, settings.chat_model));
-  // Admin model
-  document.getElementById('role-admin').innerHTML = buildRoleOptions(findPoolVal(settings.admin_api_url, settings.admin_model));
-  // Entertainment model
-  document.getElementById('role-entertainment').innerHTML = buildRoleOptions(findPoolVal(settings.entertainment_api_url, settings.entertainment_model));
+  ['main','backup','chat','admin','entertainment','vision','quiz','turtle-soup','werewolf','fortune','ai-mod'].forEach(role => {
+    const selectId = 'role-' + role;
+    const el = document.getElementById(selectId);
+    if (el) el.innerHTML = buildRoleOptions(roleVal(role.replace('-','_').replace('turtle-soup','turtle_soup').replace('ai-mod','ai_mod')));
+  });
 }
 
 // ── 降級鏈管理 ──
 function renderFallbackChain() {
   const container = document.getElementById('fallback-chain-list');
   if (!fallbackChainData.length) {
-    container.innerHTML = '<p class="text-xs text-gray-500">尚未新增降級鏈項目。主模型失敗時會直接跳到備援模型。</p>';
+    container.innerHTML = '<p class="text-xs text-gray-500">尚未新增降級鏈項目。</p>';
     return;
   }
   container.innerHTML = fallbackChainData.map((f, idx) => {
@@ -1228,14 +1164,91 @@ function removeFallbackChainEntry(idx) {
   renderFallbackChain();
 }
 
+// ── 視覺降級鏈 ──
+function renderVisionChain() {
+  const container = document.getElementById('vision-chain-list');
+  if (!visionChainData.length) {
+    container.innerHTML = '<p class="text-xs text-gray-500">尚未新增視覺降級鏈項目。</p>';
+    return;
+  }
+  container.innerHTML = visionChainData.map((f, idx) => {
+    let opts = '<option value="">-- 選擇 API+模型 --</option>';
+    aiPoolData.forEach(entry => {
+      const models = (entry.models || '').split(',').map(m => m.trim()).filter(m => m);
+      models.forEach(m => {
+        const val = entry.id + '||' + m;
+        const label = (entry.name || entry.api_url || '未命名') + ' / ' + m;
+        const sel = (f.pool_id === entry.id && f.model === m) ? 'selected' : '';
+        opts += `<option value="${val}" ${sel}>${label}</option>`;
+      });
+    });
+    return `
+      <div class="flex gap-2 items-center">
+        <span class="text-xs text-gray-500 w-6">${idx + 1}.</span>
+        <select class="flex-1 bg-[#1e1f22] text-white rounded px-2 py-1.5 text-sm outline-none focus:ring-1 ring-[#5865f2]"
+                onchange="updateVisionChainEntry(${idx}, this.value)">
+          ${opts}
+        </select>
+        <button onclick="removeVisionChainEntry(${idx})" class="text-red-400 text-sm px-2">✕</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function addVisionChainEntry() {
+  visionChainData.push({pool_id: '', model: ''});
+  renderVisionChain();
+}
+
+function updateVisionChainEntry(idx, val) {
+  if (!val) { visionChainData[idx] = {pool_id: '', model: ''}; }
+  else {
+    const [poolId, model] = val.split('||');
+    visionChainData[idx] = {pool_id: poolId, model};
+  }
+}
+
+function removeVisionChainEntry(idx) {
+  visionChainData.splice(idx, 1);
+  renderVisionChain();
+}
+
+// ── 解析角色下拉選單 ──
+function parseRoleSelect(selectId) {
+  const el = document.getElementById(selectId);
+  if (!el || !el.value) return null;
+  const [poolId, model] = el.value.split('||');
+  const entry = aiPoolData.find(e => e.id === poolId);
+  if (!entry || !model) return null;
+  return {pool_id: poolId, model, api_url: entry.api_url, api_key: entry.api_key || ''};
+}
+
 async function saveChatAISettings() {
+  // ── 解析角色分配 ──
+  const modelRoles = {};
+  const roleMap = {
+    'role-main': 'main', 'role-backup': 'backup', 'role-chat': 'chat',
+    'role-admin': 'admin', 'role-entertainment': 'entertainment',
+    'role-vision': 'vision', 'role-quiz': 'quiz', 'role-turtle-soup': 'turtle_soup',
+    'role-werewolf': 'werewolf', 'role-fortune': 'fortune', 'role-ai-mod': 'ai_mod',
+  };
+  for (const [selectId, role] of Object.entries(roleMap)) {
+    const parsed = parseRoleSelect(selectId);
+    if (parsed) modelRoles[role] = {pool_id: parsed.pool_id, model: parsed.model};
+  }
+
+  // ── 解析降級鏈 ──
+  const modelChains = {
+    main: fallbackChainData.filter(f => f.pool_id && f.model),
+    vision: visionChainData.filter(f => f.pool_id && f.model),
+  };
+
+  // ── 同步 legacy 欄位（從池中解析 main/backup 的值寫入 legacy，保持向後兼容）──
+  const mainRole = modelRoles.main ? aiPoolData.find(e => e.id === modelRoles.main.pool_id) : null;
+  const backupRole = modelRoles.backup ? aiPoolData.find(e => e.id === modelRoles.backup.pool_id) : null;
+
   const data = {
     enabled: document.getElementById('ai-enabled').checked,
-    api_url: document.getElementById('ai-api-url').value.trim(),
-    model: document.getElementById('ai-model').value.trim(),
-    model_fallback_chain: document.getElementById('ai-model-chain').value.trim(),
-    vision_model: document.getElementById('ai-vision-model').value.trim(),
-    vision_fallback_chain: document.getElementById('ai-vision-chain').value.trim(),
     system_prompt: document.getElementById('ai-system-prompt').value,
     cooldown_seconds: parseInt(document.getElementById('ai-cooldown').value) || 0,
     min_response_interval: parseInt(document.getElementById('ai-min-interval').value) || 0,
@@ -1260,10 +1273,25 @@ async function saveChatAISettings() {
     turtle_soup_enabled: document.getElementById('ai-turtle-soup-enabled').checked,
     turtle_soup_channel_id: document.getElementById('ai-turtle-soup-channel').value.trim(),
     turtle_soup_difficulty: document.getElementById('ai-turtle-soup-difficulty').value,
-    // Fallback API
+    // ── AI 池 ──
+    ai_pool: aiPoolData.map(e => ({
+      id: e.id || ('p' + Date.now() + Math.random().toString(36).slice(2,6)),
+      name: e.name || '',
+      api_url: e.api_url || '',
+      api_key: e.api_key || '',
+      models: e.models || ''
+    })),
+    model_roles: modelRoles,
+    model_chains: modelChains,
+    // ── Legacy 同步 ──
+    api_url: mainRole ? mainRole.api_url : '',
+    api_key: mainRole ? (mainRole.api_key || '') : '',
+    model: mainRole ? modelRoles.main.model : '',
+    fallback_api_url: backupRole ? backupRole.api_url : '',
+    fallback_api_key: backupRole ? (backupRole.api_key || '') : '',
+    fallback_model: backupRole ? modelRoles.backup.model : '',
+    // Fallback API behavior
     fallback_enabled: document.getElementById('ai-fallback-enabled').checked,
-    fallback_api_url: document.getElementById('ai-fallback-url').value.trim(),
-    fallback_model: document.getElementById('ai-fallback-model').value.trim(),
     fallback_daily_limit: parseInt(document.getElementById('ai-fallback-daily-limit').value) || 10,
     fallback_rate_per_min: parseInt(document.getElementById('ai-fallback-rate-per-min').value) || 6,
     fallback_owner_exempt: document.getElementById('ai-fallback-owner-exempt').checked,
@@ -1272,99 +1300,25 @@ async function saveChatAISettings() {
     fallback_rate_limit_msg: document.getElementById('ai-fallback-rate-limit-msg').value.trim(),
     entertainment_unavailable_msg: document.getElementById('ai-entertainment-unavailable-msg').value.trim(),
     circuit_cooldown_msg: document.getElementById('ai-circuit-cooldown-msg').value.trim(),
+    // AI 網警
+    ai_mod_enabled: document.getElementById('ai-mod-enabled').checked,
+    ai_mod_report_channel: document.getElementById('ai-mod-report-channel').value.trim() || null,
+    ai_mod_custom_rules: document.getElementById('ai-mod-custom-rules').value,
+    ai_mod_confidence: document.getElementById('ai-mod-confidence').value,
+    ai_mod_cooldown: parseInt(document.getElementById('ai-mod-cooldown').value) || 30,
+    ai_mod_max_tokens: parseInt(document.getElementById('ai-mod-max-tokens').value) || 150,
+    ai_mod_timeout: parseInt(document.getElementById('ai-mod-timeout').value) || 10,
+    ai_mod_severe_enabled: document.getElementById('ai-mod-severe-enabled').checked,
+    ai_mod_severe_rules: document.getElementById('ai-mod-severe-rules').value.trim(),
+    ai_mod_exempt_roles: document.getElementById('ai-mod-exempt-roles').value.split(',').map(x => x.trim()).filter(x => x),
   };
-  // 分類模型
-  // ── 總 AI 池儲存 ──
-  data.ai_pool = aiPoolData.map(e => ({
-    id: e.id || ('p' + Date.now() + Math.random().toString(36).slice(2,6)),
-    name: e.name || '',
-    api_url: e.api_url || '',
-    api_key: e.api_key || '',  // 只傳新輸入的 key，空字串 = 保留原值
-    models: e.models || ''
-  }));
-  // 解析模型分配 dropdowns → 端點+模型
-  function parseRoleSelect(selectId) {
-    const val = document.getElementById(selectId).value;
-    if (!val) return null;
-    const [poolId, model] = val.split('||');
-    const entry = aiPoolData.find(e => e.id === poolId);
-    if (!entry || !model) return null;
-    return {api_url: entry.api_url, api_key: entry.api_key || '', model};
-  }
-  // 主模型
-  const mainSel = parseRoleSelect('role-main');
-  if (mainSel) {
-    data.api_url = mainSel.api_url;
-    if (mainSel.api_key) data.api_key = mainSel.api_key;
-    data.model = mainSel.model;
-  }
-  // 備援模型
-  const backupSel = parseRoleSelect('role-backup');
-  if (backupSel) {
-    data.fallback_api_url = backupSel.api_url;
-    if (backupSel.api_key) data.fallback_api_key = backupSel.api_key;
-    data.fallback_model = backupSel.model;
-  }
-  // 聊天模型（含 API 端點）
-  const chatSel = parseRoleSelect('role-chat');
-  if (chatSel) {
-    data.chat_model = chatSel.model;
-    data.chat_api_url = chatSel.api_url;
-    if (chatSel.api_key) data.chat_api_key = chatSel.api_key;
-  }
-  // 行政模型（含 API 端點）
-  const adminSel = parseRoleSelect('role-admin');
-  if (adminSel) {
-    data.admin_model = adminSel.model;
-    data.admin_api_url = adminSel.api_url;
-    if (adminSel.api_key) data.admin_api_key = adminSel.api_key;
-  }
-  // 娛樂模型（含 API 端點）
-  const entSel = parseRoleSelect('role-entertainment');
-  if (entSel) {
-    data.entertainment_model = entSel.model;
-    data.entertainment_api_url = entSel.api_url;
-    if (entSel.api_key) data.entertainment_api_key = entSel.api_key;
-  }
-  // 降級鏈
-  data.fallback_chain_entries = fallbackChainData.map(f => {
-    const entry = aiPoolData.find(e => e.id === f.pool_id);
-    if (!entry) return null;
-    return {api_url: entry.api_url, api_key: entry.api_key || '', model: f.model};
-  }).filter(Boolean);
-  // 分類模型（手動欄位，如果模型分配 dropdown 沒選才用手動）
-  data.chat_model = data.chat_model || document.getElementById('ai-chat-model').value.trim();
-  data.admin_model = data.admin_model || document.getElementById('ai-admin-model').value.trim();
-  data.entertainment_model = data.entertainment_model || document.getElementById('ai-entertainment-model').value.trim();
-  // 娛樂功能模型
-  data.quiz_model = document.getElementById('ai-quiz-model').value.trim();
-  data.turtle_soup_model = document.getElementById('ai-turtle-soup-model').value.trim();
-  data.werewolf_model = document.getElementById('ai-werewolf-model').value.trim();
-  // AI 網警
-  data.ai_mod_enabled = document.getElementById('ai-mod-enabled').checked;
-  data.ai_mod_model = document.getElementById('ai-mod-model').value.trim();
-  data.ai_mod_api_url = document.getElementById('ai-mod-api-url').value.trim();
-  data.ai_mod_report_channel = document.getElementById('ai-mod-report-channel').value.trim() || null;
-  data.ai_mod_custom_rules = document.getElementById('ai-mod-custom-rules').value;
-  data.ai_mod_confidence = document.getElementById('ai-mod-confidence').value;
-  data.ai_mod_cooldown = parseInt(document.getElementById('ai-mod-cooldown').value) || 30;
-  data.ai_mod_max_tokens = parseInt(document.getElementById('ai-mod-max-tokens').value) || 150;
-  data.ai_mod_timeout = parseInt(document.getElementById('ai-mod-timeout').value) || 10;
-  data.ai_mod_severe_enabled = document.getElementById('ai-mod-severe-enabled').checked;
-  data.ai_mod_severe_rules = document.getElementById('ai-mod-severe-rules').value.trim();
-  data.ai_mod_exempt_roles = document.getElementById('ai-mod-exempt-roles').value.split(',').map(x => x.trim()).filter(x => x);
-  const modKey = document.getElementById('ai-mod-api-key').value.trim();
-  if (modKey) data.ai_mod_api_key = modKey;
-  const fallbackKey = document.getElementById('ai-fallback-key').value.trim();
-  if (fallbackKey) data.fallback_api_key = fallbackKey;
-  const apiKey = document.getElementById('ai-api-key').value.trim();
-  if (apiKey) data.api_key = apiKey;
+
   const r = await api('/api/chat-ai-settings', 'PUT', data);
   if (r.error) { alert('儲存失敗：' + r.error); return; }
-  showToast('✅ AI 聊天設定已儲存！');
+  alert('✅ AI 設定已儲存（含 AI 池資料，已即時同步到 Drive）');
 }
 
-// ── API 連接測試 ──
+
 async function testAIConnection(target) {
   const resultsDiv = document.getElementById('ai-test-results');
   resultsDiv.innerHTML = '<p class="text-sm text-gray-400">⏳ 測試中...</p>';

@@ -822,10 +822,11 @@ class EconomyGroup(app_commands.Group):
         # （備援API仍會先跳過免費降級鏈，因為fallback_mode="full"時
         # call_chat_api內部邏輯判定「反正要切更強的備援，不用先浪費時間
         # 試免費模型鏈」——這跟海龜湯/狼人殺的行為完全一致。）
+        _f_url, _f_key, _f_model = _resolve_role_endpoint("fortune", chat_ai_settings)
         settings = {
-            "api_url": chat_ai_settings["api_url"],
-            "api_key": chat_ai_settings["api_key"],
-            "model": chat_ai_settings.get("fortune_model") or chat_ai_settings["model"],
+            "api_url": _f_url or chat_ai_settings["api_url"],
+            "api_key": _f_key or chat_ai_settings["api_key"],
+            "model": _f_model or chat_ai_settings.get("fortune_model") or chat_ai_settings["model"],
             "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
         }
         if chat_ai_settings.get("fallback_enabled"):

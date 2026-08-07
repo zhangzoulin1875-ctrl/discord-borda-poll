@@ -1683,6 +1683,10 @@ chat_ai_settings = {
     "chat_model": "",                     # 聊天功能專用模型（留空=用主模型）
     "admin_model": "",                    # 行政功能專用模型（留空=用主模型）
     "entertainment_model": "",            # 娛樂功能專用模型（留空=用主模型）
+    # ── 總 AI 池系統（統一管理所有 API 端點+模型）──
+    "ai_pool": [],                        # [{"id":"p1","name":"OpenAI","api_url":"...","api_key":"...","models":"gpt-4o-mini,gpt-4o"}]
+    "model_roles": {},                    # 角色→池綁定：{"main":{"pool_id":"p1","model":"gpt-4o-mini"}, "backup":{...}, "chat":{...}, "admin":{...}, "entertainment":{...}, "quiz":{...}, "turtle_soup":{...}, "werewolf":{...}, "fortune":{...}, "vision":{...}, "ai_mod":{...}}
+    "model_chains": {"main": [], "vision": []},  # 降級鏈：{"main":[{"pool_id":"p1","model":"m2"}, ...], "vision":[...]}
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -2763,6 +2767,221 @@ def save_chat_ai_settings():
         print(f"⚠️ Failed to save chat AI settings: {e}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 總 AI 池：統一角色解析
+# ─────────────────────────────────────────────────────────────────────────────
+# 所有 AI 角色都透過 model_roles 字典映射到 AI 池中的特定端點+模型。
+# 角色清單：main, backup, chat, admin, entertainment, quiz, turtle_soup,
+#           werewolf, fortune, vision, ai_mod
+# 降級鏈透過 model_chains 字典：{"main": [{pool_id, model}, ...], "vision": [...]}
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 角色繼承鏈：如果該角色未綁定，回退到哪個角色
+_ROLE_FALLBACK = {
+    "backup": None,          # backup 沒有回退（直接用 legacy fallback_api_*）
+    "chat": "main",
+    "admin": "main",
+    "entertainment": "main",
+    "quiz": "entertainment",
+    "turtle_soup": "entertainment",
+    "werewolf": "entertainment",
+    "fortune": "entertainment",
+    "vision": "main",
+    "ai_mod": "main",
+}
+
+
+def _resolve_role_endpoint(role: str, settings: dict = None) -> tuple:
+    """解析角色 → (api_url, api_key, model)。
+    優先順序：
+    1. model_roles[role] → 從 AI 池中找對應的 pool entry
+    2. 沿 _ROLE_FALLBACK 鏈往上找（chat→main, quiz→entertainment→main, ...）
+    3. 最終回退到 legacy 欄位（api_url/api_key/model 或 fallback_api_*）
+    回傳 (api_url, api_key, model)；找不到 model 時 model="" 表示無法使用。
+    """
+    s = settings if settings is not None else chat_ai_settings
+    pool = s.get("ai_pool", [])
+    roles = s.get("model_roles", {})
+
+    def _try_role(r):
+        binding = roles.get(r)
+        if not binding or not isinstance(binding, dict):
+            return None
+        pool_id = binding.get("pool_id", "")
+        model = binding.get("model", "")
+        if not pool_id or not model:
+            return None
+        entry = next((e for e in pool if e.get("id") == pool_id), None)
+        if not entry:
+            return None
+        return (entry.get("api_url", ""), entry.get("api_key", ""), model)
+
+    # 1. Try the exact role
+    result = _try_role(role)
+    if result and result[0] and result[2]:
+        return result
+
+    # 2. Walk the fallback chain
+    r = role
+    for _ in range(5):  # max depth 5
+        parent = _ROLE_FALLBACK.get(r)
+        if parent is None:
+            break
+        result = _try_role(parent)
+        if result and result[0] and result[2]:
+            return result
+        r = parent
+
+    # 3. Final fallback: legacy fields
+    if role == "backup":
+        fb_url = s.get("fallback_api_url", "")
+        fb_key = s.get("fallback_api_key", "")
+        fb_model = s.get("fallback_model", "")
+        return (fb_url, fb_key, fb_model)
+
+    # For everything else, fall back to main model legacy fields
+    main_url = s.get("api_url", "")
+    main_key = s.get("api_key", "")
+    main_model = s.get("model", "gpt-4o-mini")
+    # But respect legacy per-category model overrides if they exist
+    legacy_map = {
+        "chat": "chat_model",
+        "admin": "admin_model",
+        "entertainment": "entertainment_model",
+        "quiz": "quiz_model",
+        "turtle_soup": "turtle_soup_model",
+        "werewolf": "werewolf_model",
+        "fortune": "fortune_model",
+        "vision": "vision_model",
+        "ai_mod": "ai_mod_model",
+    }
+    legacy_model_key = legacy_map.get(role)
+    if legacy_model_key:
+        override = s.get(legacy_model_key, "").strip()
+        if override:
+            # For ai_mod, also check if it has its own API URL/Key
+            if role == "ai_mod":
+                ai_mod_url = s.get("ai_mod_api_url", "").strip()
+                ai_mod_key = s.get("ai_mod_api_key", "").strip()
+                return (ai_mod_url or main_url, ai_mod_key or main_key, override)
+            return (main_url, main_key, override)
+    return (main_url, main_key, main_model)
+
+
+def _resolve_chain(chain_name: str, settings: dict = None) -> list:
+    """解析降級鏈 → [(api_url, api_key, model), ...]。
+    chain_name: "main" 或 "vision"。
+    優先使用 model_chains[chain_name]（池式降級鏈），若為空則回退到
+    legacy model_fallback_chain / vision_fallback_chain（逗號分隔，同一 API）。
+    """
+    s = settings if settings is not None else chat_ai_settings
+    pool = s.get("ai_pool", [])
+    chains = s.get("model_chains", {})
+
+    chain_entries = chains.get(chain_name, [])
+    if chain_entries:
+        result = []
+        for entry in chain_entries:
+            pool_id = entry.get("pool_id", "")
+            model = entry.get("model", "")
+            if not pool_id or not model:
+                continue
+            pool_entry = next((e for e in pool if e.get("id") == pool_id), None)
+            if pool_entry:
+                result.append((pool_entry.get("api_url", ""), pool_entry.get("api_key", ""), model))
+        if result:
+            return result
+
+    # Legacy fallback: comma-separated model names, same API as main/vision
+    if chain_name == "vision":
+        legacy_chain = s.get("vision_fallback_chain", "").strip()
+        main_url, main_key, _ = _resolve_role_endpoint("vision", s)
+    else:
+        legacy_chain = s.get("model_fallback_chain", "").strip()
+        main_url, main_key, _ = _resolve_role_endpoint("main", s)
+
+    if legacy_chain:
+        result = []
+        for m in legacy_chain.split(","):
+            m = m.strip()
+            if m:
+                result.append((main_url, main_key, m))
+        return result
+    return []
+
+
+def _auto_migrate_to_pool():
+    """自動遷移：如果 AI 池為空但有 legacy api_url/api_key/model，
+    建立一個預設池項目，並把 main 角色綁定到它。
+    確保從舊版升級時設定不會遺失。"""
+    global chat_ai_settings
+    pool = chat_ai_settings.get("ai_pool", [])
+    if pool:
+        return  # 已有池資料，不需遷移
+
+    main_url = chat_ai_settings.get("api_url", "").strip()
+    main_key = chat_ai_settings.get("api_key", "").strip()
+    main_model = chat_ai_settings.get("model", "").strip()
+
+    if not main_url or not main_model:
+        return  # 沒有 legacy 設定可遷移
+
+    pool_id = "p1"
+    new_pool = [{
+        "id": pool_id,
+        "name": "主要 API",
+        "api_url": main_url,
+        "api_key": main_key,
+        "models": main_model,
+    }]
+
+    # If fallback API exists, add it as a second pool entry
+    fb_url = chat_ai_settings.get("fallback_api_url", "").strip()
+    fb_key = chat_ai_settings.get("fallback_api_key", "").strip()
+    fb_model = chat_ai_settings.get("fallback_model", "").strip()
+    if fb_url and fb_model:
+        new_pool.append({
+            "id": "p2",
+            "name": "備援 API",
+            "api_url": fb_url,
+            "api_key": fb_key,
+            "models": fb_model,
+        })
+        chat_ai_settings["model_roles"]["backup"] = {"pool_id": "p2", "model": fb_model}
+
+    # If vision model exists, add it to p1's models
+    vision_model = chat_ai_settings.get("vision_model", "").strip()
+    if vision_model and vision_model != main_model:
+        new_pool[0]["models"] = f"{main_model},{vision_model}"
+
+    chat_ai_settings["ai_pool"] = new_pool
+    chat_ai_settings["model_roles"]["main"] = {"pool_id": pool_id, "model": main_model}
+
+    # Migrate model_fallback_chain to model_chains
+    chain_raw = chat_ai_settings.get("model_fallback_chain", "").strip()
+    if chain_raw:
+        chain_list = []
+        for m in chain_raw.split(","):
+            m = m.strip()
+            if m and m != main_model:
+                chain_list.append({"pool_id": pool_id, "model": m})
+        if chain_list:
+            chat_ai_settings.setdefault("model_chains", {})["main"] = chain_list
+
+    # Migrate vision_fallback_chain
+    vis_chain_raw = chat_ai_settings.get("vision_fallback_chain", "").strip()
+    if vis_chain_raw and vision_model:
+        vis_chain_list = []
+        for m in vis_chain_raw.split(","):
+            m = m.strip()
+            if m and m != vision_model:
+                vis_chain_list.append({"pool_id": pool_id, "model": m})
+        if vis_chain_list:
+            chat_ai_settings.setdefault("model_chains", {})["vision"] = vis_chain_list
+
+    print(f"✅ 自動遷移到 AI 池：{len(new_pool)} 個端點，main 綁定到 {pool_id}/{main_model}")
+
+
 def load_chat_ai_settings():
     global chat_ai_settings
     try:
@@ -3024,28 +3243,28 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     # ── 分類模型覆寫 ──
     # 根據 fallback_mode 判斷呼叫類別，如果該類別有專用模型且 caller 沒有
     # 自行指定 per-feature 模型（即 settings model == 主模型），則覆寫為專用模型。
+    # ── 統一角色解析：從 AI 池解析當前 category 的 (api_url, api_key, model) ──
+    _cat = category or ""
+    if not _cat and fallback_mode == "rate_limited":
+        _cat = "chat"
+    elif not _cat and fallback_mode == "full":
+        _cat = "admin"
+    elif not _cat and fallback_mode == "disabled":
+        _cat = "entertainment"
+    _pool_url, _pool_key, _pool_model = _resolve_role_endpoint(_cat or "chat", chat_ai_settings)
     _settings_model = settings.get("model", "")
     _main_model = chat_ai_settings.get("model", "")
-    _cat = category or ""
-    _category_override = ""
-    if _cat == "chat":
-        _category_override = chat_ai_settings.get("chat_model", "").strip()
-    elif _cat == "admin":
-        _category_override = chat_ai_settings.get("admin_model", "").strip()
-    elif _cat == "entertainment":
-        _category_override = chat_ai_settings.get("entertainment_model", "").strip()
-    elif not _cat:
-        # 向後兼容：從 fallback_mode 推斷
-        if fallback_mode == "rate_limited":
-            _category_override = chat_ai_settings.get("chat_model", "").strip()
-        elif fallback_mode == "full":
-            _category_override = chat_ai_settings.get("admin_model", "").strip()
-        elif fallback_mode == "disabled":
-            _category_override = chat_ai_settings.get("entertainment_model", "").strip()
-    if _category_override and _settings_model == _main_model:
-        settings = {**settings, "model": _category_override}
-        _diag_cat = f"🎯 使用分類模型：{_category_override}（{fallback_mode}）"
-        print(_diag_cat)
+    _settings_url = settings.get("api_url", "")
+    _main_url = chat_ai_settings.get("api_url", "")
+    if _pool_url and _pool_model:
+        # 只有當 caller 沿用主 API（沒自帶不同 API 端點）時才覆寫
+        if not _settings_url or _settings_url == _main_url:
+            settings["api_url"] = _pool_url
+            settings["api_key"] = _pool_key
+            if _settings_model == _main_model or not _settings_model:
+                settings["model"] = _pool_model
+                _diag_cat = f"🎯 池解析：{_cat} → {_pool_model}"
+                print(_diag_cat)
 
     # Circuit breaker check — if tripped, fail fast without hitting the network
     if not _ai_circuit_check():
@@ -3445,6 +3664,8 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # it's a cheap retry, much faster than the full backup API switchover.
         _chain_raw = settings.get("model_fallback_chain", "").strip()
         _primary_model = settings.get("model", "gpt-4o-mini")
+        # ── 池式降級鏈：每項可有不同 API 端點 ──
+        _pool_chain = _resolve_chain("main", chat_ai_settings)
         if _chain_raw:
             _model_chain = [m.strip() for m in _chain_raw.split(",") if m.strip()]
             if _primary_model not in _model_chain:
@@ -3761,6 +3982,23 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # Empty result without exception — let fallback handle it
         break
     # ── Fallback API ──
+    # ── 池式降級鏈：每項可有不同 API 端點 ──
+    if msg is not None and not msg.get("content") and not msg.get("tool_calls") and _pool_chain:
+        _pool_err = msg.get("error", "") if msg else ""
+        _is_pool_err = any(c in (_pool_err or "") for c in ["503", "502", "500", "504", "401", "403", "timeout", "Timeout", "逾時", "Connection"])
+        if _is_pool_err:
+            for _pc_url, _pc_key, _pc_model in _pool_chain:
+                if _remaining() < 3:
+                    break
+                _diag.append(f"🔗 池降級鏈：嘗試 {_pc_model}（{_pc_url[:40]}...）")
+                print(f"🔗 池降級鏈：嘗試 {_pc_model} @ {_pc_url[:60]}")
+                _pc_settings = {**settings, "api_url": _pc_url, "api_key": _pc_key, "model": _pc_model}
+                _pc_msg = await _post(_pc_settings, _pc_url, _pc_key, _pc_model, _diag)
+                if _pc_msg and (_pc_msg.get("content") or _pc_msg.get("tool_calls")):
+                    _pc_msg["_used_fallback"] = True
+                    _pc_msg["_used_model"] = _pc_model
+                    return _pc_msg
+
     # If the primary API returned a provider-side error (503, 502, 500,
     # 504, timeout) and a fallback API is configured, retry the entire
     # call against the fallback endpoint instead of giving up.
@@ -3808,9 +4046,12 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
 
             # Both gates passed — actually call the fallback API
             if _fb_gate_ok:
-                _fb_url = settings.get("fallback_api_url", "").strip()
-                _fb_key = settings.get("fallback_api_key", "").strip()
-                _fb_model = settings.get("fallback_model", "").strip()
+                # 優先用池解析的 "backup" 角色，回退到 legacy fallback_api_*
+                _fb_url, _fb_key, _fb_model = _resolve_role_endpoint("backup", chat_ai_settings)
+                if not _fb_url:
+                    _fb_url = settings.get("fallback_api_url", "").strip()
+                    _fb_key = settings.get("fallback_api_key", "").strip()
+                    _fb_model = settings.get("fallback_model", "").strip()
                 if _fb_url and _fb_key:
                     _diag.append(f"🔄 主 API 錯誤：{_primary_error[:100]}")
                     _diag.append(f"🔄 切換備援 API：{_fb_model or _fb_url}")
@@ -6062,20 +6303,27 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
     fallback API endpoint (same as the chat degradation chain)."""
     if _vision_diag is None:
         _vision_diag = []
-    vision_model = settings.get("vision_model", "")
+    # ── 池解析：vision 角色 ──
+    _vis_url, _vis_key, vision_model = _resolve_role_endpoint("vision", settings)
+    if not vision_model:
+        vision_model = settings.get("vision_model", "")
+        _vis_url = settings.get("api_url", "")
+        _vis_key = settings.get("api_key", "")
     if not vision_model:
         _vision_diag.append("📷 視覺模型未設定，跳過識圖")
         return ""
 
-    api_url = settings.get("api_url", "").rstrip("/")
+    api_url = (_vis_url or settings.get("api_url", "")).rstrip("/")
     if not api_url.endswith("/chat/completions"):
         if api_url.endswith("/v1") or api_url.endswith("/v2"):
             api_url += "/chat/completions"
         else:
             api_url += "/v1/chat/completions"
 
+    _vision_api_key = _vis_key or settings.get("api_key", "")
+
     headers = {
-        "Authorization": f"Bearer {settings['api_key']}",
+        "Authorization": f"Bearer {_vision_api_key}",
         "Content-Type": "application/json",
     }
 
@@ -6144,13 +6392,25 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
     # ── Build the model attempt list (degradation chain) ──
     _attempt_list = [(vision_model, api_url, settings["api_key"], "主視覺模型")]
 
-    # Parse vision_fallback_chain (comma-separated model names, same API endpoint)
-    _chain_raw = settings.get("vision_fallback_chain", "").strip()
-    if _chain_raw:
-        for _m in _chain_raw.split(","):
-            _m = _m.strip()
-            if _m and _m != vision_model:
-                _attempt_list.append((_m, api_url, settings["api_key"], f"降級視覺({_m})"))
+    # Pool-based vision chain (each entry can have different API)
+    _pool_vis_chain = _resolve_chain("vision", settings)
+    if _pool_vis_chain:
+        for _vc_url, _vc_key, _vc_model in _pool_vis_chain:
+            _vc_url_norm = _vc_url.rstrip("/")
+            if not _vc_url_norm.endswith("/chat/completions"):
+                if _vc_url_norm.endswith("/v1") or _vc_url_norm.endswith("/v2"):
+                    _vc_url_norm += "/chat/completions"
+                else:
+                    _vc_url_norm += "/v1/chat/completions"
+            _attempt_list.append((_vc_model, _vc_url_norm, _vc_key, f"降級視覺({_vc_model})"))
+    else:
+        # Legacy: comma-separated model names, same API endpoint
+        _chain_raw = settings.get("vision_fallback_chain", "").strip()
+        if _chain_raw:
+            for _m in _chain_raw.split(","):
+                _m = _m.strip()
+                if _m and _m != vision_model:
+                    _attempt_list.append((_m, api_url, _vision_api_key, f"降級視覺({_m})"))
 
     # Try the fallback API endpoint as last resort (same logic as chat: all chain models fail → backup API)
     if settings.get("fallback_enabled", False):
@@ -7564,6 +7824,14 @@ async def api_get_chat_ai_settings(request):
         "chat_model": chat_ai_settings.get("chat_model", ""),
         "admin_model": chat_ai_settings.get("admin_model", ""),
         "entertainment_model": chat_ai_settings.get("entertainment_model", ""),
+        # ── AI 池 ──
+        "ai_pool": [
+            {**{k: v for k, v in entry.items() if k != "api_key"},
+             "api_key_masked": (lambda k: k[:6]+"..."+k[-4:] if len(k)>10 else ("***" if k else ""))(entry.get("api_key", ""))}
+            for entry in chat_ai_settings.get("ai_pool", [])
+        ],
+        "model_roles": chat_ai_settings.get("model_roles", {}),
+        "model_chains": chat_ai_settings.get("model_chains", {"main": [], "vision": []}),
     })
 
 
@@ -7720,6 +7988,20 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["admin_model"] = body["admin_model"]
     if "entertainment_model" in body:
         chat_ai_settings["entertainment_model"] = body["entertainment_model"]
+    # ── AI 池 ──
+    if "ai_pool" in body:
+        # Preserve existing API keys if the new value is empty (user didn't re-enter)
+        new_pool = body["ai_pool"]
+        old_pool = chat_ai_settings.get("ai_pool", [])
+        old_keys = {e.get("id"): e.get("api_key", "") for e in old_pool}
+        for entry in new_pool:
+            if not entry.get("api_key"):
+                entry["api_key"] = old_keys.get(entry.get("id"), "")
+        chat_ai_settings["ai_pool"] = new_pool
+    if "model_roles" in body:
+        chat_ai_settings["model_roles"] = body["model_roles"]
+    if "model_chains" in body:
+        chat_ai_settings["model_chains"] = body["model_chains"]
     if "log_channel_id" in body:
         chat_ai_settings["log_channel_id"] = body["log_channel_id"] or None
     save_chat_ai_settings()
@@ -9233,10 +9515,12 @@ async def _ai_moderate_message(message):
     if message.author.bot:
         return
 
-    # 取得 API 設定（可獨立或沿用主 API）
-    api_url = settings.get("ai_mod_api_url") or settings.get("api_url", "")
-    api_key = settings.get("ai_mod_api_key") or settings.get("api_key", "")
-    model = settings.get("ai_mod_model") or settings.get("model", "gpt-4o-mini")
+    # 取得 API 設定（優先用池解析的 ai_mod 角色）
+    api_url, api_key, model = _resolve_role_endpoint("ai_mod", settings)
+    if not api_url:
+        api_url = settings.get("ai_mod_api_url") or settings.get("api_url", "")
+        api_key = settings.get("ai_mod_api_key") or settings.get("api_key", "")
+        model = settings.get("ai_mod_model") or settings.get("model", "gpt-4o-mini")
     if not api_url or not api_key:
         return
 

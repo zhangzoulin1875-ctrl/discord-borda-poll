@@ -115,10 +115,11 @@ async def _generate_turtle_soup(difficulty: str) -> tuple:
     往上傳，讓使用者看到的訊息更精確（是熔斷器封鎖還是單純逾時）。"""
     prompt = TURTLE_SOUP_GEN_PROMPT.format(difficulty=difficulty)
 
+    _ts_url, _ts_key, _ts_model = _resolve_role_endpoint("turtle_soup", chat_ai_settings)
     settings = {
-        "api_url": chat_ai_settings["api_url"],
-        "api_key": chat_ai_settings["api_key"],
-        "model": chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
+        "api_url": _ts_url or chat_ai_settings["api_url"],
+        "api_key": _ts_key or chat_ai_settings["api_key"],
+        "model": _ts_model or chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
         "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
@@ -206,10 +207,11 @@ async def _judge_turtle_soup_question(question: str, truth: str, qa_history: lis
 
     prompt = TURTLE_SOUP_JUDGE_PROMPT.format(truth=truth, qa_history=history_text)
 
+    _j_url, _j_key, _j_model = _resolve_role_endpoint("admin", chat_ai_settings)
     settings = {
-        "api_url": chat_ai_settings["api_url"],
-        "api_key": chat_ai_settings["api_key"],
-        "model": chat_ai_settings["model"],
+        "api_url": _j_url or chat_ai_settings["api_url"],
+        "api_key": _j_key or chat_ai_settings["api_key"],
+        "model": _j_model or chat_ai_settings["model"],
         "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
@@ -309,10 +311,11 @@ async def _generate_turtle_soup_hint(truth: str, qa_history: list, level: int = 
         truth=truth, qa_history=history_text, level_instruction=level_instruction,
     )
 
+    _ts_url, _ts_key, _ts_model = _resolve_role_endpoint("turtle_soup", chat_ai_settings)
     settings = {
-        "api_url": chat_ai_settings["api_url"],
-        "api_key": chat_ai_settings["api_key"],
-        "model": chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
+        "api_url": _ts_url or chat_ai_settings["api_url"],
+        "api_key": _ts_key or chat_ai_settings["api_key"],
+        "model": _ts_model or chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
         "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
     }
     if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:

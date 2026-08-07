@@ -162,7 +162,13 @@ async def _generate_quiz_question() -> dict | None:
 
     try:
         _quiz_settings = dict(chat_ai_settings)
-        _quiz_settings["model"] = chat_ai_settings.get("quiz_model") or chat_ai_settings["model"]
+        _quiz_url, _quiz_key, _quiz_model = _resolve_role_endpoint("quiz", chat_ai_settings)
+        if _quiz_url and _quiz_model:
+            _quiz_settings["api_url"] = _quiz_url
+            _quiz_settings["api_key"] = _quiz_key
+            _quiz_settings["model"] = _quiz_model
+        else:
+            _quiz_settings["model"] = chat_ai_settings.get("quiz_model") or chat_ai_settings["model"]
         result = await asyncio.wait_for(
             call_chat_api(messages, _quiz_settings, max_tokens=600, fallback_mode="full", category="entertainment"),  # 娛樂功能降級鏈：主模型失敗直接切備援API
             timeout=30
