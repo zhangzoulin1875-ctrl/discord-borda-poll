@@ -103,7 +103,7 @@ def _generate_default_provinces():
                 "country": p.get("country", ""),
                 "victory_points": vp_val,
                 "fortifications": 0, "infrastructure": 1 if area < 5 else 2, "resources": {},
-                "polygon": p["polygon"], "centroid": p["centroid"], "neighbors": list(p["neighbors"]),
+                "centroid": p["centroid"], "neighbors": list(p["neighbors"]),
                 "area": area,
             }
             if random.random() < 0.35:
@@ -1058,11 +1058,21 @@ class StormGroup(app_commands.Group):
 async def api_hoi4_state(request):
     """遊戲狀態 API — 不含省份多邊形資料（太大），前端用 /api/game/hoi4/map 獨立載入地圖形狀。"""
     try:
-        import copy
-        slim = copy.deepcopy(hoi4_state)
-        # Strip polygon data from provinces to reduce response size from ~22MB to ~200KB
-        for pid, p in slim.get("provinces", {}).items():
-            p.pop("polygon", None)
+        # Build lightweight response without polygon data (saves ~22MB)
+        slim = {
+            "game_active": hoi4_state.get("game_active", False),
+            "tick": hoi4_state.get("tick", 0),
+            "last_tick_iso": hoi4_state.get("last_tick_iso"),
+            "wars": hoi4_state.get("wars", {}),
+        }
+        # Copy countries (small, no polygons)
+        slim["countries"] = {cid: dict(c) for cid, c in hoi4_state.get("countries", {}).items()}
+        # Copy provinces without polygon data
+        slim_provs = {}
+        for pid, p in hoi4_state.get("provinces", {}).items():
+            sp = {k: v for k, v in p.items() if k != "polygon"}
+            slim_provs[pid] = sp
+        slim["provinces"] = slim_provs
         return web.json_response(slim)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
