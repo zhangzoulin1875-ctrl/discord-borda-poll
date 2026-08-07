@@ -689,6 +689,85 @@ class ChatGroup(app_commands.Group):
 
 
 
+    @app_commands.command(name="draw", description="文生圖 — 根據文字描述生成圖片")
+    @app_commands.describe(prompt="要生成的圖片描述（越詳細越好）")
+    async def chat_draw(self, interaction: discord.Interaction, prompt: str):
+        import asyncio as _asyncio
+        import aiohttp as _aiohttp
+
+        if not chat_ai_settings.get("t2i_enabled"):
+            await interaction.response.send_message("❌ 文生圖功能未啟用。請到 Dashboard → AI 聊天設定 → 文生圖區塊開啟。", ephemeral=True)
+            return
+
+        if not chat_ai_settings.get("t2i_api_url") or not chat_ai_settings.get("t2i_model"):
+            await interaction.response.send_message("❌ 文生圖 API 未設定完整（需要 URL、Key 和模型名稱）。請到 Dashboard 設定。", ephemeral=True)
+            return
+
+        # Rate limit check
+        _uid = str(interaction.user.id)
+        _allowed, _reason = _check_t2i_rate_limit(_uid, chat_ai_settings)
+        if not _allowed:
+            await interaction.response.send_message(_reason, ephemeral=True)
+            return
+
+        # Acknowledge immediately (Discord requires response within 3s)
+        await interaction.response.send_message(f"🎨 正在生成圖片，請稍候...\n**提示詞：** {prompt[:200]}", ephemeral=False)
+
+        # Generate image
+        result = await _generate_image(prompt, chat_ai_settings)
+
+        if result.get("success"):
+            _record_t2i_usage(_uid)
+            image_url = result.get("image_url")
+            image_path = result.get("image_path")
+            revised_prompt = result.get("revised_prompt")
+
+            text_parts = [f"🎨 **{interaction.user.display_name}** 生成的圖片！"]
+            if revised_prompt and revised_prompt != prompt:
+                text_parts.append(f"（AI 優化後的提示詞：{revised_prompt[:100]}）")
+
+            try:
+                if image_path:
+                    import os as _os
+                    file = discord.File(image_path, filename="generated.png")
+                    await interaction.edit_original_response(content="\n".join(text_parts), attachments=[file])
+                    try:
+                        _os.remove(image_path)
+                    except Exception:
+                        pass
+                elif image_url:
+                    # Try to download and send as file
+                    try:
+                        async with _aiohttp.ClientSession(timeout=_aiohttp.ClientTimeout(total=30)) as sess:
+                            async with sess.get(image_url) as img_resp:
+                                if img_resp.status == 200:
+                                    import io as _io
+                                    img_bytes = await img_resp.read()
+                                    ct = img_resp.headers.get("Content-Type", "image/png")
+                                    ext = "png"
+                                    if "jpeg" in ct or "jpg" in ct:
+                                        ext = "jpg"
+                                    elif "webp" in ct:
+                                        ext = "webp"
+                                    file = discord.File(_io.BytesIO(img_bytes), filename=f"generated.{ext}")
+                                    await interaction.edit_original_response(content="\n".join(text_parts), attachments=[file])
+                                else:
+                                    embed = discord.Embed(title="🎨 生成圖片", color=0x5865f2)
+                                    embed.set_image(url=image_url)
+                                    embed.set_footer(text=f"提示詞: {prompt[:200]}")
+                                    await interaction.edit_original_response(content="\n".join(text_parts), embeds=[embed])
+                    except Exception:
+                        embed = discord.Embed(title="🎨 生成圖片", color=0x5865f2)
+                        embed.set_image(url=image_url)
+                        embed.set_footer(text=f"提示詞: {prompt[:200]}")
+                        await interaction.edit_original_response(content="\n".join(text_parts), embeds=[embed])
+            except Exception as e:
+                await interaction.edit_original_response(content=f"❌ 圖片發送失敗: {e}")
+        else:
+            await interaction.edit_original_response(content=f"❌ 文生圖失敗：{result.get('error', '未知錯誤')}")
+
+
+
 # ──────────────────────────────────────────────
 # 專屬 AI 聊天室指令群組
 # ──────────────────────────────────────────────

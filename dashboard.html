@@ -38,6 +38,7 @@
       <div class="nav-tab" data-tab="nations" onclick="showNationsPanel()">🌍 會員國</div>
       <div class="nav-tab" data-tab="scan" onclick="showScanPanel()">🌐 關係譜圖</div>
       <div class="nav-tab" data-tab="ai-mod" onclick="showChatAIPanel(); setTimeout(() => { const el = document.getElementById('ai-mod-section'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 300);">🚨 AI 網警</div>
+      <div class="nav-tab" data-tab="t2i" onclick="showChatAIPanel(); setTimeout(() => { const el = document.getElementById('ai-t2i-enabled'); if (el) el.closest('.bg-\\[\\#2b2d31\\]').scrollIntoView({behavior: 'smooth', block: 'start'}); }, 300);">🎨 文生圖</div>
       <div class="nav-tab" data-tab="schedule" onclick="showSchedulePanel()">📅 排程通知</div>
     </div>
   </div>
@@ -475,6 +476,76 @@
           <p class="text-xs text-orange-400">⚠️ 啟用後 AI 需有「管理訊息」權限才能刪除訊息。未刪除成功仍會記錄到網警頻道。</p>
         </div>
       </div>
+
+      <!-- 文生圖 (Text-to-Image) -->
+  <div class="bg-[#2b2d31] rounded-xl p-5">
+    <h3 class="font-semibold mb-1">🎨 文生圖 (Text-to-Image)</h3>
+    <p class="text-xs text-gray-400 mb-4">偵測聊天中的生圖請求自動生成圖片，也可用 <code>/chat draw &lt;描述&gt;</code> 直接生圖。需設定獨立的生圖 API。</p>
+    <div class="space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm">啟用文生圖</p>
+          <p class="text-xs text-gray-400">開啟後可自動偵測聊天中的生圖請求，也支援 /chat draw 指令</p>
+        </div>
+        <label class="toggle"><input type="checkbox" id="ai-t2i-enabled"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm">聊天自動偵測</p>
+          <p class="text-xs text-gray-400">偵測到「幫我畫...」「生成圖片」等關鍵詞時自動生圖</p>
+        </div>
+        <label class="toggle"><input type="checkbox" id="ai-t2i-auto-detect" checked><span class="toggle-slider"></span></label>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">生圖 API URL</label>
+          <input id="ai-t2i-api-url" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/images/generations">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">生圖 API Key</label>
+          <input id="ai-t2i-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="sk-...（留空=不修改）">
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">模型名稱</label>
+          <input id="ai-t2i-model" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="dall-e-3, flux-1, ...">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">圖片尺寸</label>
+          <select id="ai-t2i-size" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+            <option value="1024x1024">1024×1024（方形）</option>
+            <option value="1792x1024">1792×1024（橫向）</option>
+            <option value="1024x1792">1024×1792（直向）</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">品質 (DALL-E)</label>
+          <select id="ai-t2i-quality" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+            <option value="standard">標準</option>
+            <option value="hd">HD</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">冷卻時間（秒）</label>
+          <input id="ai-t2i-cooldown" type="number" min="0" value="60" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">每日上限</label>
+          <input id="ai-t2i-daily-limit" type="number" min="0" value="10" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">擁有者豁免限速</label>
+          <select id="ai-t2i-owner-exempt" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm">
+            <option value="true">是</option>
+            <option value="false">否</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
 
       <!-- 會議排程通知 -->
       <div id="schedule-section" class="bg-[#2b2d31] rounded-xl p-5">
@@ -1008,6 +1079,18 @@ async function showChatAIPanel() {
   // AI 紀錄頻道
   document.getElementById('ai-log-channel-id').value = s.log_channel_id || '';
 
+  // 文生圖 (T2I)
+  document.getElementById('ai-t2i-enabled').checked = s.t2i_enabled || false;
+  document.getElementById('ai-t2i-auto-detect').checked = s.t2i_auto_detect !== false;
+  document.getElementById('ai-t2i-api-url').value = s.t2i_api_url || '';
+  // Don't set API key (masked) — user types new value only when changing
+  document.getElementById('ai-t2i-model').value = s.t2i_model || '';
+  document.getElementById('ai-t2i-size').value = s.t2i_size || '1024x1024';
+  document.getElementById('ai-t2i-quality').value = s.t2i_quality || 'standard';
+  document.getElementById('ai-t2i-cooldown').value = s.t2i_cooldown ?? 60;
+  document.getElementById('ai-t2i-daily-limit').value = s.t2i_daily_limit ?? 10;
+  document.getElementById('ai-t2i-owner-exempt').value = String(s.t2i_owner_exempt !== false);
+
   // Turtle Soup
   document.getElementById('ai-turtle-soup-enabled').checked = s.turtle_soup_enabled || false;
   document.getElementById('ai-turtle-soup-channel').value = s.turtle_soup_channel_id || '';
@@ -1276,6 +1359,17 @@ async function saveChatAISettings() {
     drive_sync_interval: parseInt(document.getElementById('ai-drive-interval').value) || 60,
     // AI 紀錄頻道
     log_channel_id: document.getElementById('ai-log-channel-id').value.trim() || null,
+    // 文生圖 (T2I)
+    t2i_enabled: document.getElementById('ai-t2i-enabled').checked,
+    t2i_auto_detect: document.getElementById('ai-t2i-auto-detect').checked,
+    t2i_api_url: document.getElementById('ai-t2i-api-url').value.trim(),
+    t2i_api_key: document.getElementById('ai-t2i-api-key').value.trim(),
+    t2i_model: document.getElementById('ai-t2i-model').value.trim(),
+    t2i_size: document.getElementById('ai-t2i-size').value,
+    t2i_quality: document.getElementById('ai-t2i-quality').value,
+    t2i_cooldown: parseInt(document.getElementById('ai-t2i-cooldown').value) || 60,
+    t2i_daily_limit: parseInt(document.getElementById('ai-t2i-daily-limit').value) || 10,
+    t2i_owner_exempt: document.getElementById('ai-t2i-owner-exempt').value === 'true',
     // Turtle Soup
     turtle_soup_enabled: document.getElementById('ai-turtle-soup-enabled').checked,
     turtle_soup_channel_id: document.getElementById('ai-turtle-soup-channel').value.trim(),

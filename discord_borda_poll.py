@@ -1699,6 +1699,17 @@ chat_ai_settings = {
     "ai_pool": [],                        # [{"id":"p1","name":"OpenAI","api_url":"...","api_key":"...","models":"gpt-4o-mini,gpt-4o"}]
     "model_roles": {},                    # 角色→池綁定：{"main":{"pool_id":"p1","model":"gpt-4o-mini"}, "backup":{...}, "chat":{...}, "admin":{...}, "entertainment":{...}, "quiz":{...}, "turtle_soup":{...}, "werewolf":{...}, "fortune":{...}, "vision":{...}, "ai_mod":{...}}
     "model_chains": {"main": [], "vision": []},  # 降級鏈：{"main":[{"pool_id":"p1","model":"m2"}, ...], "vision":[...]}
+    # ── 文生圖（Text-to-Image）──
+    "t2i_enabled": False,              # 是否啟用文生圖功能
+    "t2i_api_url": "",                 # 文生圖 API URL（例如 https://api.openai.com/v1/images/generations）
+    "t2i_api_key": "",                 # 文生圖 API Key（可與聊天 API 不同）
+    "t2i_model": "",                   # 文生圖模型名稱（例如 dall-e-3, flux-1, stable-diffusion-xl）
+    "t2i_size": "1024x1024",           # 圖片尺寸（1024x1024 / 1792x1024 / 1024x1792）
+    "t2i_quality": "standard",         # 品質（standard / hd，DALL-E 適用）
+    "t2i_cooldown": 60,                # 每位使用者兩次生圖之間的最短間隔（秒）
+    "t2i_daily_limit": 10,             # 每位使用者每日生圖上限
+    "t2i_owner_exempt": True,          # 擁有者豁免限速與每日配額
+    "t2i_auto_detect": True,           # 是否在聊天中自動偵測生圖請求
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -6623,6 +6634,261 @@ def _format_nation_registry_context(guild_id: int, query: str) -> str:
     return "\n".join(lines)
 
 
+# ── 文生圖（Text-to-Image）功能 ──
+# 偵測聊天中的生圖請求，調用 T2I API 生成圖片，並在回覆中附上圖片。
+# 也可以透過 /chat draw 指令直接要求生圖。
+
+import re as _t2i_re
+
+# 生圖請求偵測關鍵詞（用於聊天自動偵測）
+_T2I_TRIGGERS = [
+    # 中文：明確的生圖指令
+    r"(?:幫我|請)?畫一?(?:張|個|幅)?(.+)",
+    r"生成一?(?:張|幅)?(.+?)(?:的)?圖(?:片)?",
+    r"產生一?(?:張|幅)?(.+?)(?:的)?圖(?:片)?",
+    r"製作一?(?:張|幅)?(.+?)(?:的)?圖(?:片)?",
+    r"畫圖[：: ]+(.+)",
+    # 英文
+    r"draw (?:me )?(?:a |an |the )?(.+)",
+    r"generate (?:a |an |the )?(.+?)(?:image|picture|pic)",
+    r"create (?:a |an |the )?(.+?)(?:image|picture|pic)",
+    r"make (?:a |an |the )?(.+?)(?:image|picture|pic)",
+]
+
+# 否定關鍵詞：包含這些的不要觸發（避免誤判）
+_T2I_NEGATIVE = [
+    "畫質", "畫面", "畫家", "畫作", "畫展", "畫廊", "圖片品質",
+    "截圖", "修圖", "P圖", "動圖", "表情圖",
+    "picture quality", "image quality", "screenshot",
+]
+
+# T2I 冷卻追蹤
+_t2i_cooldowns: dict = {}  # user_id -> last_generation_timestamp
+_t2i_daily_usage: dict = {}  # user_id -> {date: count}
+
+def _check_t2i_rate_limit(user_id: str, settings: dict) -> tuple:
+    """Check if user can generate an image. Returns (allowed, reason)."""
+    is_owner_user = user_id == "1482256878334640209"
+    if is_owner_user and settings.get("t2i_owner_exempt", True):
+        return (True, None)
+
+    cooldown = settings.get("t2i_cooldown", 60)
+    daily_limit = settings.get("t2i_daily_limit", 10)
+
+    now = _time.time()
+    last_gen = _t2i_cooldowns.get(user_id, 0)
+    if cooldown > 0 and (now - last_gen) < cooldown:
+        remaining = int(cooldown - (now - last_gen))
+        return (False, f"⏱️ 文生圖冷卻中，請等待 {remaining} 秒後再試～")
+
+    # Daily limit
+    today = datetime.now(GMT8).strftime("%Y-%m-%d")
+    user_daily = _t2i_daily_usage.setdefault(user_id, {})
+    today_count = user_daily.get(today, 0)
+    if daily_limit > 0 and today_count >= daily_limit:
+        return (False, f"📋 你今天的文生圖額度已用完（每日上限 {daily_limit} 張），明天再來～")
+
+    return (True, None)
+
+def _record_t2i_usage(user_id: str):
+    """Record a T2I generation for rate limiting."""
+    _t2i_cooldowns[user_id] = _time.time()
+    today = datetime.now(GMT8).strftime("%Y-%m-%d")
+    _t2i_daily_usage.setdefault(user_id, {})[today] = _t2i_daily_usage.get(user_id, {}).get(today, 0) + 1
+
+def _detect_t2i_request(text: str, settings: dict) -> str | None:
+    """Check if a message is requesting image generation.
+    Returns the extracted prompt if yes, None if no.
+    """
+    if not settings.get("t2i_enabled") or not settings.get("t2i_auto_detect"):
+        return None
+    if not settings.get("t2i_api_url") or not settings.get("t2i_model"):
+        return None
+
+    text = text.strip()
+    if len(text) < 4:  # Too short to be a meaningful request
+        return None
+
+    # Check negative keywords first
+    text_lower = text.lower()
+    for neg in _T2I_NEGATIVE:
+        if neg in text_lower:
+            return None
+
+    # Try matching trigger patterns
+    for pattern in _T2I_TRIGGERS:
+        m = _t2i_re.search(pattern, text, _t2i_re.IGNORECASE)
+        if m:
+            prompt = m.group(1).strip()
+            # Clean up the prompt — remove trailing particles
+            prompt = _t2i_re.sub(r"^(?:的|圖|圖片)$", "", prompt).strip()
+            if len(prompt) >= 2:
+                return prompt
+
+    return None
+
+async def _generate_image(prompt: str, settings: dict) -> dict:
+    """Call T2I API to generate an image from a text prompt.
+    Returns: {"success": True, "image_url": "...", "revised_prompt": "..."} or
+             {"success": False, "error": "..."}
+    """
+    api_url = settings.get("t2i_api_url", "").strip()
+    api_key = settings.get("t2i_api_key", "").strip()
+    model = settings.get("t2i_model", "").strip()
+    size = settings.get("t2i_size", "1024x1024")
+    quality = settings.get("t2i_quality", "standard")
+
+    if not api_url or not api_key or not model:
+        return {"success": False, "error": "文生圖 API 未設定完整（需要 URL、Key 和模型名稱）"}
+
+    # Normalize URL — accept both /images/generations and base URLs
+    url = api_url
+    if not url.endswith("/images/generations"):
+        if url.endswith("/v1"):
+            url += "/images/generations"
+        else:
+            url = url.rstrip("/") + "/v1/images/generations"
+
+    payload = {
+        "model": model,
+        "prompt": prompt[:1000],  # Most APIs cap at 1000 chars
+        "n": 1,
+        "size": size,
+    }
+    # DALL-E specific: quality parameter
+    if quality and "dall-e" in model.lower():
+        payload["quality"] = quality
+        payload["response_format"] = "url"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=100)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    err_text = await resp.text()
+                    print(f"🎨 T2I API 失敗 (HTTP {resp.status}): {err_text[:300]}")
+                    return {"success": False, "error": f"API 回應 HTTP {resp.status}: {err_text[:200]}"}
+
+                data = await resp.json()
+
+                # Handle different response formats:
+                # OpenAI: {"data": [{"url": "...", "revised_prompt": "..."}]}
+                # OpenAI b64: {"data": [{"b64_json": "..."}]}
+                # Some providers: {"images": [{"url": "..."}]}
+                # Others: {"output": [{"url": "..."}]}
+                image_url = None
+                b64_data = None
+                revised_prompt = None
+
+                items = data.get("data") or data.get("images") or data.get("output") or []
+                if items and isinstance(items, list):
+                    item = items[0]
+                    image_url = item.get("url") or item.get("image_url")
+                    b64_data = item.get("b64_json") or item.get("b64")
+                    revised_prompt = item.get("revised_prompt")
+
+                if not image_url and not b64_data:
+                    print(f"🎨 T2I API 回應格式無法解析: {str(data)[:300]}")
+                    return {"success": False, "error": "API 回應格式無法識別圖片 URL"}
+
+                # If b64 data, save to temp file and return as file path
+                image_path = None
+                if b64_data and not image_url:
+                    import base64 as _b64
+                    image_bytes = _b64.b64decode(b64_data)
+                    image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}.png")
+                    with open(image_path, "wb") as f:
+                        f.write(image_bytes)
+
+                result = {"success": True}
+                if image_url:
+                    result["image_url"] = image_url
+                if image_path:
+                    result["image_path"] = image_path
+                if revised_prompt:
+                    result["revised_prompt"] = revised_prompt
+
+                print(f"🎨 T2I 成功: {prompt[:50]}... → {'URL' if image_url else 'b64 file'}")
+                return result
+
+    except asyncio.TimeoutError:
+        return {"success": False, "error": "文生圖 API 逾時（超過 120 秒）"}
+    except Exception as e:
+        print(f"🎨 T2I 異常: {type(e).__name__}: {e}")
+        return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
+
+async def _send_t2i_result(message, prompt: str, result: dict, settings: dict, is_command: bool = False):
+    """Send T2I result to Discord — download image and send as file attachment."""
+    if not result.get("success"):
+        error_msg = result.get("error", "未知錯誤")
+        if is_command:
+            await message.reply(f"❌ 文生圖失敗：{error_msg}", mention_author=False)
+        else:
+            await message.reply(f"🎨 生圖失敗了：{error_msg}", mention_author=False)
+        return
+
+    image_url = result.get("image_url")
+    image_path = result.get("image_path")
+    revised_prompt = result.get("revised_prompt")
+
+    # Build the text part of the reply
+    text_parts = [f"🎨 根據你的要求生成了圖片！"]
+    if revised_prompt and revised_prompt != prompt:
+        text_parts.append(f"（AI 優化後的提示詞：{revised_prompt[:100]}）")
+    text_reply = "\n".join(text_parts)
+
+    try:
+        if image_path:
+            # b64 data saved to file
+            file = discord.File(image_path, filename="generated.png")
+            await message.reply(text_reply, file=file, mention_author=False)
+            # Clean up temp file
+            try:
+                os.remove(image_path)
+            except Exception:
+                pass
+        elif image_url:
+            # Download the image and send as file (persists in Discord CDN)
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as sess:
+                    async with sess.get(image_url) as img_resp:
+                        if img_resp.status == 200:
+                            img_bytes = await img_resp.read()
+                            # Determine file extension from content-type
+                            ct = img_resp.headers.get("Content-Type", "image/png")
+                            ext = "png"
+                            if "jpeg" in ct or "jpg" in ct:
+                                ext = "jpg"
+                            elif "webp" in ct:
+                                ext = "webp"
+                            file = discord.File(io.BytesIO(img_bytes), filename=f"generated.{ext}")
+                            await message.reply(text_reply, file=file, mention_author=False)
+                        else:
+                            # Fallback: send URL in embed
+                            embed = discord.Embed(title="🎨 生成圖片", color=0x5865f2)
+                            embed.set_image(url=image_url)
+                            embed.set_footer(text=f"提示詞: {prompt[:200]}")
+                            await message.reply(text_reply, embed=embed, mention_author=False)
+            except Exception as dl_err:
+                print(f"🎨 下載圖片失敗，直接發送 URL: {dl_err}")
+                embed = discord.Embed(title="🎨 生成圖片", color=0x5865f2)
+                embed.set_image(url=image_url)
+                embed.set_footer(text=f"提示詞: {prompt[:200]}")
+                await message.reply(text_reply, embed=embed, mention_author=False)
+
+        print(f"✅ T2I 圖片已發送 to #{message.channel}")
+    except discord.Forbidden:
+        await message.reply("❌ 我沒有在這裡發送檔案的權限。", mention_author=False)
+    except Exception as e:
+        print(f"❌ T2I 發送失敗: {e}")
+        await message.reply(f"❌ 圖片發送失敗: {e}", mention_author=False)
+
+
 async def generate_chat_reply(message, settings: dict) -> tuple:
     """Generate a reply for a chat message with brief context, server awareness, and per-user memory.
     Returns (reply_text, new_facts_or_None, mod_action_or_None, model_info_or_None)."""
@@ -7962,6 +8228,17 @@ async def api_get_chat_ai_settings(request):
         ],
         "model_roles": chat_ai_settings.get("model_roles", {}),
         "model_chains": chat_ai_settings.get("model_chains", {"main": [], "vision": []}),
+        # ── 文生圖 ──
+        "t2i_enabled": chat_ai_settings.get("t2i_enabled", False),
+        "t2i_api_url": chat_ai_settings.get("t2i_api_url", ""),
+        "t2i_api_key_masked": (lambda k: k[:6]+"..."+k[-4:] if len(k)>10 else ("***" if k else ""))(chat_ai_settings.get("t2i_api_key", "")),
+        "t2i_model": chat_ai_settings.get("t2i_model", ""),
+        "t2i_size": chat_ai_settings.get("t2i_size", "1024x1024"),
+        "t2i_quality": chat_ai_settings.get("t2i_quality", "standard"),
+        "t2i_cooldown": chat_ai_settings.get("t2i_cooldown", 60),
+        "t2i_daily_limit": chat_ai_settings.get("t2i_daily_limit", 10),
+        "t2i_owner_exempt": chat_ai_settings.get("t2i_owner_exempt", True),
+        "t2i_auto_detect": chat_ai_settings.get("t2i_auto_detect", True),
     })
 
 
@@ -8157,6 +8434,27 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["model_chains"] = body["model_chains"]
     if "log_channel_id" in body:
         chat_ai_settings["log_channel_id"] = body["log_channel_id"] or None
+    # ── 文生圖 ──
+    if "t2i_enabled" in body:
+        chat_ai_settings["t2i_enabled"] = bool(body["t2i_enabled"])
+    if "t2i_api_url" in body:
+        chat_ai_settings["t2i_api_url"] = body["t2i_api_url"]
+    if "t2i_api_key" in body and body["t2i_api_key"]:
+        chat_ai_settings["t2i_api_key"] = body["t2i_api_key"]
+    if "t2i_model" in body:
+        chat_ai_settings["t2i_model"] = body["t2i_model"]
+    if "t2i_size" in body:
+        chat_ai_settings["t2i_size"] = body["t2i_size"]
+    if "t2i_quality" in body:
+        chat_ai_settings["t2i_quality"] = body["t2i_quality"]
+    if "t2i_cooldown" in body:
+        chat_ai_settings["t2i_cooldown"] = int(body["t2i_cooldown"])
+    if "t2i_daily_limit" in body:
+        chat_ai_settings["t2i_daily_limit"] = int(body["t2i_daily_limit"])
+    if "t2i_owner_exempt" in body:
+        chat_ai_settings["t2i_owner_exempt"] = bool(body["t2i_owner_exempt"])
+    if "t2i_auto_detect" in body:
+        chat_ai_settings["t2i_auto_detect"] = bool(body["t2i_auto_detect"])
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -10404,6 +10702,30 @@ async def on_message(message):
         # extra requests QUEUE instead of all hitting the API at once and timing
         # out under load. The semaphore is created in on_ready.
         sem = _chat_semaphore or asyncio.Semaphore(5)
+        # ── 文生圖自動偵測 ──
+        # 在呼叫 AI 之前，先檢查訊息是否為生圖請求
+        _t2i_prompt = _detect_t2i_request(clean or message.content, chat_ai_settings)
+        if _t2i_prompt:
+            _uid = str(message.author.id)
+            _allowed, _reason = _check_t2i_rate_limit(_uid, chat_ai_settings)
+            if not _allowed:
+                try:
+                    await message.reply(_reason, mention_author=False)
+                except Exception:
+                    pass
+                _user_generating.discard(_uid)
+                return
+            print(f"🎨 偵測到生圖請求: {_t2i_prompt[:80]}...")
+            async with message.channel.typing():
+                _t2i_result = await _generate_image(_t2i_prompt, chat_ai_settings)
+            if _t2i_result.get("success"):
+                _record_t2i_usage(_uid)
+                await _send_t2i_result(message, _t2i_prompt, _t2i_result, chat_ai_settings)
+            else:
+                await _send_t2i_result(message, _t2i_prompt, _t2i_result, chat_ai_settings, is_command=False)
+            _user_generating.discard(_uid)
+            return
+
         async with sem:
             async with message.channel.typing():
                 reply, new_facts, mod_action, model_info = await generate_chat_reply(message, chat_ai_settings)
