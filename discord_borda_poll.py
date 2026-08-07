@@ -8766,6 +8766,12 @@ async def api_get_chat_ai_settings(request):
         "t2i_premium_daily_limit": chat_ai_settings.get("t2i_premium_daily_limit", 30),
         "t2i_premium_daily_count": chat_ai_settings.get("t2i_premium_daily_count", 0),
         "t2i_premium_daily_date": chat_ai_settings.get("t2i_premium_daily_date", ""),
+        # ── 生圖提示詞過濾 ──
+        "t2i_filter_enabled": chat_ai_settings.get("t2i_filter_enabled", False),
+        "t2i_filter_pool_id": chat_ai_settings.get("t2i_filter_pool_id", ""),
+        "t2i_filter_model": chat_ai_settings.get("t2i_filter_model", ""),
+        "t2i_filter_timeout": chat_ai_settings.get("t2i_filter_timeout", 15),
+        "t2i_filter_max_tokens": chat_ai_settings.get("t2i_filter_max_tokens", 100),
     })
 
 
