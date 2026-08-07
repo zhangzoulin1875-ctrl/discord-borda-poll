@@ -3695,9 +3695,17 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # 就被讀取而拋出 UnboundLocalError（這正是先前部署崩潰的根因）。
         _reasoning_effort = _get_reasoning_effort(fallback_mode, category)
         _reasoning_params = _build_reasoning_params(_reasoning_effort)
-        if _reasoning_params and api_url not in _reasoning_unsupported_apis:
+        # ── 短預算跳過 reasoning ──
+        # reasoning（思考）模式讓模型在生成前先「想」，輕鬆吃掉 10-15 秒。
+        # 聊天路徑只有 ~15-20s 預算，開 reasoning 等於保證逾時——模型還在想
+        # 就被 timeout 切斷了。只有預算 >30s 的場景（海龜湯50s、占卜40s
+        # 等背景任務）才值得開 reasoning。
+        _budget_for_reasoning = _remaining_primary(floor=0)
+        if _reasoning_params and api_url not in _reasoning_unsupported_apis and _budget_for_reasoning > 30:
             payload.update(_reasoning_params)
-            _diag.append(f"🧠 reasoning_effort={_reasoning_effort}")
+            _diag.append(f"🧠 reasoning_effort={_reasoning_effort} (budget {_budget_for_reasoning:.0f}s)")
+        elif _reasoning_params and _budget_for_reasoning <= 30:
+            _diag.append(f"⏭️ reasoning 跳過（預算 {_budget_for_reasoning:.0f}s < 30s）")
         if use_tools:
             payload["tools"] = use_tools
             payload["tool_choice"] = "auto"

@@ -109,37 +109,41 @@ _WW_NARRATOR_PROMPT = """你是一個狼人殺遊戲的主持人（旁白）。�
 {extra}"""
 
 async def _ww_narrate(scene: str, extra: str = "") -> str:
-    """生成 AI 旁白文字。"""
+    """生成 AI 旁白文字。失敗時沿池降級鏈換模型重試，不只靠備援 API。"""
     prompt = _WW_NARRATOR_PROMPT.format(scene=scene, extra=extra)
     _ww_url, _ww_key, _ww_model = _resolve_role_endpoint("werewolf", chat_ai_settings)
-    settings = {
-        "api_url": _ww_url or chat_ai_settings["api_url"],
-        "api_key": _ww_key or chat_ai_settings["api_key"],
-        "model": _ww_model or chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
-        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
-    }
-    if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
-        settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
-        settings["fallback_api_key"] = chat_ai_settings.get("fallback_api_key", "")
-        settings["fallback_model"] = chat_ai_settings.get("fallback_model", "")
+    _candidates = [(
+        _ww_url or chat_ai_settings["api_url"],
+        _ww_key or chat_ai_settings["api_key"],
+        _ww_model or chat_ai_settings["model"],
+    )]
+    for _c_url, _c_key, _c_model in _resolve_chain("main", chat_ai_settings):
+        if (_c_url, _c_key, _c_model) not in _candidates:
+            _candidates.append((_c_url, _c_key, _c_model))
+    _candidates = _candidates[:3]
 
     messages = [{"role": "user", "content": prompt}]
-    try:
-        result = await call_chat_api(
-            messages, settings,
-            max_tokens=200,
-            timeout_total=15,
-            timeout_read=12,
-            is_background=True,
-            fallback_mode="full",
-            fallback_user_id="werewolf",
-            category="entertainment",
-        )
-        text = result.get("content", "").strip()
-        return text or None
-    except Exception as e:
-        print(f"⚠️ WW narrate failed: {e}")
-        return None
+    for _i, (_c_url, _c_key, _c_model) in enumerate(_candidates):
+        settings = {"api_url": _c_url, "api_key": _c_key, "model": _c_model}
+        if _i == 0 and chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
+            settings["fallback_enabled"] = True
+        try:
+            result = await call_chat_api(
+                messages, settings,
+                max_tokens=200,
+                timeout_total=15,
+                timeout_read=12,
+                is_background=True,
+                fallback_mode="full" if _i == 0 else "disabled",
+                fallback_user_id="werewolf",
+                category="entertainment",
+            )
+            text = result.get("content", "").strip()
+            if text:
+                return text
+        except Exception as e:
+            print(f"⚠️ WW narrate attempt {_i+1}/{len(_candidates)} ({_c_model}) failed: {e}")
+    return None
 
 
 # ── 角色分配（6人局：2狼人 + 1預言家 + 3村民）──
@@ -996,40 +1000,40 @@ async def _ww_ai_discuss(ai_player: dict) -> tuple[str, str | None] | None:
         )
 
     _ww_url, _ww_key, _ww_model = _resolve_role_endpoint("werewolf", chat_ai_settings)
-    settings = {
-        "api_url": _ww_url or chat_ai_settings["api_url"],
-        "api_key": _ww_key or chat_ai_settings["api_key"],
-        "model": _ww_model or chat_ai_settings.get("werewolf_model") or chat_ai_settings["model"],
-        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
-    }
-    if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
-        settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
-        settings["fallback_api_key"] = chat_ai_settings.get("fallback_api_key", "")
-        settings["fallback_model"] = chat_ai_settings.get("fallback_model", "")
+    _candidates = [(
+        _ww_url or chat_ai_settings["api_url"],
+        _ww_key or chat_ai_settings["api_key"],
+        _ww_model or chat_ai_settings["model"],
+    )]
+    for _c_url, _c_key, _c_model in _resolve_chain("main", chat_ai_settings):
+        if (_c_url, _c_key, _c_model) not in _candidates:
+            _candidates.append((_c_url, _c_key, _c_model))
+    _candidates = _candidates[:3]
 
     messages = [{"role": "user", "content": prompt}]
-    try:
-        result = await call_chat_api(
-            messages, settings,
-            max_tokens=100,
-            timeout_total=10,
-            timeout_read=8,
-            is_background=True,
-            fallback_mode="full",
-            fallback_user_id="werewolf_ai",
-            category="entertainment",
-        )
-        text = result.get("content", "").strip()
-        # 清理：去掉引號、換行
-        text = text.strip().strip("'").strip('"').replace("\n", " ")
-        # 防禦性檢查：若AI仍不小心提到自己的名字，整句直接捨棄（避免蠢錯誤露出）
-        if text and my_name in text:
-            print(f"⚠️ WW AI discuss self-mention detected, discarding: {text[:50]}")
-            return None
-        return (text[:100], suspect_id) if text else None
-    except Exception as e:
-        print(f"⚠️ WW AI discuss failed: {e}")
-        return None
+    for _i, (_c_url, _c_key, _c_model) in enumerate(_candidates):
+        settings = {"api_url": _c_url, "api_key": _c_key, "model": _c_model}
+        try:
+            result = await call_chat_api(
+                messages, settings,
+                max_tokens=100,
+                timeout_total=10,
+                timeout_read=8,
+                is_background=True,
+                fallback_mode="full" if _i == 0 else "disabled",
+                fallback_user_id="werewolf_ai",
+                category="entertainment",
+            )
+            text = result.get("content", "").strip()
+            text = text.strip().strip("'").strip('"').replace("\n", " ")
+            if text and my_name in text:
+                print(f"⚠️ WW AI discuss self-mention detected, discarding: {text[:50]}")
+                return None
+            if text:
+                return (text[:100], suspect_id)
+        except Exception as e:
+            print(f"⚠️ WW discuss attempt {_i+1}/{len(_candidates)} ({_c_model}) failed: {e}")
+    return None
 
 
 async def _ww_day_phase(channel):

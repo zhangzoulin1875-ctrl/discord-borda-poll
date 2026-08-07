@@ -231,17 +231,33 @@ async def _resolve_race():
             {"role": "system", "content": "你是一個賽馬比賽模擬器，只回傳JSON。"},
             {"role": "user", "content": prompt},
         ]
-        result = await call_chat_api(
-            messages, dict(chat_ai_settings),
-            max_tokens=500,
-            timeout_total=40,
-            category="entertainment",
-            timeout_read=35,
-            is_background=True,
-            fallback_mode="full",  # 娛樂功能降級鏈：主模型失敗直接切備援API（對齊海龜湯/狼人殺/占卜）
-            fallback_user_id="horse_racing",
-        )
-        if not result.get("circuit_open"):
+        _h_url, _h_key, _h_model = _resolve_role_endpoint("main", chat_ai_settings)
+        _candidates = [(_h_url, _h_key, _h_model)]
+        for _c_url, _c_key, _c_model in _resolve_chain("main", chat_ai_settings):
+            if (_c_url, _c_key, _c_model) not in _candidates:
+                _candidates.append((_c_url, _c_key, _c_model))
+        _candidates = _candidates[:3]
+
+        result = None
+        for _i, (_c_url, _c_key, _c_model) in enumerate(_candidates):
+            _hr_settings = {"api_url": _c_url, "api_key": _c_key, "model": _c_model}
+            try:
+                result = await call_chat_api(
+                    messages, _hr_settings,
+                    max_tokens=500,
+                    timeout_total=40,
+                    category="entertainment",
+                    timeout_read=35,
+                    is_background=True,
+                    fallback_mode="full" if _i == 0 else "disabled",
+                    fallback_user_id="horse_racing",
+                )
+                if result.get("content") and not result.get("circuit_open"):
+                    break
+            except Exception as e:
+                print(f"⚠️ 賽馬AI attempt {_i+1}/{len(_candidates)} ({_c_model}) failed: {e}")
+
+        if not result or result.get("circuit_open"):
             text = result.get("content", "").strip()
             if text.startswith("```"):
                 text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()

@@ -823,35 +823,44 @@ class EconomyGroup(app_commands.Group):
         # call_chat_api內部邏輯判定「反正要切更強的備援，不用先浪費時間
         # 試免費模型鏈」——這跟海龜湯/狼人殺的行為完全一致。）
         _f_url, _f_key, _f_model = _resolve_role_endpoint("fortune", chat_ai_settings)
-        settings = {
-            "api_url": _f_url or chat_ai_settings["api_url"],
-            "api_key": _f_key or chat_ai_settings["api_key"],
-            "model": _f_model or chat_ai_settings.get("fortune_model") or chat_ai_settings["model"],
-            "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
-        }
-        if chat_ai_settings.get("fallback_enabled"):
-            settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
-            settings["fallback_api_key"] = chat_ai_settings.get("fallback_api_key", "")
-            settings["fallback_model"] = chat_ai_settings.get("fallback_model", "")
+        _candidates = [(
+            _f_url or chat_ai_settings["api_url"],
+            _f_key or chat_ai_settings["api_key"],
+            _f_model or chat_ai_settings["model"],
+        )]
+        for _c_url, _c_key, _c_model in _resolve_chain("main", chat_ai_settings):
+            if (_c_url, _c_key, _c_model) not in _candidates:
+                _candidates.append((_c_url, _c_key, _c_model))
+        _candidates = _candidates[:3]
 
         messages = [{"role": "user", "content": prompt}]
+        result = {"content": "", "error": "all_failed"}
 
-        try:
-            result = await asyncio.wait_for(
-                call_chat_api(
-                    messages, settings,
-                    max_tokens=800,
-                    timeout_total=40,
-                    timeout_read=35,
-                    is_background=False,
-                    fallback_mode="full",
-                    fallback_user_id="economy_fortune",
-                    category="entertainment",
-                ),
-                timeout=45,
-            )
-        except asyncio.TimeoutError:
-            result = {"content": "", "error": "timeout"}
+        for _i, (_c_url, _c_key, _c_model) in enumerate(_candidates):
+            settings = {"api_url": _c_url, "api_key": _c_key, "model": _c_model}
+            if _i == 0 and chat_ai_settings.get("fallback_enabled"):
+                settings["fallback_enabled"] = True
+            try:
+                result = await asyncio.wait_for(
+                    call_chat_api(
+                        messages, settings,
+                        max_tokens=800,
+                        timeout_total=40,
+                        timeout_read=35,
+                        is_background=False,
+                        fallback_mode="full" if _i == 0 else "disabled",
+                        fallback_user_id="economy_fortune",
+                        category="entertainment",
+                    ),
+                    timeout=45,
+                )
+                if result.get("content") and not result.get("circuit_open"):
+                    break
+            except asyncio.TimeoutError:
+                result = {"content": "", "error": "timeout"}
+            except Exception as e:
+                print(f"⚠️ Fortune attempt {_i+1}/{len(_candidates)} ({_c_model}) failed: {e}")
+                result = {"content": "", "error": str(e)}
 
         if not result.get("content") or result.get("circuit_open"):
             print(f"⚠️ AI 占卜失敗：circuit_open={result.get('circuit_open')}, "

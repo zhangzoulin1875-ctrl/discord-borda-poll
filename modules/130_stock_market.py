@@ -829,26 +829,44 @@ async def _ai_evaluate_company(co: dict, company_id: str) -> dict:
         {"role": "user", "content": prompt},
     ]
 
+    _s_url, _s_key, _s_model = _resolve_role_endpoint("main", chat_ai_settings)
+    _candidates = [(_s_url, _s_key, _s_model)]
+    for _c_url, _c_key, _c_model in _resolve_chain("main", chat_ai_settings):
+        if (_c_url, _c_key, _c_model) not in _candidates:
+            _candidates.append((_c_url, _c_key, _c_model))
+    _candidates = _candidates[:3]
+
+    result = None
+    for _i, (_c_url, _c_key, _c_model) in enumerate(_candidates):
+        _stk_settings = {"api_url": _c_url, "api_key": _c_key, "model": _c_model}
+        try:
+            result = await call_chat_api(
+                messages, _stk_settings,
+                max_tokens=300,
+                timeout_total=30,
+                category="entertainment",
+                timeout_read=25,
+                is_background=True,
+                fallback_mode="full" if _i == 0 else "disabled",
+                fallback_user_id="stock_market",
+            )
+            if result.get("content") and not result.get("circuit_open"):
+                break
+        except Exception as e:
+            print(f"⚠️ 股市AI attempt {_i+1}/{len(_candidates)} ({_c_model}) failed: {e}")
+
+    if not result:
+        return _random_market_move(co, event_text)
+    if result.get("circuit_open"):
+        print(f"⚠️ 股市AI：熔斷器開啟，使用隨機走勢")
+        return _random_market_move(co, event_text)
+
+    text = result.get("content", "").strip()
+    # 清理可能的 markdown code block
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
     try:
-        result = await call_chat_api(
-            messages, dict(chat_ai_settings),
-            max_tokens=300,
-            timeout_total=30,
-            category="entertainment",
-            timeout_read=25,
-            is_background=True,
-            fallback_mode="full",  # 娛樂功能降級鏈：主模型失敗直接切備援API（對齊海龜湯/狼人殺/占卜）
-            fallback_user_id="stock_market",
-        )
-        if result.get("circuit_open"):
-            print(f"⚠️ 股市AI：熔斷器開啟，使用隨機走勢")
-            return _random_market_move(co, event_text)
-
-        text = result.get("content", "").strip()
-        # 清理可能的 markdown code block
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
         parsed = json_module.loads(text)
         price_change = float(parsed.get("price_change", 0))
         event = parsed.get("event", event_text)
