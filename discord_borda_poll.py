@@ -6757,7 +6757,16 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
     or {"success": False, "error": ...}
     """
     # ── 高級生圖通道（優先嘗試，失敗自動降級） ──
-    if _t2i_premium_available(settings):
+    premium_error = None
+    premium_skip_reason = None
+    premium_ok = _t2i_premium_available(settings)
+    if settings.get("t2i_premium_enabled") and not premium_ok:
+        if not settings.get("t2i_premium_api_url") or not settings.get("t2i_premium_model"):
+            premium_skip_reason = "已啟用但 URL 或模型名稱未填"
+        else:
+            premium_skip_reason = f"今日額度已用完（{settings.get('t2i_premium_daily_count', 0)}/{settings.get('t2i_premium_daily_limit', 30)}）"
+
+    if premium_ok:
         premium_settings = {
             "t2i_api_url": settings.get("t2i_premium_api_url", "").strip(),
             "t2i_api_key": settings.get("t2i_premium_api_key", "").strip(),
@@ -6773,12 +6782,19 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
             print(f"🎨 T2I 高級通道成功（今日已用 {settings.get('t2i_premium_daily_count', 0)}/{settings.get('t2i_premium_daily_limit', 30)}）")
             return premium_result
         else:
-            print(f"🎨 T2I 高級通道失敗，降級回預設通道: {premium_result.get('error', '?')[:150]}")
+            premium_error = premium_result.get("error", "未知錯誤")
+            print(f"🎨 T2I 高級通道失敗，降級回預設通道: {premium_error[:150]}")
 
     # ── 預設生圖通道 ──
     result = await _generate_image_core(prompt, settings)
     if result.get("success"):
         result["channel"] = "default"
+    # 把高級通道失敗/跳過的原因也帶上，這樣 ai-log 才能顯示「高級通道當時為什麼沒用到」，
+    # 不然使用者永遠只看得到最終成功用了預設通道，猜不出高級通道到底發生了什麼事。
+    if premium_error:
+        result["premium_error"] = premium_error
+    elif premium_skip_reason:
+        result["premium_skip_reason"] = premium_skip_reason
     return result
 
 
@@ -7158,6 +7174,17 @@ async def _send_t2i_log(guild, user, prompt: str, result: dict, elapsed_ms: int 
     else:
         error_text = str(result.get("error", "未知錯誤"))[:500]
         embed.add_field(name="❌ 狀態", value=f"失敗：{error_text}", inline=False)
+
+    # ── 高級通道診斷 ── 就算最終用預設通道成功了，也要讓使用者看得到
+    # 「高級通道當時到底發生了什麼事」，不然設定了高級通道卻一直用不到，
+    # 完全沒有線索可以自己排查（這正是加這個 log 的初衷）。
+    premium_err = result.get("premium_error")
+    premium_skip = result.get("premium_skip_reason")
+    if premium_err:
+        embed.add_field(name="⚠️ 高級通道失敗原因", value=str(premium_err)[:500], inline=False)
+    elif premium_skip:
+        embed.add_field(name="ℹ️ 高級通道未使用原因", value=premium_skip, inline=False)
+
     try:
         await log_ch.send(embed=embed)
         print(f"📝 生圖紀錄已發送到 #{log_ch.name}（通道={channel_used}, 模型={model_used}）")
