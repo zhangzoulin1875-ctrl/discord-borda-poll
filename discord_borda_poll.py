@@ -7132,11 +7132,12 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
             return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
 
     # ══════════════════════════════════════════════════════════════
-    # 分支 3：Hugging Face Inference API（api-inference.huggingface.co 或 router.huggingface.co）
+    # 分支 3：Hugging Face Inference API（router.huggingface.co，新版路由）
     # ══════════════════════════════════════════════════════════════
     # HF 的文生圖 API 跟 OpenAI 完全不同：
-    #   - URL: POST https://api-inference.huggingface.co/models/{model}
-    #          或 POST https://router.huggingface.co/hf-inference/models/{model}
+    #   - URL: POST https://router.huggingface.co/hf-inference/models/{model}
+    #     （2025 年底舊版 api-inference.huggingface.co 已完全停用下線，
+    #      DNS 直接連不到，一律要改走新的 router.huggingface.co）
     #   - Body: {"inputs": "prompt text", "parameters": {"width": W, "height": H, "seed": S}}
     #   - Response: 原始圖片二進位（raw bytes），不是 JSON
     #   - Auth: Bearer hf_xxxx
@@ -7147,15 +7148,26 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
         if not api_key:
             return {"success": False, "error": "Hugging Face API 需要 API Token（hf_...）"}
 
-        # 組裝 URL — 使用者可能填了完整 URL 或只填 base URL
+        # 組裝 URL：
+        # - 舊版 api-inference.huggingface.co 已下線，強制改寫成新版 router
+        # - 使用者若填 router.huggingface.co 且指定了特定 provider（如 /fal-ai、
+        #   /together），保留該 provider 路徑；否則預設走官方 hf-inference provider
         hf_url = api_url.rstrip("/")
-        if "/models/" in hf_url:
-            # 使用者填了含 /models/ 的 URL → 替換末段為實際 model
-            parts = hf_url.split("/models/", 1)
-            hf_url = parts[0] + "/models/" + model
+        if "api-inference.huggingface.co" in hf_url.lower():
+            # 舊網域整個丟棄改用新版，provider 預設用 hf-inference
+            hf_url = "https://router.huggingface.co/hf-inference"
+        elif "router.huggingface.co" in hf_url.lower():
+            # 已經是新版 — 去掉可能存在的 /models/... 尾巴，只保留 provider 路徑部分
+            if "/models/" in hf_url:
+                hf_url = hf_url.split("/models/", 1)[0]
+            # 使用者只填了 https://router.huggingface.co（沒指定 provider）→ 補上預設 provider
+            if hf_url.rstrip("/") == "https://router.huggingface.co":
+                hf_url = "https://router.huggingface.co/hf-inference"
         else:
-            # 使用者只填 base URL → 加上 /models/{model}
-            hf_url = hf_url + "/models/" + model
+            # 不認得的網域但含 huggingface.co（理論上不太會發生）— 直接改走新版預設
+            hf_url = "https://router.huggingface.co/hf-inference"
+
+        hf_url = hf_url.rstrip("/") + "/models/" + model
 
         payload = {
             "inputs": prompt[:1000],
