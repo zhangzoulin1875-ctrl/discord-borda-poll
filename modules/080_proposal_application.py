@@ -1804,3 +1804,137 @@ class CorrectionButtonView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
 
+
+# ═════════════════════════════════════════════════════════════════
+# AI 提案助手 — /proposal draft
+# 使用者手動填入1,2,3,6,7欄位（提案國家/代表/國家代碼/共同提案國/共同提案代表），
+# 4,5欄位（提案內容/提案原因）只需一句話，AI自動擴寫成完整正式格式的提案文件，
+# 輸出純文字markdown（不是Embed），對齊該組織實際使用的雙語表單格式，方便直接複製貼上到提案區。
+# ═════════════════════════════════════════════════════════════════
+
+_PROPOSAL_DRAFT_COOLDOWNS = {}  # user_id -> last-use timestamp
+
+def _build_proposal_draft_text(country: str, representative: str, code: str,
+                                content_full: str, reason_full: str,
+                                joint_countries: str, joint_representatives: str) -> str:
+    """依照組織實際使用的雙語提案表單格式組出純文字（不含Embed）。"""
+    jc = joint_countries.strip() if joint_countries else "無 / None"
+    jr = joint_representatives.strip() if joint_representatives else "無 / None"
+    return (
+        "1. 提案國家：\n"
+        f"Proposal country：{country}\n\n"
+        "2. 提案代表：\n"
+        f"proposal representative：{representative}\n\n"
+        "3. 國家代碼：\n"
+        f"country code：{code}\n\n"
+        "4. 提案內容：\n"
+        f"Proposal content：{content_full}\n\n"
+        "5. 提案原因：\n"
+        f"Reason for proposal：{reason_full}\n\n"
+        "6. 共同提案國（如有）：\n"
+        f"Countries that jointly proposed the proposal (if any)：{jc}\n\n"
+        "7. 承上欄目，共同提案的代表：\n"
+        f"Following the previous section, representatives of the joint proposal：{jr}"
+    )
+
+
+async def _ai_expand_proposal(content_brief: str, reason_brief: str, country: str) -> dict:
+    """把一句話的提案內容/原因擴寫成正式完整格式。失敗時直接回退用原句（不阻斷使用者）。"""
+    prompt = (
+        "你是微國家組織的提案撰寫助手。使用者只給了一句話的提案內容跟提案原因，"
+        "請幫忙擴寫成正式、完整、適合放進官方提案文件的段落。\n\n"
+        f"提案國家：{country}\n"
+        f"提案內容（一句話）：{content_brief}\n"
+        f"提案原因（一句話）：{reason_brief}\n\n"
+        "要求：\n"
+        "1. 提案內容：用正式書面語擴寫成完整段落，說明具體要做什麼、如何實施，"
+        "但不要捏造使用者沒提到的具體數字/日期/條文編號等細節，只做語氣跟結構上的正式化擴寫。\n"
+        "2. 提案原因：用正式書面語擴寫成完整段落，說明為何需要這個提案、預期效果。\n"
+        "3. 兩段都用繁體中文，不需要翻譯成英文。\n"
+        "4. 不要加任何開頭寒暄或結尾祝福，直接是正文段落。\n\n"
+        '請只回覆JSON格式（不要加markdown code block）：{"content": "...", "reason": "..."}'
+    )
+    messages = [{"role": "user", "content": prompt}]
+    settings = {
+        "api_url": chat_ai_settings.get("api_url", ""),
+        "api_key": chat_ai_settings.get("api_key", ""),
+        "model": chat_ai_settings.get("model", ""),
+    }
+    try:
+        result = await asyncio.wait_for(
+            call_chat_api(
+                messages, settings,
+                max_tokens=900, timeout_total=40, timeout_read=35,
+                is_background=False, fallback_mode="full", category="admin",
+                fallback_user_id="proposal_draft",
+            ),
+            timeout=45,
+        )
+        text = (result.get("content") or "").strip()
+        if not text or result.get("circuit_open"):
+            print(f"⚠️ AI提案擴寫失敗（circuit_open={result.get('circuit_open')}），回退用原句")
+            return {"content": content_brief, "reason": reason_brief}
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = json_module.loads(text)
+        return {
+            "content": (parsed.get("content") or content_brief).strip(),
+            "reason": (parsed.get("reason") or reason_brief).strip(),
+        }
+    except Exception as e:
+        print(f"⚠️ AI提案擴寫例外，回退用原句：{e}")
+        return {"content": content_brief, "reason": reason_brief}
+
+
+class ProposalGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="proposal", description="提案相關工具")
+
+    @app_commands.command(name="draft", description="AI 提案助手 — 自動生成正式格式的提案文件（提案內容/原因只需一句話）")
+    @app_commands.describe(
+        country="1. 提案國家",
+        representative="2. 提案代表",
+        country_code="3. 國家代碼",
+        content_brief="4. 提案內容 — 一句話帶過就好，AI會幫你擴寫成完整正式段落",
+        reason_brief="5. 提案原因 — 一句話帶過就好，AI會幫你擴寫成完整正式段落",
+        joint_countries="6. 共同提案國（如有，可留空）",
+        joint_representatives="7. 承上欄目，共同提案的代表（如有，可留空）",
+    )
+    async def proposal_draft(
+        self, interaction: discord.Interaction,
+        country: str, representative: str, country_code: str,
+        content_brief: str, reason_brief: str,
+        joint_countries: str = "", joint_representatives: str = "",
+    ):
+        # 簡單防洗版：每人 20 秒冷卻
+        uid = str(interaction.user.id)
+        now = _time.time()
+        last = _PROPOSAL_DRAFT_COOLDOWNS.get(uid, 0)
+        if now - last < 20:
+            await interaction.response.send_message(
+                f"⏳ 請等候 {int(20 - (now - last))} 秒後再生成一次提案草稿。", ephemeral=True,
+            )
+            return
+        _PROPOSAL_DRAFT_COOLDOWNS[uid] = now
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            expanded = await _ai_expand_proposal(content_brief, reason_brief, country)
+            draft_text = _build_proposal_draft_text(
+                country, representative, country_code,
+                expanded["content"], expanded["reason"],
+                joint_countries, joint_representatives,
+            )
+            header = "📋 **提案草稿已生成，請確認內容無誤後自行複製貼上到提案區：**\n\n"
+            full_msg = header + "```\n" + draft_text + "\n```"
+            if len(full_msg) <= 2000:
+                await interaction.followup.send(full_msg, ephemeral=True)
+            else:
+                # 超過 Discord 單則訊息長度上限，分段發送
+                await interaction.followup.send(header, ephemeral=True)
+                await interaction.followup.send("```\n" + draft_text[:1900] + "\n```", ephemeral=True)
+                if len(draft_text) > 1900:
+                    await interaction.followup.send("```\n" + draft_text[1900:] + "\n```", ephemeral=True)
+        except Exception as e:
+            print(f"⚠️ /proposal draft 失敗：{e}")
+            await interaction.followup.send(f"⚠️ 生成提案草稿失敗：{e}", ephemeral=True)

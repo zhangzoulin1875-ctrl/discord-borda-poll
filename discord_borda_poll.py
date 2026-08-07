@@ -11155,7 +11155,7 @@ async def setup_hook():
 
     # Register slash command groups (runs once, before bot connects)
     _hoi4_on = os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off")
-    _all_groups = [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup()]
+    _all_groups = [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), ProposalGroup()]
     if _hoi4_on:
         _all_groups.append(StormGroup())
     for grp in _all_groups:
