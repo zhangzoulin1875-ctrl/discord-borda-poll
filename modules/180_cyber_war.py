@@ -22,6 +22,27 @@ MAX_ARTILLERY_PER_TURN = 2   # 每回合每方最多呼叫2次
 PROGRESS_WIN_THRESHOLD = 100 # 進度達100%即勝利
 MORALE_DEFEAT_THRESHOLD = 0  # 士氣降至0即敗北
 
+# ── 戰爭巨獸 ──
+WAR_BEAST_HP = 50              # 巨獸血量
+WAR_BEAST_TRIGGER_GAP = 30    # 進度差距達30%觸發巨獸部署
+_WAR_BEASTS = {
+    "zeppelin": {
+        "name": "齊柏林飛艇",
+        "emoji": "🛩️",
+        "desc": "從空中偵察與轟炸敵方陣地",
+    },
+    "armored_train": {
+        "name": "裝甲列車",
+        "emoji": "🚂",
+        "desc": "快速運輸兵力與火力支援",
+    },
+    "dreadnought": {
+        "name": "無畏艦",
+        "emoji": "🚢",
+        "desc": "海上霸主，砲擊沿海陣地",
+    },
+}
+
 # ── 陣營 & 戰場 ──
 # 歷史正確配對：每個戰場對應當時實際交戰的雙方
 _BATTLE_SCENARIOS = [
@@ -2205,6 +2226,7 @@ async def cyber_war_loop():
     await bot.wait_until_ready()
     print("⚔️ 賽博一戰背景迴圈已啟動")
     _stuck_processing_counter = 0
+    _cw_first_refresh = True  # 重啟後第一次：刪舊面板+發新面板
     while not bot.is_closed():
         try:
             s = _cyber_war_state
@@ -2231,12 +2253,16 @@ async def cyber_war_loop():
                     if next_turn and datetime.now(_TZ) >= next_turn:
                         await _process_turn_end()
 
-                # 確保面板存在
-                if _cyber_war_settings.get("channel_id") and not _cyber_war_settings.get("panel_message_id"):
-                    await setup_war_panel()
-                else:
-                    # 定期刷新面板
-                    await refresh_war_panel()
+                # 面板管理：重啟後第一次強制刪舊發新，之後正常刷新
+                if _cyber_war_settings.get("channel_id"):
+                    if _cw_first_refresh:
+                        print("🔄 賽博一戰：重啟後首次刷新，刪除舊面板並建立新面板。")
+                        await setup_war_panel()
+                        _cw_first_refresh = False
+                    elif not _cyber_war_settings.get("panel_message_id"):
+                        await setup_war_panel()
+                    else:
+                        await refresh_war_panel()
             elif s.get("active") == False and s.get("winner") and _cyber_war_settings.get("channel_id"):
                 # 遊戲已結束但面板可能需要更新
                 if not _cyber_war_settings.get("panel_message_id"):
