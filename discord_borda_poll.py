@@ -3843,6 +3843,10 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                   f"這是模型/API 本身「只想不答」，不是我們的串流解析漏抓")
         return 200, body
 
+    # ── 池式降級鏈：每項可有不同 API 端點 ──
+    # 定義在 _attempt 外層，讓 fallback 邏輯也能存取
+    _pool_chain = _resolve_chain("main", chat_ai_settings)
+
     async def _attempt():
         """One full attempt: streaming call, with fallbacks for endpoints
         that don't support streaming or don't support `tools`. Raises on
@@ -3858,8 +3862,6 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # it's a cheap retry, much faster than the full backup API switchover.
         _chain_raw = settings.get("model_fallback_chain", "").strip()
         _primary_model = settings.get("model", "gpt-4o-mini")
-        # ── 池式降級鏈：每項可有不同 API 端點 ──
-        _pool_chain = _resolve_chain("main", chat_ai_settings)
         if _chain_raw:
             _model_chain = [m.strip() for m in _chain_raw.split(",") if m.strip()]
             if _primary_model not in _model_chain:
