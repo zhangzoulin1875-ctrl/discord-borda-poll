@@ -1077,25 +1077,35 @@ async def api_hoi4_state(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
+_hoi4_map_json_cache = None  # pre-serialized JSON string, built once (data never changes)
+
 async def api_hoi4_map(request):
     """地圖多邊形 API — 只回傳省份的 polygon + centroid + neighbors + name + type。
-    資料量大(~22MB)但永遠不變，前端載入一次後快取。"""
+    資料量大(~22MB)但永遠不變：第一次請求時序列化成字串快取起來，之後每次請求
+    直接回傳快取字串，避免每次都重新複製4001省份的多邊形資料 + json.dumps()
+    造成的重複記憶體尖峰（在Render免費方案512MB限制下，重複這個操作容易
+    OOM觸發容器重啟，而重啟又會讓沒有持久化的COOKIE_SECRET跟著失效，
+    導致使用者遇到「Discord登入完又被踢回登入頁」的問題）。"""
+    global _hoi4_map_json_cache
     try:
-        tpl = _load_map_template()
-        if not tpl:
-            return web.json_response({"error": "地圖模板未載入"}, status=500)
-        result = {}
-        for pid, p in tpl.items():
-            result[pid] = {
-                "id": p["id"],
-                "name": p.get("name", ""),
-                "type": p.get("type", "plains"),
-                "country": p.get("country", ""),
-                "polygon": p.get("polygon", []),
-                "centroid": p.get("centroid", [0, 0]),
-                "neighbors": p.get("neighbors", []),
-            }
-        return web.json_response(result)
+        if _hoi4_map_json_cache is None:
+            tpl = _load_map_template()
+            if not tpl:
+                return web.json_response({"error": "地圖模板未載入"}, status=500)
+            result = {}
+            for pid, p in tpl.items():
+                result[pid] = {
+                    "id": p["id"],
+                    "name": p.get("name", ""),
+                    "type": p.get("type", "plains"),
+                    "country": p.get("country", ""),
+                    "polygon": p.get("polygon", []),
+                    "centroid": p.get("centroid", [0, 0]),
+                    "neighbors": p.get("neighbors", []),
+                }
+            _hoi4_map_json_cache = json_module.dumps(result, ensure_ascii=False)
+            print(f"🗺️ HOI4 地圖 JSON 已快取（{len(_hoi4_map_json_cache)} bytes），之後請求直接回傳快取")
+        return web.Response(text=_hoi4_map_json_cache, content_type="application/json")
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 

@@ -20,7 +20,7 @@
   AI_API_KEY    - AI API 金鑰（也可在 Dashboard 中設定）
   AI_MODEL      - AI 模型名稱（預設 gpt-4o-mini，也可在 Dashboard 中設定）
   AI_SYSTEM_PROMPT - AI 系統提示詞（預設為會議紀錄整理格式）
-  COOKIE_SECRET   - Session 簽名密鑰（不設則每次重啟隨機生成，建議固定設定）
+  COOKIE_SECRET   - Session 簽名密鑰（選填，建議固定設定；不設則自動生成並透過 Drive 持久化保存，重啟不失效）
 
   快報/公報設定存於 data/briefing_settings.json
   快報/公報指令：
@@ -713,7 +713,53 @@ async def api_global_scan_finish(request):
 # Dashboard: OAuth2 & Session (signed cookies - survives restarts/redeploys)
 # ──────────────────────────────────────────────
 
-COOKIE_SECRET = os.getenv("COOKIE_SECRET", py_secrets.token_urlsafe(32))
+# COOKIE_SECRET 持久化說明：
+# 若沒設定 COOKIE_SECRET 環境變數，舊寫法是每次進程啟動都用 token_urlsafe(32)
+# 隨機生成一組新密鑰——這代表容器只要重啟一次（Render 免費方案閒置15分鐘會
+# 休眠、部署會重啟、OOM也會重啟），所有已簽發但還沒驗證的 session cookie
+# 會瞬間全部失效，使用者會遇到「Discord授權完成後又被踢回登入頁」的詭異
+# 循環（因為簽發cookie跟驗證cookie剛好夾在一次重啟前後，用了不同密鑰）。
+# 修法：改成 lazy + 持久化——優先用環境變數；沒有的話嘗試讀取本機
+# data/cookie_secret.json（這個檔案會被現有的 Drive 週期同步機制自動抓到，
+# 隨機生成的資料夾*.json不需要額外註冊，sync_to_drive()/load_from_drive()都是
+# 動態掃描資料夾裡所有.json檔）；都沒有才生成新的並立即寫入本機+觸發即時
+# Drive上傳，讓下次重啟時 load_from_drive() 能搶在真正的OAuth流程完成前
+# 把同一把密鑰復原回來（Discord授權來回至少要好幾秒，通常比Drive下載快得多）。
+_cookie_secret_cache = None
+
+def _get_cookie_secret() -> str:
+    global _cookie_secret_cache
+    if _cookie_secret_cache:
+        return _cookie_secret_cache
+    env_val = os.getenv("COOKIE_SECRET", "")
+    if env_val:
+        _cookie_secret_cache = env_val
+        return _cookie_secret_cache
+    secret_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "cookie_secret.json")
+    try:
+        if os.path.exists(secret_path):
+            with open(secret_path, "r", encoding="utf-8") as f:
+                saved = json_module.load(f)
+            if saved.get("secret"):
+                _cookie_secret_cache = saved["secret"]
+                return _cookie_secret_cache
+    except Exception as e:
+        print(f"⚠️ 讀取 cookie_secret.json 失敗（將生成新密鑰）: {e}")
+    new_secret = py_secrets.token_urlsafe(32)
+    _cookie_secret_cache = new_secret
+    try:
+        os.makedirs(os.path.dirname(secret_path), exist_ok=True)
+        with open(secret_path, "w", encoding="utf-8") as f:
+            json_module.dump({"secret": new_secret}, f)
+        print("🔑 已產生新的 COOKIE_SECRET 並存檔（將透過 Drive 同步持久化，避免下次重啟登入全失效）")
+        try:
+            asyncio.ensure_future(_immediate_drive_upload("cookie_secret.json"))
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"⚠️ 儲存 cookie_secret.json 失敗: {e}")
+    return new_secret
+
 
 OAUTH_CLIENT_ID = os.getenv("OAUTH_CLIENT_ID", "")
 OAUTH_CLIENT_SECRET = os.getenv("OAUTH_CLIENT_SECRET", "")
@@ -723,7 +769,7 @@ OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "")
 def _create_signed_cookie(data: dict) -> str:
     """Create an HMAC-signed cookie containing user data."""
     payload = __import__("base64").b64encode(json_module.dumps(data).encode()).decode()
-    sig = hmac.new(COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    sig = hmac.new(_get_cookie_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
 
@@ -731,7 +777,7 @@ def _verify_signed_cookie(cookie: str) -> dict:
     """Verify and decode a signed cookie. Returns None if invalid."""
     try:
         payload, sig = cookie.rsplit(".", 1)
-        expected = hmac.new(COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        expected = hmac.new(_get_cookie_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected):
             return None
         return json_module.loads(__import__("base64").b64decode(payload))
@@ -934,7 +980,7 @@ async def dashboard_logout(request):
 
 def _sign_drive_oauth_state(admin_id: int) -> str:
     payload = f"{admin_id}:{int(_time.time())}"
-    sig = hmac.new(COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+    sig = hmac.new(_get_cookie_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
     return base64.urlsafe_b64encode(f"{payload}:{sig}".encode()).decode()
 
 
@@ -943,7 +989,7 @@ def _verify_drive_oauth_state(state: str) -> bool:
         decoded = base64.urlsafe_b64decode(state.encode()).decode()
         admin_id, ts, sig = decoded.rsplit(":", 2)
         payload = f"{admin_id}:{ts}"
-        expected = hmac.new(COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
+        expected = hmac.new(_get_cookie_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:16]
         if not hmac.compare_digest(sig, expected):
             return False
         # State valid for 10 minutes
