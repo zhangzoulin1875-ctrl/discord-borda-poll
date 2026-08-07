@@ -6910,7 +6910,7 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
                                 with open(image_path, "wb") as f:
                                     f.write(image_bytes)
                                 print(f"🎨 T2I (pollinations) 成功: {prompt[:50]}... seed={seed}")
-                                return {"success": True, "image_path": image_path}
+                                return {"success": True, "image_path": image_path, "model": model or "pollinations-default"}
                 except asyncio.TimeoutError:
                     return {"success": False, "error": "文生圖 API 逾時（超過 120 秒）"}
                 except Exception as e:
@@ -6924,7 +6924,79 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
         return {"success": False, "error": "文生圖 API 目前太忙（多次請求都被限流），請稍後再試"}
 
     # ══════════════════════════════════════════════════════════════
-    # 分支 2：OpenAI 相容 POST /v1/images/generations
+    # 分支 2：Google Imagen 原生 predict API（generativelanguage.googleapis.com）
+    # ══════════════════════════════════════════════════════════════
+    # Google 的 Gemini OpenAI 相容層（.../v1beta/openai）目前不支援圖片生成，
+    # 只支援 chat/completions 和 embeddings，用 OpenAI 格式打過去只會 404。
+    # Imagen 系列模型要用完全不同的原生格式：
+    #   POST https://generativelanguage.googleapis.com/v1beta/models/{model}:predict
+    #   headers: x-goog-api-key
+    #   body: {"instances": [{"prompt": ...}], "parameters": {"sampleCount": 1, "aspectRatio": "16:9"}}
+    #   response: {"predictions": [{"bytesBase64Encoded": "...", "mimeType": "image/png"}]}
+    # 這裡不用寬高像素（那是 DALL-E 的概念），Imagen 只接受固定的長寬比字串，
+    # 所以要把使用者選的 WxH 換算成最接近的合法比例，而不是硬塞像素數字進去
+    # （硬塞像素或用 OpenAI 的 size 概念會導致圖片被伺服器內部拉伸變形）。
+    if "generativelanguage.googleapis.com" in api_url.lower():
+        if not model:
+            return {"success": False, "error": "文生圖 API 未設定完整（需要模型名稱，例如 imagen-3.0-fast-generate-001）"}
+        if not api_key:
+            return {"success": False, "error": "Google Imagen API 需要 API Key"}
+
+        def _size_to_aspect_ratio(width: int, height: int) -> str:
+            ratio = width / height if height else 1.0
+            candidates = {"1:1": 1.0, "3:4": 0.75, "4:3": 4/3, "9:16": 9/16, "16:9": 16/9}
+            return min(candidates.items(), key=lambda kv: abs(kv[1] - ratio))[0]
+
+        aspect_ratio = _size_to_aspect_ratio(w, h)
+        model_clean = model.strip().lstrip("/")
+        predict_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_clean}:predict"
+        payload = {
+            "instances": [{"prompt": prompt[:1000]}],
+            "parameters": {"sampleCount": 1, "aspectRatio": aspect_ratio},
+        }
+        headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=100)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(predict_url, json=payload, headers=headers) as resp:
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        print(f"🎨 T2I (Google Imagen) 失敗 (HTTP {resp.status}): {err_text[:300]}")
+                        return {"success": False, "error": f"Google Imagen API 回應 HTTP {resp.status}: {err_text[:200]}"}
+                    try:
+                        data = await resp.json()
+                    except Exception as je:
+                        return {"success": False, "error": f"Google Imagen 回應無法解析: {je}"}
+
+                    predictions = data.get("predictions") or []
+                    if not predictions or not predictions[0].get("bytesBase64Encoded"):
+                        print(f"🎨 T2I (Google Imagen) 回應格式無法解析: {str(data)[:300]}")
+                        return {"success": False, "error": "Google Imagen 回應未包含圖片資料（可能是內容政策擋下或額度用盡）"}
+
+                    import base64 as _b64
+                    b64_data = predictions[0]["bytesBase64Encoded"]
+                    mime_type = predictions[0].get("mimeType", "image/png")
+                    ext = "png"
+                    if "jpeg" in mime_type or "jpg" in mime_type:
+                        ext = "jpg"
+                    elif "webp" in mime_type:
+                        ext = "webp"
+                    image_bytes = _b64.b64decode(b64_data)
+                    image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.{ext}")
+                    with open(image_path, "wb") as f:
+                        f.write(image_bytes)
+                    print(f"🎨 T2I (Google Imagen) 成功: {prompt[:50]}... model={model_clean} aspect={aspect_ratio}")
+                    return {"success": True, "image_path": image_path, "model": model_clean}
+
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Google Imagen API 逾時（超過 120 秒）"}
+        except Exception as e:
+            print(f"🎨 T2I (Google Imagen) 異常: {type(e).__name__}: {e}")
+            return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
+
+    # ══════════════════════════════════════════════════════════════
+    # 分支 3：OpenAI 相容 POST /v1/images/generations
     # ══════════════════════════════════════════════════════════════
     if not model:
         return {"success": False, "error": "文生圖 API 未設定完整（需要模型名稱）"}
@@ -6982,7 +7054,7 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
                     with open(image_path, "wb") as f:
                         f.write(image_bytes)
                     print(f"🎨 T2I 成功（原始圖片回應，Content-Type={content_type}）: {prompt[:50]}... seed={seed}")
-                    return {"success": True, "image_path": image_path}
+                    return {"success": True, "image_path": image_path, "model": model}
 
                 # ── 情況 2：JSON 包裝格式（OpenAI 相容）──
                 try:
@@ -6996,7 +7068,7 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
                         with open(image_path, "wb") as f:
                             f.write(raw_body)
                         print(f"🎨 T2I 成功（JSON 解析失敗但已當圖片存檔，Content-Type={content_type}）: {prompt[:50]}...")
-                        return {"success": True, "image_path": image_path}
+                        return {"success": True, "image_path": image_path, "model": model}
                     print(f"🎨 T2I JSON 解析失敗: {je}")
                     return {"success": False, "error": f"回應無法解析（Content-Type={content_type}）: {je}"}
 
@@ -7029,7 +7101,7 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
                     with open(image_path, "wb") as f:
                         f.write(image_bytes)
 
-                result = {"success": True}
+                result = {"success": True, "model": model}
                 if image_url:
                     result["image_url"] = image_url
                 if image_path:
@@ -7046,8 +7118,61 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
         print(f"🎨 T2I 異常: {type(e).__name__}: {e}")
         return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
 
+async def _send_t2i_log(guild, user, prompt: str, result: dict, elapsed_ms: int = None):
+    """把每一次生圖記錄到 ai-log 頻道——跟文字對話紀錄（_send_chat_log）分開，
+    專門顯示這次是走「高級通道」還是「預設通道」、用了哪個模型、耗時多久、
+    成功或失敗。這樣擁有者不需要 Render log 存取權限，光看 Discord 頻道
+    就能確認高級生圖通道是不是真的有被呼叫到（而不是悄悄降級卻沒發現）。"""
+    if not chat_ai_settings.get("log_channel_id"):
+        return
+    if not guild:
+        return
+    try:
+        log_ch, err = await _resolve_log_channel(guild)
+    except Exception as e:
+        print(f"⚠️ T2I 紀錄發送失敗（_resolve_log_channel 例外）：{e}")
+        return
+    if not log_ch:
+        print(f"⚠️ T2I 紀錄發送失敗：{err}")
+        return
+
+    success = result.get("success", False)
+    channel_used = result.get("channel", "?")
+    channel_label = {"premium": "✨ 高級通道", "default": "🎨 預設通道"}.get(channel_used, channel_used or "?")
+    model_used = result.get("model") or "?"
+
+    embed = discord.Embed(
+        title="🎨 文生圖紀錄",
+        color=(discord.Color.gold() if channel_used == "premium" else discord.Color.blue()) if success else discord.Color.red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="👤 使用者", value=(user.display_name if user else "?"), inline=True)
+    embed.add_field(name="📡 通道", value=channel_label, inline=True)
+    embed.add_field(name="🤖 模型", value=model_used, inline=True)
+    prompt_text = prompt[:300] + ("..." if len(prompt) > 300 else "")
+    embed.add_field(name="📝 提示詞", value=f"> {prompt_text}", inline=False)
+    if elapsed_ms is not None:
+        embed.add_field(name="⏱️ 耗時", value=f"{elapsed_ms}ms", inline=True)
+    if success:
+        embed.add_field(name="✅ 狀態", value="成功", inline=True)
+    else:
+        error_text = str(result.get("error", "未知錯誤"))[:500]
+        embed.add_field(name="❌ 狀態", value=f"失敗：{error_text}", inline=False)
+    try:
+        await log_ch.send(embed=embed)
+        print(f"📝 生圖紀錄已發送到 #{log_ch.name}（通道={channel_used}, 模型={model_used}）")
+    except Exception as e:
+        print(f"⚠️ T2I 紀錄發送例外：{e}")
+
+
 async def _send_t2i_result(message, prompt: str, result: dict, settings: dict, is_command: bool = False):
     """Send T2I result to Discord — download image and send as file attachment."""
+    # 不管成功或失敗都記錄到 ai-log 頻道（fire-and-forget，不阻塞使用者的回覆）
+    try:
+        asyncio.ensure_future(_send_t2i_log(message.guild, message.author, prompt, result))
+    except Exception as _log_e:
+        print(f"⚠️ T2I 紀錄排程失敗: {_log_e}")
+
     if not result.get("success"):
         error_msg = result.get("error", "未知錯誤")
         if is_command:

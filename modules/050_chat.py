@@ -855,6 +855,12 @@ async def draw_command(interaction: discord.Interaction, prompt: str):
     # Generate image
     result = await _generate_image(prompt, chat_ai_settings)
 
+    # 不管成功或失敗都記錄到 ai-log 頻道（fire-and-forget，不阻塞回覆）
+    try:
+        asyncio.ensure_future(_send_t2i_log(interaction.guild, interaction.user, prompt, result))
+    except Exception as _log_e:
+        print(f"⚠️ T2I 紀錄排程失敗: {_log_e}")
+
     if result.get("success"):
         _record_t2i_usage(_uid)
         image_url = result.get("image_url")
