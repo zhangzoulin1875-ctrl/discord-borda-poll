@@ -39,10 +39,27 @@ body {
   border-bottom: 1px solid var(--border-light);
   display: flex;
   align-items: center;
-  padding: 0 12px;
-  gap: 16px;
+  padding: 0 8px;
+  gap: 10px;
   z-index: 100;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
+#topbar::-webkit-scrollbar { display: none; }
+.drawer-toggle {
+  flex-shrink: 0;
+  width: 32px; height: 32px;
+  background: var(--bg-panel2);
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  color: var(--gold);
+  font-size: 15px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.drawer-toggle:hover { border-color: var(--gold-dim); }
 #topbar .logo {
   font-size: 16px;
   font-weight: 800;
@@ -55,10 +72,11 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 10px;
+  padding: 4px 8px;
   background: rgba(0,0,0,0.3);
   border-radius: 4px;
   border: 1px solid var(--border);
+  flex-shrink: 0;
 }
 .res-item .res-icon { font-size: 14px; }
 .res-item .res-val { font-weight: 700; color: var(--text); }
@@ -74,6 +92,7 @@ body {
 #main {
   display: flex;
   height: calc(100vh - 44px);
+  position: relative;
 }
 #left-panel {
   width: 240px;
@@ -84,6 +103,7 @@ body {
 }
 #map-container {
   flex: 1;
+  min-width: 0;
   position: relative;
   overflow: hidden;
   background: var(--water);
@@ -100,6 +120,32 @@ body {
   border-left: 1px solid var(--border);
   overflow-y: auto;
   flex-shrink: 0;
+}
+#drawer-overlay {
+  display: none;
+  position: fixed;
+  top: 44px; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 150;
+}
+/* === MOBILE: side panels become off-canvas drawers, map always fills screen === */
+@media (max-width: 900px) {
+  #left-panel, #right-panel {
+    position: fixed;
+    top: 44px;
+    bottom: 0;
+    width: 82vw;
+    max-width: 300px;
+    z-index: 200;
+    transition: transform 0.25s ease;
+    box-shadow: 0 0 20px rgba(0,0,0,0.6);
+  }
+  #left-panel { left: 0; transform: translateX(-100%); }
+  #left-panel.open { transform: translateX(0); }
+  #right-panel { right: 0; transform: translateX(100%); }
+  #right-panel.open { transform: translateX(0); }
+  #drawer-overlay.open { display: block; }
+  #map-container { width: 100%; }
 }
 #bottom-panel {
   position: absolute;
@@ -306,7 +352,9 @@ body {
   border-radius: 8px;
   padding: 32px;
   width: 380px;
+  max-width: 90vw;
   text-align: center;
+  box-sizing: border-box;
 }
 #login-box h1 {
   font-size: 24px;
@@ -353,6 +401,7 @@ body {
 
 <!-- TOP BAR -->
 <div id="topbar" style="display:none">
+  <button class="drawer-toggle" onclick="toggleDrawer('left')" title="國家資訊/國策樹">☰</button>
   <span class="logo">⚔️ 鋼鐵風暴</span>
   <div class="res-item"><span class="res-icon">🔵</span><span class="res-val" id="r-pp">0</span><span class="res-label">PP</span></div>
   <div class="res-item"><span class="res-icon">👥</span><span class="res-val" id="r-mp">0</span><span class="res-label">人力</span></div>
@@ -361,11 +410,13 @@ body {
   <div class="res-item"><span class="res-icon">📊</span><span class="res-val" id="r-stab">0%</span><span class="res-label">穩定</span></div>
   <div class="res-item"><span class="res-icon">🌍</span><span class="res-val" id="r-prov">0</span><span class="res-label">省份</span></div>
   <div class="spacer"></div>
+  <button class="drawer-toggle" onclick="toggleDrawer('right')" title="研究/建設/生產/外交/部隊">⚙</button>
   <button class="btn-logout" onclick="logout()">登出</button>
 </div>
 
 <!-- MAIN LAYOUT -->
 <div id="main" style="display:none">
+  <div id="drawer-overlay" onclick="closeDrawers()"></div>
   <!-- LEFT: Focus Tree + Country Info -->
   <div id="left-panel">
     <div class="panel-section">
@@ -482,6 +533,22 @@ async function refresh() {
 }
 
 function logout() { window.location.href = '/'; }
+
+// === MOBILE DRAWERS ===
+function toggleDrawer(side) {
+  const panel = document.getElementById(side === 'left' ? 'left-panel' : 'right-panel');
+  const other = document.getElementById(side === 'left' ? 'right-panel' : 'left-panel');
+  const overlay = document.getElementById('drawer-overlay');
+  const willOpen = !panel.classList.contains('open');
+  other.classList.remove('open');
+  panel.classList.toggle('open', willOpen);
+  overlay.classList.toggle('open', willOpen);
+}
+function closeDrawers() {
+  document.getElementById('left-panel').classList.remove('open');
+  document.getElementById('right-panel').classList.remove('open');
+  document.getElementById('drawer-overlay').classList.remove('open');
+}
 
 // === TOP BAR ===
 function renderTopbar() {
@@ -664,6 +731,7 @@ function showTooltip(e, pid) {
 function hideTooltip() { document.getElementById('tooltip').style.display = 'none'; }
 
 function onProvinceClick(pid) {
+  closeDrawers();
   const prov = S.provinces[pid];
   if (!prov) return;
   if (pickingStart) {
