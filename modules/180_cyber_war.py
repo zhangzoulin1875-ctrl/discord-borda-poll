@@ -1298,11 +1298,11 @@ class _CWTestView(discord.ui.View):
             result = await asyncio.wait_for(
                 call_chat_api(
                     [{"role": "user", "content": test_prompt}], settings,
-                    max_tokens=800, timeout_total=60, timeout_read=50,
+                    max_tokens=2000, timeout_total=600, timeout_read=590,
                     is_background=False, fallback_mode="full", category="admin",
                     fallback_user_id="cyber_war",
                 ),
-                timeout=65,
+                timeout=605,
             )
             _elapsed = _tt.time() - _t0
             text = (result.get("content") or "").strip()
@@ -1349,7 +1349,7 @@ class _CWTestView(discord.ui.View):
             _elapsed = _tt.time() - _t0
             await interaction.edit_original_response(
                 content=f"🧪 **WW1 AI 測試結果**\n\n"
-                        f"⏰ **逾時** — AI 在 {_elapsed:.0f}s 內未回應\n\n"
+                        f"⏰ **逾時** — AI 在 {_elapsed:.0f}s 內未回應（上限600s=10分鐘）\n\n"
                         f"WW1 將自動降級為演算法裁判。\n"
                         f"可能原因：API端點過載、reasoning模型思考太久、網路問題。\n"
                         f"檢查：model_fallback_chain 是否有備用模型可降級。",
@@ -1949,11 +1949,11 @@ async def _ai_evaluate_turn(turn: int):
         result = await asyncio.wait_for(
             call_chat_api(
                 [{"role": "user", "content": prompt}], settings,
-                max_tokens=800, timeout_total=60, timeout_read=50,
+                max_tokens=2000, timeout_total=600, timeout_read=590,
                 is_background=False, fallback_mode="full", category="admin",
                 fallback_user_id="cyber_war",
             ),
-            timeout=65,
+            timeout=605,
         )
         text = (result.get("content") or "").strip()
         if not text or result.get("circuit_open"):

@@ -3486,7 +3486,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     # 會用的 reasoning_effort 自動決定合理的 timeout。必須在這裡（函式頂層，
     # _deadline 計算之前）做，不能在下面的巢狀 _attempt() 閉包裡做——
     # 那裡對外層變數賦值會被 Python 當成局部變數，讀取會拋 UnboundLocalError。
-    if timeout_total >= 300:
+    if timeout_total == 300:  # 只在用預設值時自動調整；caller 明確傳大值（如 WW1 的 600s）則尊重
         _top_reasoning_effort = _get_reasoning_effort(fallback_mode, category)
         _top_auto_timeout = _get_reasoning_timeout(_top_reasoning_effort, fallback_mode)
         timeout_total = _top_auto_timeout
