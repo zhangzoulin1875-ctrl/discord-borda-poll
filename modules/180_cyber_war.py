@@ -13,6 +13,7 @@ CYBER_WAR_FILE = os.path.join(DATA_DIR, "cyber_war_data.json")
 # ── 常量 ──
 GAME_DURATION_DAYS = 3
 TURN_INTERVAL_HOURS = 1       # 每回合 1 小時 → 3天共72回合
+INACTIVITY_DEMOTE_TURNS = 3   # 軍官/小隊長連續怠職超過此回合數自動降為士兵
 DEPOSIT_PER_PLAYER = 100     # 每人押金（琉璃幣）
 OFFICERS_PER_SIDE = 2
 SQUAD_LEADERS_PER_SIDE = 5
@@ -118,7 +119,18 @@ def _switch_role(uid_str: str, new_role: str, specialty: str = ""):
         return False, "你不在本局參戰名單中。"
     fkey, current_role, fac = info
 
-    if new_role == current_role and (not specialty or (current_role == "soldier" and fac.get("specialty", "") == specialty)):
+    # 取得玩家本人的名字（修正舊bug：原本誤用陣營名稱而非玩家名稱）
+    player_name = "?"
+    if current_role == "officer":
+        entry = next((o for o in fac.get("officers", []) if o["id"] == uid_str), None)
+    elif current_role == "squad_leader":
+        entry = next((sl for sl in fac.get("squad_leaders", []) if sl["id"] == uid_str), None)
+    else:
+        entry = next((s for s in fac.get("soldiers", []) if s["id"] == uid_str), None)
+    if entry:
+        player_name = entry.get("name", "?")
+
+    if new_role == current_role and (not specialty or (current_role == "soldier" and entry and entry.get("specialty", "") == specialty)):
         return False, "你已經是這個身分了。"
 
     # 移除當前角色
@@ -134,25 +146,90 @@ def _switch_role(uid_str: str, new_role: str, specialty: str = ""):
         current_officers = len(fac.get("officers", []))
         if current_officers >= OFFICERS_PER_SIDE:
             return False, f"軍官已滿（{current_officers}/{OFFICERS_PER_SIDE}），無法切換。"
-        fac["officers"].append({"id": uid_str, "name": info[2].get("name", "?")})
+        fac["officers"].append({"id": uid_str, "name": player_name, "inactive_turns": 0})
     elif new_role == "squad_leader":
         current_sls = len(fac.get("squad_leaders", []))
         if current_sls >= SQUAD_LEADERS_PER_SIDE:
             return False, f"小隊長已滿（{current_sls}/{SQUAD_LEADERS_PER_SIDE}），無法切換。"
-        # 指派到一個軍官
+        # 指派到一個軍官（若沒有軍官則留空）
         officers = fac.get("officers", [])
         officer_id = officers[current_sls % len(officers)]["id"] if officers else ""
-        fac["squad_leaders"].append({"id": uid_str, "name": info[2].get("name", "?"), "officer_id": officer_id})
+        fac["squad_leaders"].append({"id": uid_str, "name": player_name, "officer_id": officer_id, "inactive_turns": 0})
     elif new_role == "soldier":
-        # 指派到一個小隊長
+        # 指派到一個小隊長（若沒有小隊長則留空）
         sls = fac.get("squad_leaders", [])
         soldier_count = len(fac.get("soldiers", []))
         sl_id = sls[soldier_count % len(sls)]["id"] if sls else ""
         spec = specialty if specialty in _SOLDIER_SPECIALTIES else _cw_random.choice(_SOLDIER_SPECIALTIES)
-        fac["soldiers"].append({"id": uid_str, "name": info[2].get("name", "?"), "squad_leader_id": sl_id, "specialty": spec})
+        fac["soldiers"].append({"id": uid_str, "name": player_name, "squad_leader_id": sl_id, "specialty": spec})
 
     save_cyber_war()
     return True, f"✅ 已切換為{ {'officer': '軍官', 'squad_leader': '小隊長', 'soldier': f'士兵（{specialty}）'}.get(new_role, new_role)}"
+
+def _demote_to_soldier(fkey: str, uid_str: str, role: str):
+    """強制降階：怠職超過3回合的軍官/小隊長自動降為士兵，釋出名額。"""
+    fac = _cyber_war_state.get("factions", {}).get(fkey, {})
+    if role == "officer":
+        entry = next((o for o in fac.get("officers", []) if o["id"] == uid_str), None)
+        if not entry:
+            return
+        name = entry.get("name", "?")
+        fac["officers"] = [o for o in fac.get("officers", []) if o["id"] != uid_str]
+        # 把該軍官帶的小隊長轉給其他軍官（若有），否則留空待人接手
+        remaining_officers = fac.get("officers", [])
+        for i, sl in enumerate(fac.get("squad_leaders", [])):
+            if sl.get("officer_id") == uid_str:
+                sl["officer_id"] = remaining_officers[i % len(remaining_officers)]["id"] if remaining_officers else ""
+    elif role == "squad_leader":
+        entry = next((sl for sl in fac.get("squad_leaders", []) if sl["id"] == uid_str), None)
+        if not entry:
+            return
+        name = entry.get("name", "?")
+        fac["squad_leaders"] = [sl for sl in fac.get("squad_leaders", []) if sl["id"] != uid_str]
+        # 把該小隊長帶的士兵轉給其他小隊長（若有），否則留空
+        remaining_sls = fac.get("squad_leaders", [])
+        for i, s in enumerate(fac.get("soldiers", [])):
+            if s.get("squad_leader_id") == uid_str:
+                s["squad_leader_id"] = remaining_sls[i % len(remaining_sls)]["id"] if remaining_sls else ""
+    else:
+        return
+
+    # 降為士兵，指派到剩下的小隊長（若有）
+    sls = fac.get("squad_leaders", [])
+    soldier_count = len(fac.get("soldiers", []))
+    sl_id = sls[soldier_count % len(sls)]["id"] if sls else ""
+    spec = _cw_random.choice(_SOLDIER_SPECIALTIES)
+    fac.setdefault("soldiers", []).append({"id": uid_str, "name": name, "squad_leader_id": sl_id, "specialty": spec})
+    print(f"⚔️ 賽博一戰：{name}（{fkey}陣營 {'軍官' if role == 'officer' else '小隊長'}）怠職超過{INACTIVITY_DEMOTE_TURNS}回合，已自動降為士兵。")
+
+
+def _check_inactivity_and_demote(turn: int):
+    """回合結算後檢查軍官/小隊長本回合是否下達過指令，累計怠職回合數，超過門檻自動降階。"""
+    s = _cyber_war_state
+    orders_this_turn = s.get("orders", {}).get(str(turn), {})
+    for fkey in ("A", "B"):
+        fac = s.get("factions", {}).get(fkey, {})
+        fac_orders = orders_this_turn.get(fkey, {})
+
+        # 軍官
+        for o in list(fac.get("officers", [])):
+            uid = o["id"]
+            if uid in fac_orders and isinstance(fac_orders[uid], str) and fac_orders[uid].strip():
+                o["inactive_turns"] = 0
+            else:
+                o["inactive_turns"] = o.get("inactive_turns", 0) + 1
+                if o["inactive_turns"] > INACTIVITY_DEMOTE_TURNS:
+                    _demote_to_soldier(fkey, uid, "officer")
+
+        # 小隊長
+        for sl in list(fac.get("squad_leaders", [])):
+            uid = sl["id"]
+            if uid in fac_orders and isinstance(fac_orders[uid], str) and fac_orders[uid].strip():
+                sl["inactive_turns"] = 0
+            else:
+                sl["inactive_turns"] = sl.get("inactive_turns", 0) + 1
+                if sl["inactive_turns"] > INACTIVITY_DEMOTE_TURNS:
+                    _demote_to_soldier(fkey, uid, "squad_leader")
 
 # ── 時間工具 ──
 _TZ = timezone(timedelta(hours=8))
@@ -224,25 +301,16 @@ async def _start_new_game(guild):
     side_b_members.sort(key=_sort_key)
 
     def _build_faction(faction_key, faction_info, member_list):
+        # 預設所有人都是士兵，軍官/小隊長名額留空（0人），避免掛機玩家卡死名額
+        # 玩家需自行透過「換身分」按鈕升任軍官/小隊長
         officers = []
         squad_leaders = []
         soldiers = []
         n = len(member_list)
-        n_officers = min(OFFICERS_PER_SIDE, n)
-        n_sl = min(SQUAD_LEADERS_PER_SIDE, n - n_officers)
-        for i in range(n_officers):
-            m = member_list[i]
-            officers.append({"id": str(m.id), "name": m.display_name})
-        for i in range(n_officers, n_officers + n_sl):
-            m = member_list[i]
-            sl_officer = officers[i % len(officers)]["id"] if officers else ""
-            squad_leaders.append({"id": str(m.id), "name": m.display_name, "officer_id": sl_officer})
-        _specialties = _cw_random.sample(_SOLDIER_SPECIALTIES * ((n - n_officers - n_sl) // 4 + 1), n - n_officers - n_sl) if n > n_officers + n_sl else []
-        for i in range(n_officers + n_sl, n):
-            m = member_list[i]
-            sl = squad_leaders[(i - n_officers) % len(squad_leaders)]["id"] if squad_leaders else ""
-            spec = _specialties[i - n_officers - n_sl] if i - n_officers - n_sl < len(_specialties) else _cw_random.choice(_SOLDIER_SPECIALTIES)
-            soldiers.append({"id": str(m.id), "name": m.display_name, "squad_leader_id": sl, "specialty": spec})
+        _specialties = _cw_random.sample(_SOLDIER_SPECIALTIES * (n // 4 + 1), n) if n > 0 else []
+        for i, m in enumerate(member_list):
+            spec = _specialties[i] if i < len(_specialties) else _cw_random.choice(_SOLDIER_SPECIALTIES)
+            soldiers.append({"id": str(m.id), "name": m.display_name, "squad_leader_id": "", "specialty": spec})
 
         return {
             "name": faction_info[0],
@@ -288,7 +356,7 @@ async def _start_new_game(guild):
         "turn_summary": "",
     }
     save_cyber_war()
-    return True, f"✅ 第{_cyber_war_state['game_id']}局賽博一戰已開始！\n戰場：{battlefield}\n陣營：{fac_a['flag']} {fac_a['name']} vs {fac_b['flag']} {fac_b['name']}\n參戰人數：{len(all_players)}\n押金：自由投注（第一回合後鎖定）\n倍率：{multiplier}x\n回合間隔：{TURN_INTERVAL_HOURS}小時（第1回合後鎖定押金）\n結束時間：{_fmt_dt(end.isoformat())}"
+    return True, f"✅ 第{_cyber_war_state['game_id']}局賽博一戰已開始！\n戰場：{battlefield}\n陣營：{fac_a['flag']} {fac_a['name']} vs {fac_b['flag']} {fac_b['name']}\n參戰人數：{len(all_players)}\n👥 所有人預設為士兵，軍官/小隊長名額（各{OFFICERS_PER_SIDE}/{SQUAD_LEADERS_PER_SIDE}）需自行用「🔄 換身分」按鈕升任\n押金：自由投注（第一回合後鎖定）\n倍率：{multiplier}x\n回合間隔：{TURN_INTERVAL_HOURS}小時（第1回合後鎖定押金，怠職超過{INACTIVITY_DEMOTE_TURNS}回合自動降階）\n結束時間：{_fmt_dt(end.isoformat())}"
 
 # ── 角色查詢 ──
 def _get_player_role(uid_str: str):
@@ -1093,6 +1161,8 @@ async def _process_turn_end():
     if s["winner"]:
         await _settle_game()
     else:
+        # 檢查軍官/小隊長怠職，超過門檻自動降階釋出名額
+        _check_inactivity_and_demote(turn)
         # 進入下一回合
         s["turn"] = turn + 1
         s["phase"] = "command"
