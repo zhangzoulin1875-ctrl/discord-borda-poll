@@ -522,37 +522,37 @@ class HOI4PanelView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="國策", style=discord.ButtonStyle.primary, custom_id="hoi4_btn_focus")
-    async def btn_focus(self, interaction, button):
+    async def btn_focus(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_focus_menu(interaction)
 
     @discord.ui.button(label="研究", style=discord.ButtonStyle.primary, custom_id="hoi4_btn_research")
-    async def btn_research(self, interaction, button):
+    async def btn_research(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_research_menu(interaction)
 
     @discord.ui.button(label="建設", style=discord.ButtonStyle.secondary, custom_id="hoi4_btn_build")
-    async def btn_build(self, interaction, button):
+    async def btn_build(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_build_menu(interaction)
 
     @discord.ui.button(label="生產", style=discord.ButtonStyle.secondary, custom_id="hoi4_btn_prod")
-    async def btn_prod(self, interaction, button):
+    async def btn_prod(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_production_menu(interaction)
 
     @discord.ui.button(label="戰爭", style=discord.ButtonStyle.danger, custom_id="hoi4_btn_war")
-    async def btn_war(self, interaction, button):
+    async def btn_war(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_war_menu(interaction)
 
     @discord.ui.button(label="地圖", style=discord.ButtonStyle.success, custom_id="hoi4_btn_map")
-    async def btn_map(self, interaction, button):
+    async def btn_map(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_map_link(interaction)
 
-async def _get_player_country(interaction):
+async def _get_player_country(interaction): discord.Interaction): discord.Interaction):
     uid = str(interaction.user.id)
     for cid, c in hoi4_state.get("countries",{}).items():
         if c.get("owner") == uid:
             return cid, c, None
     return None, None, "你還沒有加入遊戲，請先用 /hoi4 join 加入。"
 
-async def _hoi4_show_focus_menu(interaction):
+async def _hoi4_show_focus_menu(interaction): discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -575,7 +575,7 @@ async def _hoi4_show_focus_menu(interaction):
     embed = discord.Embed(title="選擇國策", description=desc, color=discord.Color.blue())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_research_menu(interaction):
+async def _hoi4_show_research_menu(interaction): discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -598,7 +598,7 @@ async def _hoi4_show_research_menu(interaction):
     embed = discord.Embed(title="研究所", description="\n".join(lines), color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_build_menu(interaction):
+async def _hoi4_show_build_menu(interaction): discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -617,7 +617,7 @@ async def _hoi4_show_build_menu(interaction):
     embed = discord.Embed(title="建設部", description="\n".join(lines), color=discord.Color.orange())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_production_menu(interaction):
+async def _hoi4_show_production_menu(interaction): discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -631,7 +631,7 @@ async def _hoi4_show_production_menu(interaction):
     embed = discord.Embed(title="生產部", description="\n".join(lines), color=discord.Color.blurple())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_war_menu(interaction):
+async def _hoi4_show_war_menu(interaction): discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -648,7 +648,7 @@ async def _hoi4_show_war_menu(interaction):
     embed = discord.Embed(title="軍事指揮", description="\n".join(lines), color=discord.Color.red())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_map_link(interaction):
+async def _hoi4_show_map_link(interaction): discord.Interaction):
     embed = discord.Embed(title="戰略地圖",
         description="請到 Dashboard 網頁面板查看互動式地圖、前線微操和師級編制設計。\n\n在 Dashboard 點擊上方導航列的「HOI4」分頁即可。",
         color=discord.Color.green())
@@ -664,7 +664,7 @@ class HOI4Group(app_commands.Group):
 
     @app_commands.command(name="start", description="開始一局新遊戲（機器人擁有者限定）")
     @app_commands.describe(player2="第二位玩家", player3="第三位玩家")
-    async def hoi4_start(self, interaction, player2=None, player3=None):
+    async def hoi4_start(self, interaction: discord.Interaction, player2: discord.Member = None, player3: discord.Member = None):
         if not is_owner(interaction):
             await interaction.response.send_message("此指令僅限機器人擁有者使用。", ephemeral=True); return
         if hoi4_state.get("game_active"):
@@ -678,7 +678,7 @@ class HOI4Group(app_commands.Group):
 
     @app_commands.command(name="join", description="加入現有遊戲")
     @app_commands.describe(name="你的國家名稱")
-    async def hoi4_join(self, interaction, name: str):
+    async def hoi4_join(self, interaction: discord.Interaction, name: str):
         if not hoi4_state.get("game_active"):
             await interaction.response.send_message("遊戲尚未開始。", ephemeral=True); return
         uid = str(interaction.user.id)
@@ -698,7 +698,7 @@ class HOI4Group(app_commands.Group):
         await interaction.response.send_message("你已加入遊戲！國名：{}，獲得 {} 個省份。".format(name, len(my_pids)))
 
     @app_commands.command(name="end", description="結束遊戲（機器人擁有者限定）")
-    async def hoi4_end(self, interaction):
+    async def hoi4_end(self, interaction: discord.Interaction):
         if not is_owner(interaction):
             await interaction.response.send_message("此指令僅限機器人擁有者使用。", ephemeral=True); return
         hoi4_state["game_active"] = False
@@ -708,7 +708,7 @@ class HOI4Group(app_commands.Group):
 
     @app_commands.command(name="set_channel", description="設定 HOI4 面板頻道（機器人擁有者限定）")
     @app_commands.describe(channel="面板要顯示在哪個頻道")
-    async def hoi4_set_channel(self, interaction, channel):
+    async def hoi4_set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not is_owner(interaction):
             await interaction.response.send_message("此指令僅限機器人擁有者使用。", ephemeral=True); return
         hoi4_panel["channel_id"] = str(channel.id)
@@ -718,7 +718,7 @@ class HOI4Group(app_commands.Group):
 
     @app_commands.command(name="focus", description="選擇國策")
     @app_commands.describe(index="從面板按鈕查到的國策編號")
-    async def hoi4_focus(self, interaction, index: int):
+    async def hoi4_focus(self, interaction: discord.Interaction, index: int):
         cid, c, err = await _get_player_country(interaction)
         if err: await interaction.response.send_message(err, ephemeral=True); return
         if c.get("current_focus"):
@@ -742,7 +742,7 @@ class HOI4Group(app_commands.Group):
         app_commands.Choice(name="空軍", value="air"),
         app_commands.Choice(name="海軍", value="naval"),
     ])
-    async def hoi4_research(self, interaction, category, index: int):
+    async def hoi4_research(self, interaction: discord.Interaction, category: app_commands.Choice[str], index: int):
         cid, c, err = await _get_player_country(interaction)
         if err: await interaction.response.send_message(err, ephemeral=True); return
         slots_used = len(c.get("research",[]))
@@ -769,7 +769,7 @@ class HOI4Group(app_commands.Group):
         app_commands.Choice(name="要塞", value="fortification"),
         app_commands.Choice(name="基礎建設", value="infrastructure"),
     ])
-    async def hoi4_build(self, interaction, type, province: str):
+    async def hoi4_build(self, interaction: discord.Interaction, type: app_commands.Choice[str], province: str):
         cid, c, err = await _get_player_country(interaction)
         if err: await interaction.response.send_message(err, ephemeral=True); return
         if province not in c.get("provinces_owned",[]):
@@ -782,7 +782,7 @@ class HOI4Group(app_commands.Group):
 
     @app_commands.command(name="produce", description="開始生產師級單位")
     @app_commands.describe(template="模板ID", factories="分配軍工數")
-    async def hoi4_produce(self, interaction, template: str, factories: int = 1):
+    async def hoi4_produce(self, interaction: discord.Interaction, template: str, factories: int = 1):
         cid, c, err = await _get_player_country(interaction)
         if err: await interaction.response.send_message(err, ephemeral=True); return
         tpl = next((t for t in c.get("division_templates",[]) if t["id"] == template), None)
@@ -798,7 +798,7 @@ class HOI4Group(app_commands.Group):
 
     @app_commands.command(name="war", description="向其他國家宣戰")
     @app_commands.describe(target="目標國家編號")
-    async def hoi4_war(self, interaction, target: int):
+    async def hoi4_war(self, interaction: discord.Interaction, target: int):
         cid, c, err = await _get_player_country(interaction)
         if err: await interaction.response.send_message(err, ephemeral=True); return
         other_ids = [ocid for ocid in hoi4_state["countries"] if ocid != cid]
@@ -829,7 +829,7 @@ class HOI4Group(app_commands.Group):
         await interaction.response.send_message("{} 向 {} 宣戰！爭議省份：{}".format(c["name"], target_c["name"], ", ".join(contested) if contested else "無交界"))
 
     @app_commands.command(name="status", description="查看你自己的國家詳情")
-    async def hoi4_status(self, interaction):
+    async def hoi4_status(self, interaction: discord.Interaction):
         cid, c, err = await _get_player_country(interaction)
         if err: await interaction.response.send_message(err, ephemeral=True); return
         embed = discord.Embed(title="{} — 國家詳情".format(c["name"]), color=discord.Color.gold())
@@ -852,7 +852,7 @@ class HOI4Group(app_commands.Group):
 
     @app_commands.command(name="move", description="移動部隊到相鄰省份")
     @app_commands.describe(division="部隊編號（從 /hoi4 status 查看）", province="目標省份ID")
-    async def hoi4_move(self, interaction, division: int, province: str):
+    async def hoi4_move(self, interaction: discord.Interaction, division: int, province: str):
         cid, c, err = await _get_player_country(interaction)
         if err: await interaction.response.send_message(err, ephemeral=True); return
         divs = c.get("divisions",[])
