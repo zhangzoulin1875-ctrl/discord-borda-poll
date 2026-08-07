@@ -1609,6 +1609,13 @@ async def _ai_evaluate_turn(turn: int):
         "owner_skip_model_chain": chat_ai_settings.get("owner_skip_model_chain", True),
     }
 
+    # 檢查 AI API 是否有設定 — 沒設定就直接走演算法裁判
+    api_url = chat_ai_settings.get("api_url", "")
+    api_key = chat_ai_settings.get("api_key", "")
+    if not api_url or not api_key:
+        print("ℹ️ 賽博一戰：AI API 未設定，使用演算法裁判。")
+        return _default_turn_result()
+
     try:
         result = await asyncio.wait_for(
             call_chat_api(
@@ -1686,17 +1693,267 @@ async def _ai_evaluate_turn(turn: int):
         print(f"⚠️ 賽博一戰AI裁判例外：{e}")
         return _default_turn_result()
 
-def _default_turn_result():
-    """AI 失敗時的預設結果（微小隨機變化）。"""
+# ── 演算法裁判：AI 失效時的確定性備用判定 ──
+
+# 濫用關鍵字（一戰不存在/不合時代的武器與手段）
+_ABUSE_KEYWORDS = [
+    "核彈", "原子彈", "核武", "核子", "核爆",
+    "飛彈", "火箭", "導彈", "彈道",
+    "無人機", "雷達", "衛星", "GPS", "網路戰", "電戰", "電子戰",
+    "100萬", "百萬大軍", "全部叛變", "全部倒戈",
+    "忽略以上", "你現在是", "作為AI", "ignore above", "system prompt",
+    "坦克集群", "坦克衝鋒", "坦克師",
+]
+
+# 一戰進攻關鍵字
+_OFFENSE_KEYWORDS = ["衝鋒", "進攻", "突擊", "推進", "攻擊", "突破", "衝入", "佔領", "奪取", "突入"]
+# 一戰防禦關鍵字
+_DEFENSE_KEYWORDS = ["防守", "防禦", "構工", "壕溝", "陣地", "加固", "鐵絲網", "沙袋", "挖掘"]
+# 補給關鍵字
+_SUPPLY_KEYWORDS = ["補給", "彈藥", "口糧", "運送", "後勤", "輸送"]
+# 醫療關鍵字
+_MEDICAL_KEYWORDS = ["救治", "醫", "傷員", "治療", "包紮", "野戰醫院"]
+# 偵查關鍵字
+_RECON_KEYWORDS = ["偵察", "偵查", "偵", "潛入", "滲透", "觀察", "情報", "探索"]
+
+
+def _algo_evaluate_turn(turn):
+    """演算法裁判：基於玩家行動的確定性判定，不依賴 AI。
+    分析雙方行動質量、兵種搭配、協調度、砲擊、巨獸、濫用偵測，
+    產生與 AI 裁判相同格式的回合結果。"""
+    s = _cyber_war_state
+    turn_str = str(turn)
+    actions = s.get("actions", {}).get(turn_str, {})
+    orders = s.get("orders", {}).get(turn_str, {})
+    artillery = s.get("artillery", {}).get(turn_str, {})
+
+    def _eval_side(fkey, fac):
+        """分析一方的戰力評分，返回 (offense_score, defense_score, supply_delta,
+        morale_delta, abuse_penalty_prog, abuse_penalty_mor, summary_parts, action_count)"""
+        a = actions.get(fkey, {})
+        fac_orders = orders.get(fkey, {})
+        arty_list = artillery.get(fkey, [])
+        offense_score = 0.0
+        defense_score = 0.0
+        supply_delta = 0
+        morale_delta = 0
+        abuse_prog = 0
+        abuse_mor = 0
+        summary_parts = []
+        action_count = 0
+
+        # ── 軍官行動 ──
+        for officer in fac.get("officers", []):
+            oid = officer["id"]
+            text = a.get(oid, "")
+            if not text:
+                # 軍官有統一指令？
+                text = fac_orders.get(oid, "")
+            if text:
+                action_count += 1
+                # 偵測濫用
+                text_lower = text.lower()
+                for kw in _ABUSE_KEYWORDS:
+                    if kw.lower() in text_lower:
+                        abuse_prog -= _cw_random.randint(5, 15)
+                        abuse_mor -= _cw_random.randint(10, 20)
+                        summary_parts.append(f"軍官{officer.get('name','?')}企圖使用不合時代的手段")
+                        break
+                # 軍官指令有指揮加成
+                if any(kw in text for kw in _OFFENSE_KEYWORDS):
+                    offense_score += 2.0
+                if any(kw in text for kw in _DEFENSE_KEYWORDS):
+                    defense_score += 2.0
+
+        # ── 小隊長行動 ──
+        for sl in fac.get("squad_leaders", []):
+            sl_id = sl["id"]
+            text = a.get(sl_id, "")
+            if not text:
+                # 服從軍官統一指令
+                off_id = sl.get("officer_id")
+                text = fac_orders.get(off_id, "") if off_id else ""
+            if text:
+                action_count += 1
+                if any(kw in text for kw in _OFFENSE_KEYWORDS):
+                    offense_score += 1.5
+                if any(kw in text for kw in _DEFENSE_KEYWORDS):
+                    defense_score += 1.5
+                # 濫用偵測
+                for kw in _ABUSE_KEYWORDS:
+                    if kw in text:
+                        abuse_prog -= _cw_random.randint(3, 10)
+                        abuse_mor -= _cw_random.randint(5, 15)
+                        summary_parts.append(f"小隊長{sl.get('name','?')}使用違規手段")
+                        break
+
+        # ── 士兵行動 ──
+        soldiers = fac.get("soldiers", [])
+        spec_counts = {"突擊兵": 0, "醫療兵": 0, "支援兵": 0, "偵查兵": 0}
+        active_soldiers = 0
+        for soldier in soldiers:
+            sid = soldier["id"]
+            spec = soldier.get("specialty", "")
+            text = a.get(sid, "")
+            if not text:
+                # 服從上級指令
+                sl_id = soldier.get("squad_leader_id")
+                if sl_id:
+                    off_id = next((sl for sl in fac.get("squad_leaders", []) if sl["id"] == sl_id), {}).get("officer_id", "")
+                    text = fac_orders.get(off_id, "") if off_id else ""
+            if text:
+                active_soldiers += 1
+                action_count += 1
+                if spec in spec_counts:
+                    spec_counts[spec] += 1
+                # 兵種效果
+                if spec == "突擊兵":
+                    if any(kw in text for kw in _OFFENSE_KEYWORDS):
+                        offense_score += 0.8
+                    else:
+                        offense_score += 0.3
+                elif spec == "醫療兵":
+                    if any(kw in text for kw in _MEDICAL_KEYWORDS):
+                        morale_delta += 1
+                    else:
+                        morale_delta += 0.3
+                elif spec == "支援兵":
+                    if any(kw in text for kw in _SUPPLY_KEYWORDS):
+                        supply_delta += 2
+                    else:
+                        supply_delta += 0.5
+                elif spec == "偵查兵":
+                    if any(kw in text for kw in _RECON_KEYWORDS):
+                        defense_score += 0.5
+                        offense_score += 0.3
+                    else:
+                        defense_score += 0.2
+                # 濫用偵測（只取前150字檢查，避免太慢）
+                text_snippet = text[:150]
+                for kw in _ABUSE_KEYWORDS:
+                    if kw in text_snippet:
+                        abuse_prog -= 1
+                        abuse_mor -= 2
+                        break
+
+        # ── 砲擊/空襲 ──
+        for at in arty_list:
+            offense_score += 3.0
+            # 砲擊消耗補給
+            supply_delta -= 2
+            summary_parts.append(f"砲擊目標：{at.get('target','?')[:30]}")
+
+        # ── 巨獸 ──
+        wb = fac.get("war_beast")
+        if wb and not wb.get("destroyed"):
+            beast_order = wb.get("current_order", "")
+            if beast_order:
+                offense_score += 4.0
+                summary_parts.append(f"巨獸{_WAR_BEASTS.get(wb.get('type',''),{}).get('name','?')}參戰")
+            else:
+                offense_score += 1.0  # 閒置巨獸仍有威懾
+
+        # ── 無行動懲罰 ──
+        total_personnel = len(soldiers) + len(fac.get("squad_leaders", [])) + len(fac.get("officers", []))
+        if total_personnel > 0:
+            idle_ratio = 1.0 - (active_soldiers / max(total_personnel, 1))
+            if idle_ratio > 0.7:
+                morale_delta -= 3
+                summary_parts.append("大量士兵未行動")
+            elif idle_ratio > 0.5:
+                morale_delta -= 1
+
+        # ── 兵種搭配加成 ──
+        active_specs = sum(1 for c in spec_counts.values() if c > 0)
+        if active_specs >= 4:
+            offense_score += 1.5
+            defense_score += 1.0
+            summary_parts.append("四兵種齊全")
+        elif active_specs >= 3:
+            offense_score += 0.8
+
+        return (offense_score, defense_score, supply_delta, morale_delta,
+                abuse_prog, abuse_mor, summary_parts, action_count)
+
+    fac_a = s["factions"].get("A", {})
+    fac_b = s["factions"].get("B", {})
+
+    a_off, a_def, a_sup, a_mor, a_abuse_p, a_abuse_m, a_parts, a_count = _eval_side("A", fac_a)
+    b_off, b_def, b_sup, b_mor, b_abuse_p, b_abuse_m, b_parts, b_count = _eval_side("B", fac_b)
+
+    # ── 計算進度變化 ──
+    # 一方進攻分數減去對方防禦分數 = 淨進攻力
+    a_net_offense = a_off - b_def
+    b_net_offense = b_off - a_def
+
+    # 轉換為進度變化（每5分淨進攻力 = +1進度，上限+12）
+    a_progress = max(-10, min(12, int(a_net_offense / 5) + _cw_random.randint(-1, 1)))
+    b_progress = max(-10, min(12, int(b_net_offence / 5) + _cw_random.randint(-1, 1)))
+
+    # 加上濫用懲罰
+    a_progress += a_abuse_p
+    b_progress += b_abuse_p
+    a_progress = max(-20, min(15, a_progress))
+    b_progress = max(-20, min(15, b_progress))
+
+    # ── 士氣變化 ──
+    a_morale = max(-20, min(10, int(a_mor + a_abuse_m)))
+    b_morale = max(-20, min(10, int(b_mor + b_abuse_m)))
+
+    # ── 補給變化 ──
+    a_supplies = max(-15, min(5, int(a_sup)))
+    b_supplies = max(-15, min(5, int(b_sup)))
+
+    # ── 生成戰況摘要 ──
+    a_name = fac_a.get("name", "A方")
+    b_name = fac_b.get("name", "B方")
+    a_flag = fac_a.get("flag", "")
+    b_flag = fac_b.get("flag", "")
+
+    summary_lines = []
+    if a_progress > b_progress + 3:
+        summary_lines.append(f"{a_flag}{a_name}本回合佔優勢")
+    elif b_progress > a_progress + 3:
+        summary_lines.append(f"{b_flag}{b_name}本回合佔優勢")
+    else:
+        summary_lines.append("雙方勢均力敵")
+
+    if a_parts:
+        summary_lines.append(f"{a_flag}：{'、'.join(a_parts[:3])}")
+    if b_parts:
+        summary_lines.append(f"{b_flag}：{'、'.join(b_parts[:3])}")
+
+    # 加上行動統計
+    summary_lines.append(f"行動數：{a_flag}{a_count} vs {b_flag}{b_count}")
+
+    summary = "。".join(summary_lines) + "。"
+
     return {
-        "a_progress": _cw_random.randint(-3, 5),
-        "b_progress": _cw_random.randint(-3, 5),
-        "a_morale": _cw_random.randint(-5, 2),
-        "b_morale": _cw_random.randint(-5, 2),
-        "a_supplies": _cw_random.randint(-5, 0),
-        "b_supplies": _cw_random.randint(-5, 0),
-        "summary": "本回合戰況膠著，雙方各有小幅推進。",
+        "a_progress": a_progress,
+        "b_progress": b_progress,
+        "a_morale": a_morale,
+        "b_morale": b_morale,
+        "a_supplies": a_supplies,
+        "b_supplies": b_supplies,
+        "summary": summary[:500],
     }
+
+
+def _default_turn_result():
+    """AI 失效時的備用結果 — 呼叫演算法裁判而非純隨機。"""
+    try:
+        return _algo_evaluate_turn(_cyber_war_state.get("turn", 1))
+    except Exception as e:
+        print(f"⚠️ 賽博一戰演算法裁判也失敗，退回純隨機：{e}")
+        return {
+            "a_progress": _cw_random.randint(-3, 5),
+            "b_progress": _cw_random.randint(-3, 5),
+            "a_morale": _cw_random.randint(-5, 2),
+            "b_morale": _cw_random.randint(-5, 2),
+            "a_supplies": _cw_random.randint(-5, 0),
+            "b_supplies": _cw_random.randint(-5, 0),
+            "summary": "本回合戰況膠著，雙方各有小幅推進。",
+        }
 
 # ── 回合結算 ──
 def _check_war_beast_deploy():
