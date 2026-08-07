@@ -6727,17 +6727,25 @@ def _record_t2i_usage(user_id: str):
 
 async def _detect_t2i_request_ai(text: str, settings: dict) -> str | None:
     """Use AI to determine if a user's message is requesting image generation.
-    Returns the extracted image prompt (in English, optimized for image gen) if yes, None if no.
+    Returns the image prompt to use if yes, None if no.
 
-    This replaces the old regex-based _detect_t2i_request — the AI can understand
-    context, nuance, indirect requests, and conversational phrasing that regex
-    patterns fundamentally cannot capture (e.g. "我想看到...", "可以弄一張...嗎",
-    "如果有一張...的圖就好了", "幫我視覺化...").
+    ── 為什麼拆成兩個獨立呼叫，而不是像第一版一樣一次要求「判斷+翻譯成英文」──
+    這個 bot 用的是不穩定的弱/免費模型（整個專案history有大量記錄：海龜湯提示
+    外洩、波達計票AI判讀等，都是同一個模式——一次丟給弱模型兩件事，它常常
+    不遵守嚴格輸出格式，亂回一通）。「判斷是否要生圖」+「同時翻成英文prompt」
+    是兩個任務疊在一起，弱模型很容易生出不符合 "IMAGE: ..."/"NO" 格式的雜訊，
+    被嚴格 parser 判定「不明確」而放棄——這就是先前版本「還是不生圖」的真正原因。
 
-    Uses a very short, fast API call (max_tokens=60, 5s timeout) to minimize
-    latency impact on normal chat. If the pre-check times out or fails,
-    we fail-safe to NO image generation (don't want to block chat on a
-    flaky classification call).
+    新設計：
+    1. 第一次呼叫：只問一個超簡單的是非題（是/否），這是弱模型最不容易答錯的任務。
+    2. 只有判定「是」時，才用第二次呼叫做英文 prompt 翻譯——這個呼叫只在真正
+       要生圖時才發生（頻率低很多），就算翻譯失敗，也不影響「有沒有生圖」這件事，
+       直接 fallback 用原始文字送給圖片 API（大部分圖片 API 對中文也有基本支援）。
+    3. fallback_mode 改成 "rate_limited"（跟一般聊天一樣用免費降級鏈），
+       而不是 "disabled"——這個 API 本身就常常不穩定，"disabled" 代表主模型
+       一有狀況就直接放棄判斷，等於整個生圖偵測隨著主模型穩定度隨機失效。
+    4. timeout 從 6s 拉長到 10s——這個 API 端點過去多次被記錄為需要 16-20s
+       才能穩定回覆，6s 對它來說太緊，時常還沒回來就先判定逾時放棄。
     """
     if not settings.get("t2i_enabled") or not settings.get("t2i_auto_detect"):
         return None
@@ -6748,64 +6756,92 @@ async def _detect_t2i_request_ai(text: str, settings: dict) -> str | None:
     if len(text) < 4:
         return None
 
-    # Build the classification prompt — deliberately minimal for speed
-    classify_messages = [
+    # ── Step 1：極簡是非題判斷 ──
+    yn_messages = [
         {
             "role": "system",
             "content": (
-                "You are an intent classifier. Determine if the user is asking you to GENERATE or CREATE an IMAGE.\n"
-                "Reply with EXACTLY one of:\n"
-                "- IMAGE: <concise English description of what image to generate>\n"
-                "- NO\n\n"
-                "Rules:\n"
-                "1. The user must want a NEW image to be generated/drawn/created — not asking about existing images, screenshots, or discussing image quality.\n"
-                "2. Translate the image description to English (image APIs work better with English prompts).\n"
-                "3. Be concise — the description after 'IMAGE: ' should be a good image generation prompt, max 200 chars.\n"
-                "4. If the user is just chatting, asking questions, discussing topics, or talking about images in general, reply NO.\n"
-                "5. Ambiguous cases (e.g. '我想看一張貓的圖' could be 'show me a cat photo' or 'draw me a cat') → "
-                "lean towards IMAGE if the context suggests they want you (the AI) to create something.\n"
+                "你只需要判斷一件事：使用者這句話，是不是在要求你「生成/畫/產生/製作一張圖片」。\n"
+                "只回答「是」或「否」這一個字，不要有任何其他文字、標點或解釋。\n"
+                "判斷原則：\n"
+                "- 使用者明確要求產生新圖片（畫一張/生成一張/幫我弄張圖等）→ 是\n"
+                "- 使用者只是聊天、問問題、討論事情，或在談論已存在的圖片/截圖 → 否\n"
+                "- 語意模糊但傾向想要你創作一張圖 → 是"
             )
         },
         {"role": "user", "content": text[:500]},
     ]
 
     try:
-        result = await call_chat_api(
-            classify_messages, settings,
+        yn_result = await call_chat_api(
+            yn_messages, settings,
             tools=None,
-            max_tokens=60,
-            timeout_total=6,
-            timeout_read=5,
+            max_tokens=10,
+            timeout_total=10,
+            timeout_read=9,
             is_background=True,
-            fallback_mode="disabled",  # don't waste fallback quota on classification
+            fallback_mode="rate_limited",
+            fallback_user_id="t2i_intent_check",
             category="chat",
         )
-        reply = (result.get("content") or "").strip()
-        if not reply:
+        yn_reply = (yn_result.get("content") or "").strip()
+        if not yn_reply:
+            print("🎨 T2I 意圖判斷：空回覆，視為否")
             return None
 
-        reply_upper = reply.upper().strip()
-        if reply_upper.startswith("IMAGE:"):
-            prompt = reply[len("IMAGE:"):].strip()
-            # Clean up — remove quotes if the model wrapped the prompt in them
-            prompt = prompt.strip(chr(34) + chr(39) + chr(96))
-            if len(prompt) >= 2:
-                print(f"🎨 AI 判定生圖意圖: {prompt[:80]}...")
-                return prompt
-            return None
-        elif reply_upper.startswith("NO") or reply_upper == "NO":
-            return None
-        else:
-            # Ambiguous reply — could be the model rambling instead of following format.
-            # Don't treat as image request (fail-safe to normal chat).
-            print(f"🎨 T2I 判定回覆不明確（放行不生圖）: {reply[:80]}")
+        # 寬鬆比對：只要回覆裡「有」肯定字樣就算是，優先檢查否定避免「不是」誤判成「是」
+        _neg_markers = ("否", "不是", "不要", "no", "NO", "No")
+        _pos_markers = ("是", "對", "yes", "YES", "Yes", "要")
+        _is_negative = any(yn_reply.startswith(m) for m in _neg_markers) or yn_reply.strip() in ("否", "不", "no", "No", "NO")
+        _is_positive = (not _is_negative) and any(m in yn_reply for m in _pos_markers)
+
+        print(f"🎨 T2I 意圖判斷回覆: 「{yn_reply[:30]}」→ {'是' if _is_positive else '否'}")
+        if not _is_positive:
             return None
     except asyncio.TimeoutError:
-        print("🎨 T2I AI 判定逾時（>6s），跳過（正常聊天）")
+        print("🎨 T2I 意圖判斷逾時（>10s），跳過（正常聊天）")
         return None
     except Exception as e:
-        print(f"🎨 T2I AI 判定例外: {type(e).__name__}: {e}，跳過")
+        print(f"🎨 T2I 意圖判斷例外: {type(e).__name__}: {e}，跳過")
         return None
+
+    # ── Step 2：判定要生圖後，再用一次呼叫把中文需求翻成英文 prompt ──
+    # 這一步失敗不影響「要不要生圖」的結論，失敗就直接用原始文字當 prompt。
+    prompt_to_use = text[:300]
+    try:
+        translate_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Translate the user's image request into a concise English image-generation "
+                    "prompt (max 200 chars). Reply with ONLY the English prompt text, nothing else "
+                    "— no quotes, no explanation, no prefix."
+                )
+            },
+            {"role": "user", "content": text[:500]},
+        ]
+        tr_result = await call_chat_api(
+            translate_messages, settings,
+            tools=None,
+            max_tokens=80,
+            timeout_total=10,
+            timeout_read=9,
+            is_background=True,
+            fallback_mode="rate_limited",
+            fallback_user_id="t2i_intent_check",
+            category="chat",
+        )
+        tr_reply = (tr_result.get("content") or "").strip()
+        tr_reply = tr_reply.strip(chr(34) + chr(39) + chr(96))
+        if tr_reply and len(tr_reply) >= 2:
+            prompt_to_use = tr_reply[:300]
+        else:
+            print("🎨 T2I 英文翻譯失敗/空回覆，改用原始文字當 prompt")
+    except Exception as e:
+        print(f"🎨 T2I 英文翻譯例外（改用原始文字）: {type(e).__name__}: {e}")
+
+    print(f"🎨 AI 判定生圖意圖，prompt: {prompt_to_use[:80]}...")
+    return prompt_to_use
 
 async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
     """Send the image prompt to a filtering model for safety review BEFORE
