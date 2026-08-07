@@ -4196,12 +4196,35 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                     break
                 _diag.append(f"🔗 池降級鏈：嘗試 {_pc_model}（{_pc_url[:40]}...）")
                 print(f"🔗 池降級鏈：嘗試 {_pc_model} @ {_pc_url[:60]}")
-                _pc_settings = {**settings, "api_url": _pc_url, "api_key": _pc_key, "model": _pc_model}
-                _pc_msg = await _post(_pc_settings, _pc_url, _pc_key, _pc_model, _diag)
-                if _pc_msg and (_pc_msg.get("content") or _pc_msg.get("tool_calls")):
-                    _pc_msg["_used_fallback"] = True
-                    _pc_msg["_used_model"] = _pc_model
-                    return _pc_msg
+                _pc_settings = {
+                    **settings,
+                    "api_url": _pc_url,
+                    "api_key": _pc_key,
+                    "model": _pc_model,
+                    "fallback_enabled": False,  # 池降級鏈內不再觸發備援，避免無限遞迴
+                }
+                _pc_budget = int(_remaining())
+                if _pc_budget < 3:
+                    _diag.append(f"⏱️ 時間不足放棄池降級（剩 {_remaining():.1f}s）")
+                    break
+                try:
+                    _pc_msg = await call_chat_api(
+                        messages, _pc_settings, tools=tools,
+                        max_tokens=max_tokens,
+                        timeout_total=_pc_budget,
+                        timeout_read=max(2, _pc_budget - 1),
+                        is_background=is_background,
+                        fallback_mode="disabled",
+                    )
+                    if _pc_msg and (_pc_msg.get("content") or _pc_msg.get("tool_calls")):
+                        _pc_msg["_used_fallback"] = True
+                        _pc_msg["_used_model"] = _pc_model
+                        _pc_msg["_diag"] = _diag + [f"✅ 池降級鏈成功：{_pc_model}"]
+                        print(f"✅ 池降級鏈成功！({_pc_model})")
+                        return _pc_msg
+                except Exception as _pc_e:
+                    print(f"⚠️ 池降級鏈 {_pc_model} 失敗：{_pc_e}")
+                    _diag.append(f"⚠️ 池降級鏈 {_pc_model} 失敗：{str(_pc_e)[:80]}")
 
     # If the primary API returned a provider-side error (503, 502, 500,
     # 504, timeout) and a fallback API is configured, retry the entire
