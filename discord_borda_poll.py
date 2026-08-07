@@ -7172,34 +7172,38 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
                     return {"allowed": False, "reason": reason}
 
                 # ── 視覺模型拒答處理 ──
-                # 大多數視覺模型（GPT-4o、Gemini 等）收到 NSFW 圖片時，自己的
-                # 安全過濾會先觸發，回的不是 SAFE/BLOCKED 而是拒答訊息或空字串。
-                # 舊邏輯把這些當「不明確」放行 → 結果最該擋的圖反而最常被放行。
-                # 修正：fail-closed — 只要不是明確 SAFE，就攔截。
-
-                # 偵測常見拒答模式（視覺模型的安全拒答措辭）
+                # 問題（2026-08-07 實測發現）：不少視覺模型收到「你是安全審查員，
+                # 判斷這張圖是否違規」這種 meta 任務框架時，會直接整體拒答
+                # （"I'm sorry, I can't provide a response/review for this
+                # prompt/image."），即使提示詞完全無害（"rick roll"、純數字、
+                # 人名）。這種拒答是模型本身不願意扮演「內容審查員」角色，
+                # 跟圖片實際內容無關——舊邏輯把任何帶有 "I CAN'T"/"I'M SORRY"
+                # 字眼的拒答都當成「疑似色情內容」擋掉，導致 100% 的圖都被誤擋。
+                #
+                # 修正：只有當拒答內容明確提到色情/性相關/CSAM 關鍵字時才視為
+                # 「模型自己的安全過濾觸發」而擋圖；其餘任何拒答（包含模型單純
+                # 不想扮演審查員角色、或不支援這種任務框架）一律 fail-OPEN 放行
+                # ——因為根據目前政策（只擋色情，不擋其他），我們無法從一句
+                # 「I can't assist with that」推斷圖片含有色情內容。
                 _reply_upper = reply_text.upper()
-                _refusal_markers = [
-                    "I CAN'T", "I CANNOT", "I'M SORRY", "I AM SORRY",
-                    "I'M UNABLE", "I AM UNABLE", "NOT ABLE TO", "UNABLE TO",
-                    "REFUSE", "INAPPROPRIATE", "VIOLATES", "CONTENT POLICY",
-                    "SAFETY", "NOT SAFE FOR", "NSFW", "EXPLICIT",
-                    "I WON'T", "I WILL NOT", "AGAINST MY",
+                _sexual_refusal_markers = [
+                    "SEXUAL", "PORNOGRAPH", "NSFW", "EXPLICIT CONTENT",
+                    "NOT SAFE FOR WORK", "NUDITY", "CSAM", "CHILD",
+                    "MINOR", "UNDERAGE",
                 ]
-                _is_refusal = any(_m in _reply_upper for _m in _refusal_markers)
+                _is_sexual_refusal = any(_m in _reply_upper for _m in _sexual_refusal_markers)
 
-                if not reply_text or _is_refusal:
-                    # 空回覆或拒答 → 視覺模型自己觸發了安全過濾 → 圖片有問題
-                    _reason = "生成的圖片被視覺模型判定為不當內容（模型拒絕分析）"
-                    if _is_refusal and reply_text:
-                        _reason = f"視覺模型拒絕分析（疑似不當內容）：{reply_text[:80]}"
-                    print(f"🎨 T2I 圖片複審：模型拒答/空回覆，判定為 BLOCKED: {_reason[:100]}")
+                if _is_sexual_refusal:
+                    _reason = f"視覺模型拒絕分析（疑似色情/不當內容）：{reply_text[:80]}"
+                    print(f"🎨 T2I 圖片複審：模型拒答且提及色情相關字眼，判定為 BLOCKED: {_reason[:100]}")
                     return {"allowed": False, "reason": _reason}
 
-                # 有回覆但不是 SAFE 也不是 BLOCKED 也不是拒答 → 仍 fail-closed
-                _reason = f"視覺模型回覆無法判定為安全：{reply_text[:80]}"
-                print(f"🎨 T2I 圖片複審：回覆不明確，fail-closed 攔截: {reply_text[:100]}")
-                return {"allowed": False, "reason": _reason}
+                # 空回覆、或拒答但沒提到色情相關字眼 → 視為「模型不願/無法完成這個
+                # 審查任務」而非「圖片有問題」，fail-open 放行，但留下日誌方便排查
+                # 視覺模型是否根本不適合做這個審查工作。
+                print(f"🎨 T2I 圖片複審：模型回覆非 SAFE/BLOCKED 且未提及色情字眼，"
+                      f"視為模型無法完成審查任務（非內容問題），fail-open 放行: {reply_text[:150]}")
+                return {"allowed": True}
     except asyncio.TimeoutError:
         print(f"🎨 T2I 圖片複審逾時（{timeout_s+15}s），放行（fail-open）")
         return {"allowed": True}

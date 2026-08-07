@@ -1231,7 +1231,7 @@ async function saveScheduleSettings() {
     regular_meeting_no: parseInt(document.getElementById('sched-regular-no').value) || 1,
     briefing_meeting_no: parseInt(document.getElementById('sched-briefing-no').value) || 1,
   };
-  const r = await api('/api/schedule-settings', { method: 'PUT', body: JSON.stringify(data) });
+  const r = await api('/api/schedule-settings', 'PUT', data);
   if (r.ok) alert('✅ 排程設定已儲存');
   else alert('❌ 儲存失敗');
 }
@@ -1287,7 +1287,7 @@ async function saveSiegeSettings() {
     min_damage: parseInt(document.getElementById('siege-min-damage').value) || 100,
     max_damage: parseInt(document.getElementById('siege-max-damage').value) || 2000,
   };
-  const r = await api('/api/siege-settings', { method: 'PUT', body: JSON.stringify(data) });
+  const r = await api('/api/siege-settings', 'PUT', data);
   if (r.ok) alert('✅ 攻城戰設定已儲存');
   else alert('❌ 儲存失敗');
 }
