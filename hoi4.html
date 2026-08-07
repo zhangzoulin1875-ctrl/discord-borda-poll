@@ -57,7 +57,7 @@
         </div>
       </div>
       <div id="map-container" style="position:relative">
-        <svg id="map-svg" viewBox="0 0 1000 650" style="width:100%;background:#0d0e11;border-radius:8px;display:block"></svg>
+        <svg id="map-svg" viewBox="0 0 1000 500" style="width:100%;background:#0d0e11;border-radius:8px;display:block"></svg>
         <div id="tooltip" class="tooltip"></div>
       </div>
       <div id="province-detail" style="margin-top:10px;font-size:13px;color:#949ba4;min-height:40px"></div>
@@ -216,23 +216,59 @@ function renderLoginOrJoin() {
   }
 
   document.getElementById('login-panel').style.display = '';
+  if (pickingStart) {
+    document.getElementById('login-content').innerHTML = `
+      <div style="font-weight:600;font-size:15px;margin-bottom:8px">🗺️ 選擇起始地區</div>
+      <p style="color:#949ba4;font-size:13px;margin-bottom:10px">在地圖上點一個<b style="color:#fee75c">金色邊框</b>的無主省份當作起始地。</p>
+      ${pickedProv ? `<div style="background:#1e1f22;border-radius:6px;padding:8px;margin-bottom:8px">已選擇：<b>${S.provinces[pickedProv].name}</b></div>` : '<div style="color:#949ba4;font-size:12px">還沒選擇...</div>'}
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="confirmJoin()" ${pickedProv?'':'disabled'}>✅ 在此建國</button>
+        <button class="btn btn-ghost" onclick="cancelPickStart()">取消</button>
+      </div>
+      <div id="join-msg" style="margin-top:6px;font-size:12px;color:#ed4245"></div>
+    `;
+    return;
+  }
   document.getElementById('login-content').innerHTML = `
     <div style="font-weight:600;font-size:15px;margin-bottom:8px">🚩 加入遊戲</div>
-    <p style="color:#949ba4;font-size:13px;margin-bottom:10px">沒有人數上限，不用報名，隨時可加入。輸入你想用的國家名稱就行。</p>
+    <p style="color:#949ba4;font-size:13px;margin-bottom:10px">沒有人數上限，不用報名，隨時可加入。從一個省份開始，之後可以和平擴張或發動戰爭慢慢長大。</p>
     <div style="display:flex;gap:8px">
-      <input id="join-name" type="text" placeholder="你的國家名稱" style="flex:1" onkeydown="if(event.key==='Enter')doJoin()">
-      <button class="btn btn-primary" onclick="doJoin()">加入</button>
+      <input id="join-name" type="text" placeholder="你的國家名稱" style="flex:1" onkeydown="if(event.key==='Enter')startPickLocation()">
+      <button class="btn btn-primary" onclick="startPickLocation()">🗺️ 選地建國</button>
     </div>
     <div id="join-msg" style="margin-top:6px;font-size:12px;color:#ed4245"></div>
   `;
 }
 
-async function doJoin() {
+let pickingStart = false;
+let pickedProv = null;
+let pendingCountryName = '';
+
+function startPickLocation() {
   const name = document.getElementById('join-name').value.trim();
   if (!name) { document.getElementById('join-msg').textContent = '請輸入國家名稱'; return; }
-  const r = await api('/api/game/hoi4/join', 'POST', { user_id: me.user_id, name });
+  pendingCountryName = name;
+  pickingStart = true;
+  pickedProv = null;
+  renderLoginOrJoin();
+  renderMap();
+  toast('在地圖上點選一個無主省份（金色邊框）當起始地');
+}
+
+function cancelPickStart() {
+  pickingStart = false;
+  pickedProv = null;
+  renderLoginOrJoin();
+  renderMap();
+}
+
+async function confirmJoin() {
+  if (!pickedProv) return;
+  const r = await api('/api/game/hoi4/join', 'POST', { user_id: me.user_id, name: pendingCountryName, start_province: pickedProv });
   if (r.error) { document.getElementById('join-msg').textContent = r.error; return; }
-  toast('加入成功！獲得 ' + (r.country.provinces_owned||[]).length + ' 個省份');
+  pickingStart = false;
+  pickedProv = null;
+  toast('建國成功！起始地：' + S.provinces[r.country.provinces_owned[0]].name);
   await refresh();
 }
 
@@ -243,7 +279,7 @@ function renderMap() {
   let parts = '';
 
   // Background water
-  parts += `<rect x="0" y="0" width="1000" height="650" fill="#0d1117"/>`;
+  parts += `<rect x="0" y="0" width="1000" height="500" fill="#0d1117"/>`;
 
   // Draw provinces
   for (const [pid, p] of Object.entries(S.provinces)) {
@@ -254,19 +290,28 @@ function renderMap() {
     if (owner) fill = owner.color || fill;
     fill = fill;
     const opacity = owner ? 0.75 : 0.5;
-    const sel = (pid === selProv) ? ' selected' : '';
+    const sel = (pid === selProv || pid === pickedProv) ? ' selected' : '';
     const movable = (selDiv && myCid && selProv && isAdjacent(selProv, pid)) ? ' movable' : '';
-    
-    parts += `<polygon class="province${sel}${movable}" points="${polyStr}" fill="${fill}" fill-opacity="${opacity}" stroke="#2a2a2a" stroke-width="0.5" stroke-opacity="0.6" onclick="onProvinceClick('${pid}')" onmousemove="showTooltip(event,'${pid}')" onmouseout="hideTooltip()"/>`;
+    const pickable = (pickingStart && !owner) ? ' movable' : '';
+    let extraStroke = '';
+    if (pickingStart && !owner) extraStroke = 'stroke="#fee75c" stroke-width="1.2" stroke-opacity="0.9"';
 
-    // Province name
+    parts += `<polygon class="province${sel}${movable}${pickable}" points="${polyStr}" fill="${fill}" fill-opacity="${opacity}" ${extraStroke || 'stroke="#2a2a2a" stroke-width="0.5" stroke-opacity="0.6"'} onclick="onProvinceClick('${pid}')" onmousemove="showTooltip(event,'${pid}')" onmouseout="hideTooltip()"/>`;
+
+    // Province name — 世界地圖省份很多，小國/無主省份不擠標籤，只在擁有國家或夠大時顯示，避免密密麻麻看不清楚
     const [cx, cy] = p.centroid || [0,0];
-    const fontSize = 9;
-    parts += `<text x="${cx}" y="${cy-4}" text-anchor="middle" fill="#fff" fill-opacity="0.9" font-size="${fontSize}" style="pointer-events:none;font-weight:600;paint-order:stroke;stroke:#000;stroke-width:2;stroke-opacity:0.4">${p.name}</text>`;
-    
+    const xs = (p.polygon||[]).map(pt=>pt[0]), ys = (p.polygon||[]).map(pt=>pt[1]);
+    const bboxW = xs.length ? Math.max(...xs)-Math.min(...xs) : 0;
+    const bboxH = ys.length ? Math.max(...ys)-Math.min(...ys) : 0;
+    const bigEnough = Math.max(bboxW, bboxH) > 14;
+    if (owner || bigEnough) {
+      const fontSize = owner ? 9 : 8;
+      parts += `<text x="${cx}" y="${cy-4}" text-anchor="middle" fill="#fff" fill-opacity="0.9" font-size="${fontSize}" style="pointer-events:none;font-weight:600;paint-order:stroke;stroke:#000;stroke-width:2;stroke-opacity:0.5">${p.name}</text>`;
+    }
+
     // VP star
     if (p.victory_points > 0) {
-      parts += `<text x="${cx+12}" y="${cy-4}" text-anchor="middle" fill="#fee75c" font-size="11" style="pointer-events:none">★</text>`;
+      parts += `<text x="${cx+14}" y="${cy-4}" text-anchor="middle" fill="#fee75c" font-size="10" style="pointer-events:none">★</text>`;
     }
 
     // Division markers
@@ -321,6 +366,15 @@ function onProvinceClick(pid) {
   const prov = S.provinces[pid];
   if (!prov) return;
 
+  // Picking a starting location for a new country
+  if (pickingStart) {
+    if (prov.owner) { toast('這個省份已經有主人了，選別的地方'); return; }
+    pickedProv = pid;
+    renderLoginOrJoin();
+    renderMap();
+    return;
+  }
+
   // If we have a division selected and this is adjacent, move it
   if (selDiv && myCid && selProv && isAdjacent(selProv, pid)) {
     moveDivision(selDiv, pid);
@@ -341,6 +395,46 @@ function onProvinceClick(pid) {
       renderDivisionSelector(divs);
     }
   }
+
+  // If this is an unowned province adjacent to my territory, offer peaceful expansion
+  if (myCid && !prov.owner) {
+    const c = S.countries[myCid];
+    const owned = new Set(c.provinces_owned||[]);
+    const isAdjacentToMine = (prov.neighbors||[]).some(n => owned.has(n));
+    if (isAdjacentToMine) {
+      document.getElementById('province-detail').innerHTML += `<div style="margin-top:8px">
+        <button class="btn btn-green" onclick="doExpand('${pid}')">🌱 和平擴張至此（花費 ${EXPAND_PP_COST} 政治點數）</button>
+      </div>`;
+    }
+  }
+
+  // If this is an enemy province, offer war declaration shortcut
+  if (myCid && prov.owner && prov.owner !== myCid) {
+    const c = S.countries[myCid];
+    const alreadyAtWar = (c.at_war_with||[]).includes(prov.owner);
+    if (!alreadyAtWar) {
+      const enemy = S.countries[prov.owner];
+      document.getElementById('province-detail').innerHTML += `<div style="margin-top:8px">
+        <button class="btn btn-red" onclick="doDeclareWar('${prov.owner}')">⚔️ 向 ${enemy.name} 宣戰</button>
+      </div>`;
+    }
+  }
+}
+
+const EXPAND_PP_COST = 30;
+
+async function doExpand(pid) {
+  const r = await api('/api/game/hoi4/expand', 'POST', { country_id: myCid, province: pid });
+  if (r.error) { toast(r.error); return; }
+  toast('擴張成功！');
+  await refresh();
+}
+
+async function doDeclareWar(targetId) {
+  const r = await api('/api/game/hoi4/declare-war', 'POST', { country_id: myCid, target_id: targetId });
+  if (r.error) { toast(r.error); return; }
+  toast('已宣戰！');
+  await refresh();
 }
 
 function renderProvinceDetail(pid) {

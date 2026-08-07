@@ -259,9 +259,15 @@ def _flood_fill_territory(start_pid, size, owned_filter=None):
         frontier = next_frontier
     return visited
 
-def _do_join_country(user_id, name):
+EXPAND_PP_COST = 30       # 和平擴張一個省份要花的政治點數
+EXPAND_COOLDOWN_TICKS = 2  # 兩次擴張之間至少間隔幾個 tick（每 tick 30 分鐘），確保「慢慢擴張」不會一次爆吃地圖
+
+def _do_join_country(user_id, name, start_province=None):
     """加入遊戲的共用邏輯（Discord 指令 /hoi4 join 與網頁 API 都呼叫這裡）。
-    沒有人數上限、不用事先報名，隨時可加入。土地用連通區域分配（像真的國家領土），不是隨機東一塊西一塊。
+    沒有人數上限、不用事先報名，隨時可加入。
+    開局只給「一個」起始省份（像真的建國一樣從一小塊地開始），之後要靠和平擴張
+    （_do_expand）或戰爭慢慢長大，不會一加入就變成一個大國。
+    start_province：網頁地圖點選的起始省份 id；沒給的話（例如 Discord 指令）隨機挑一個無主省份。
     回傳 (country_id, error_message)。"""
     uid = str(user_id)
     _ensure_game_started()
@@ -269,26 +275,29 @@ def _do_join_country(user_id, name):
         if c.get("owner") == uid:
             return None, "你已經在遊戲中（{}）。".format(c["name"])
     provinces = hoi4_state["provinces"]
-    free_pids = [pid for pid, p in provinces.items() if p.get("owner") is None]
-    target_size = max(3, len(provinces) // 6)
     my_pids = []
-    if free_pids:
-        start = random.choice(free_pids)
-        my_pids = _flood_fill_territory(start, min(target_size, len(free_pids)))
+    if start_province:
+        prov = provinces.get(start_province)
+        if not prov:
+            return None, "找不到這個省份。"
+        if prov.get("owner") is not None:
+            return None, "「{}」已經有主人了，換一個地方吧。".format(prov["name"])
+        my_pids = [start_province]
+    else:
+        free_pids = [pid for pid, p in provinces.items() if p.get("owner") is None]
+        if free_pids:
+            my_pids = [random.choice(free_pids)]
     if not my_pids:
         # 地圖上沒有剩餘的無主省份了：不因此拒絕新玩家加入（沒有人數上限），
-        # 改成從目前領土最大的國家身上，沿邊界連通地割一塊土地給新玩家。
+        # 改成從目前領土最大的國家身上，沿邊界割一個省份給新玩家（比較像戰爭割地）。
         if hoi4_state.get("countries"):
             biggest_cid = max(hoi4_state["countries"], key=lambda k: len(hoi4_state["countries"][k].get("provinces_owned", [])))
             biggest = hoi4_state["countries"][biggest_cid]
             owned = set(biggest.get("provinces_owned", []))
-            take_n = max(1, len(owned) // 2)
             if owned:
-                # 從邊界（跟外部相鄰最多的省份）開始割，比較像戰爭割地
                 border_pid = max(owned, key=lambda pid: sum(1 for n in provinces.get(pid, {}).get("neighbors", []) if n not in owned))
-                my_pids = _flood_fill_territory(border_pid, take_n, owned_filter=owned)
-                for pid in my_pids:
-                    biggest["provinces_owned"].remove(pid)
+                my_pids = [border_pid]
+                biggest["provinces_owned"].remove(border_pid)
         if not my_pids:
             return None, "目前沒有可分配的省份，請稍後再試。"
     colors = ["#fee75c","#eb459e","#3ba55d","#7289da","#f47fff","#ed4245","#5865f2","#faa61a","#95a5a6","#e91e63"]
@@ -298,11 +307,41 @@ def _do_join_country(user_id, name):
         n += 1
         new_cid = "c{}".format(n)
     hoi4_state["countries"][new_cid] = _create_country(name, uid, random.choice(colors), my_pids)
+    hoi4_state["countries"][new_cid]["last_expand_tick"] = -999
     for pid in my_pids:
         hoi4_state["provinces"][pid]["owner"] = new_cid
-    hoi4_state.setdefault("log", []).append("[{}] {} 加入遊戲，獲得 {} 個省份。".format(_now_gmt8_str(), name, len(my_pids)))
+    hoi4_state.setdefault("log", []).append("[{}] {} 在「{}」建國！".format(_now_gmt8_str(), name, hoi4_state["provinces"][my_pids[0]]["name"]))
     _save_hoi4_state()
     return new_cid, None
+
+def _do_expand(cid, province_id):
+    """和平擴張：把跟自己國土相鄰的「無主」省份納入版圖，花政治點數、有冷卻時間，
+    確保是慢慢長大而不是瞬間佔滿地圖。回傳 (ok_bool, error_message)。"""
+    c = hoi4_state.get("countries", {}).get(cid)
+    if not c:
+        return False, "國家不存在"
+    prov = hoi4_state["provinces"].get(province_id)
+    if not prov:
+        return False, "省份不存在"
+    if prov.get("owner") is not None:
+        return False, "「{}」已經有主人了，擴張只能拿無主的地，要搶別人的地請宣戰。".format(prov["name"])
+    owned = set(c.get("provinces_owned", []))
+    if not any(n in owned for n in prov.get("neighbors", [])):
+        return False, "「{}」沒有跟你的領土接壤，不能擴張過去。".format(prov["name"])
+    tick = hoi4_state.get("tick", 0)
+    last = c.get("last_expand_tick", -999)
+    if tick - last < EXPAND_COOLDOWN_TICKS:
+        wait_ticks = EXPAND_COOLDOWN_TICKS - (tick - last)
+        return False, "擴張還在冷卻中，再等 {} 個 tick（約 {} 分鐘）。".format(wait_ticks, wait_ticks*30)
+    if c.get("political_power", 0) < EXPAND_PP_COST:
+        return False, "政治點數不足（需要 {}，目前 {:.0f}）。".format(EXPAND_PP_COST, c.get("political_power", 0))
+    c["political_power"] -= EXPAND_PP_COST
+    c["last_expand_tick"] = tick
+    prov["owner"] = cid
+    c.setdefault("provinces_owned", []).append(province_id)
+    hoi4_state.setdefault("log", []).append("[{}] {} 和平擴張至「{}」。".format(_now_gmt8_str(), c["name"], prov["name"]))
+    _save_hoi4_state()
+    return True, None
 
 def _do_declare_war(cid, target_id):
     """宣戰共用邏輯：Discord /hoi4 war 與網頁點擊宣戰按鈕都呼叫這裡。
@@ -816,15 +855,30 @@ class HOI4Group(app_commands.Group):
         await refresh_hoi4_panel()
         await interaction.response.send_message("遊戲世界已重置！不需要報名，任何人隨時可用 /hoi4 join 加入，沒有人數上限。每 30 分鐘一個 tick。")
 
-    @app_commands.command(name="join", description="隨時加入遊戲，不用事先報名，沒有人數上限")
+    @app_commands.command(name="join", description="隨時加入遊戲，不用事先報名，沒有人數上限（從一個省份開始，之後慢慢擴張）")
     @app_commands.describe(name="你的國家名稱")
     async def hoi4_join(self, interaction: discord.Interaction, name: str):
         new_cid, err = _do_join_country(interaction.user.id, name)
         if err:
             await interaction.response.send_message(err, ephemeral=True); return
         c = hoi4_state["countries"][new_cid]
+        prov_name = hoi4_state["provinces"][c["provinces_owned"][0]]["name"] if c.get("provinces_owned") else "?"
         await refresh_hoi4_panel()
-        await interaction.response.send_message("你已加入遊戲！國名：{}，獲得 {} 個省份。".format(name, len(c.get("provinces_owned",[]))))
+        await interaction.response.send_message("你已加入遊戲！國名：{}，起始地：{}。到 /hoi4 網頁地圖上點鄰近省份可以慢慢擴張，或用 /hoi4 expand 指令。".format(name, prov_name))
+
+    @app_commands.command(name="expand", description="和平擴張到相鄰的無主省份（花政治點數，有冷卻時間）")
+    @app_commands.describe(province="目標省份名稱（可從 /hoi4 網頁地圖查看鄰接省份）")
+    async def hoi4_expand(self, interaction: discord.Interaction, province: str):
+        cid, c, err = await _get_player_country(interaction)
+        if err: await interaction.response.send_message(err, ephemeral=True); return
+        target_pid = next((pid for pid, p in hoi4_state["provinces"].items() if p["name"] == province), None)
+        if not target_pid:
+            await interaction.response.send_message("找不到省份「{}」，請確認名稱正確（區分大小寫）。".format(province), ephemeral=True); return
+        ok, err2 = _do_expand(cid, target_pid)
+        if err2:
+            await interaction.response.send_message(err2, ephemeral=True); return
+        await refresh_hoi4_panel()
+        await interaction.response.send_message("{} 和平擴張至「{}」！".format(c["name"], province))
 
     @app_commands.command(name="end", description="結束遊戲（機器人擁有者限定）")
     async def hoi4_end(self, interaction: discord.Interaction):
@@ -1011,14 +1065,16 @@ async def api_hoi4_declare_war(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_join(request):
-    """網頁端加入遊戲：不用登入、不用事先報名，沒有人數上限，隨時可加入。"""
+    """網頁端加入遊戲：不用登入(user_id用Discord OAuth帶入)、不用事先報名，沒有人數上限，隨時可加入。
+    start_province：使用者在地圖上點選的起始省份 id（可選，沒給就隨機分配一個）。"""
     try:
         body = await request.json()
         user_id = str(body.get("user_id") or "").strip()
         name = str(body.get("name") or "").strip()
+        start_province = body.get("start_province")
         if not user_id or not name:
             return web.json_response({"error": "需要 user_id 和 name"}, status=400)
-        new_cid, err = _do_join_country(user_id, name)
+        new_cid, err = _do_join_country(user_id, name, start_province=start_province)
         if err:
             return web.json_response({"error": err}, status=400)
         try:
@@ -1026,6 +1082,23 @@ async def api_hoi4_join(request):
         except Exception:
             pass
         return web.json_response({"ok": True, "country_id": new_cid, "country": hoi4_state["countries"][new_cid]})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def api_hoi4_expand(request):
+    """網頁端點擊「和平擴張」：把相鄰的無主省份納入版圖（花政治點數、有冷卻時間）。"""
+    try:
+        body = await request.json()
+        cid = body.get("country_id")
+        province = body.get("province")
+        ok, err = _do_expand(cid, province)
+        if err:
+            return web.json_response({"error": err}, status=400)
+        try:
+            await refresh_hoi4_panel()
+        except Exception:
+            pass
+        return web.json_response({"ok": True})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
@@ -1192,6 +1265,7 @@ _load_hoi4_state()
 HOI4_API_ROUTES = [
     ("/api/game/hoi4/state", "GET", api_hoi4_state),
     ("/api/game/hoi4/join", "POST", api_hoi4_join),
+    ("/api/game/hoi4/expand", "POST", api_hoi4_expand),
     ("/api/game/hoi4/declare-war", "POST", api_hoi4_declare_war),
     ("/api/game/hoi4/provinces/{pid}", "PUT", api_hoi4_province),
     ("/api/game/hoi4/move-division", "POST", api_hoi4_move_division),
