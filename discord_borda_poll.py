@@ -1710,6 +1710,16 @@ chat_ai_settings = {
     "t2i_daily_limit": 10,             # 每位使用者每日生圖上限
     "t2i_owner_exempt": True,          # 擁有者豁免限速與每日配額
     "t2i_auto_detect": True,           # 是否在聊天中自動偵測生圖請求
+    # 高級生圖通道（優先使用，失敗或額度用完時降級回 t2i_* 預設通道）
+    "t2i_premium_enabled": False,      # 是否啟用高級生圖通道
+    "t2i_premium_api_url": "",         # 高級生圖 API URL（例如 https://api.openai.com/v1/images/generations）
+    "t2i_premium_api_key": "",          # 高級生圖 API Key
+    "t2i_premium_model": "",            # 高級生圖模型（例如 dall-e-3, gpt-image-1, flux-pro）
+    "t2i_premium_size": "",             # 高級生圖尺寸（留空=沿用 t2i_size）
+    "t2i_premium_quality": "",          # 高級生圖品質（留空=沿用 t2i_quality）
+    "t2i_premium_daily_limit": 30,      # 高級通道每日總額度（全伺服器共用）
+    "t2i_premium_daily_count": 0,      # 高級通道今日已用次數
+    "t2i_premium_daily_date": "",       # 高級通道額度計算日期（自動重置）
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -6740,9 +6750,75 @@ def _detect_t2i_request(text: str, settings: dict) -> str | None:
     return None
 
 async def _generate_image(prompt: str, settings: dict) -> dict:
+    """Generate an image. Tries premium channel first (if enabled + quota remaining),
+    falls back to default channel on any failure.
+
+    Returns {"success": True, "image_url"/"image_path": ..., "channel": "premium"/"default"}
+    or {"success": False, "error": ...}
+    """
+    # ── 高級生圖通道（優先嘗試，失敗自動降級） ──
+    if _t2i_premium_available(settings):
+        premium_settings = {
+            "t2i_api_url": settings.get("t2i_premium_api_url", "").strip(),
+            "t2i_api_key": settings.get("t2i_premium_api_key", "").strip(),
+            "t2i_model": settings.get("t2i_premium_model", "").strip(),
+            "t2i_size": settings.get("t2i_premium_size", "").strip() or settings.get("t2i_size", "1024x1024"),
+            "t2i_quality": settings.get("t2i_premium_quality", "").strip() or settings.get("t2i_quality", "standard"),
+        }
+        print(f"🎨 T2I 嘗試高級通道: {premium_settings['t2i_model']} @ {premium_settings['t2i_api_url'][:40]}")
+        premium_result = await _generate_image_core(prompt, premium_settings)
+        if premium_result.get("success"):
+            _t2i_premium_consume(settings)
+            premium_result["channel"] = "premium"
+            print(f"🎨 T2I 高級通道成功（今日已用 {settings.get('t2i_premium_daily_count', 0)}/{settings.get('t2i_premium_daily_limit', 30)}）")
+            return premium_result
+        else:
+            print(f"🎨 T2I 高級通道失敗，降級回預設通道: {premium_result.get('error', '?')[:150]}")
+
+    # ── 預設生圖通道 ──
+    result = await _generate_image_core(prompt, settings)
+    if result.get("success"):
+        result["channel"] = "default"
+    return result
+
+
+def _t2i_premium_available(settings: dict) -> bool:
+    """Check if the premium T2I channel is enabled and has remaining daily quota."""
+    if not settings.get("t2i_premium_enabled"):
+        return False
+    if not settings.get("t2i_premium_api_url") or not settings.get("t2i_premium_model"):
+        return False
+    today = datetime.now(GMT8).strftime("%Y-%m-%d")
+    if settings.get("t2i_premium_daily_date", "") != today:
+        return True  # 新的一天，額度重置
+    daily_limit = settings.get("t2i_premium_daily_limit", 30)
+    daily_count = settings.get("t2i_premium_daily_count", 0)
+    return daily_count < daily_limit
+
+
+def _t2i_premium_consume(settings: dict):
+    """Increment the premium daily counter (and reset if it's a new day)."""
+    today = datetime.now(GMT8).strftime("%Y-%m-%d")
+    if settings.get("t2i_premium_daily_date", "") != today:
+        settings["t2i_premium_daily_date"] = today
+        settings["t2i_premium_daily_count"] = 0
+    settings["t2i_premium_daily_count"] = settings.get("t2i_premium_daily_count", 0) + 1
+    # 持久化到磁碟 + Drive，確保重啟後額度計數不丟失
+    try:
+        save_chat_ai_settings()
+    except Exception as e:
+        print(f"⚠️ T2I premium quota save failed: {e}")
+
+
+async def _generate_image_core(prompt: str, settings: dict) -> dict:
     """Call T2I API to generate an image from a text prompt.
     Returns: {"success": True, "image_url": "...", "revised_prompt": "..."} or
              {"success": False, "error": "..."}
+
+    Strategy: if the premium channel is enabled and has remaining daily quota, try it
+    first. On any failure (HTTP error, timeout, quota exceeded), automatically fall back
+    to the default channel (t2i_*). This means the user always gets an image as long as
+    at least one channel is working — the premium quota is just a "best effort" upgrade.
 
     Supports two very different API shapes:
       1. pollinations.ai's native image API — GET https://image.pollinations.ai/prompt/{prompt}
@@ -6985,7 +7061,9 @@ async def _send_t2i_result(message, prompt: str, result: dict, settings: dict, i
     revised_prompt = result.get("revised_prompt")
 
     # Build the text part of the reply
-    text_parts = [f"🎨 根據你的要求生成了圖片！"]
+    channel = result.get("channel", "")
+    channel_tag = " ✨高級通道" if channel == "premium" else ""
+    text_parts = [f"🎨 根據你的要求生成了圖片！{channel_tag}"]
     if revised_prompt and revised_prompt != prompt:
         text_parts.append(f"（AI 優化後的提示詞：{revised_prompt[:100]}）")
     text_reply = "\n".join(text_parts)
@@ -8387,6 +8465,15 @@ async def api_get_chat_ai_settings(request):
         "t2i_daily_limit": chat_ai_settings.get("t2i_daily_limit", 10),
         "t2i_owner_exempt": chat_ai_settings.get("t2i_owner_exempt", True),
         "t2i_auto_detect": chat_ai_settings.get("t2i_auto_detect", True),
+        "t2i_premium_enabled": chat_ai_settings.get("t2i_premium_enabled", False),
+        "t2i_premium_api_url": chat_ai_settings.get("t2i_premium_api_url", ""),
+        "t2i_premium_api_key_masked": (lambda k: k[:6]+"..."+k[-4:] if len(k)>10 else ("***" if k else ""))(chat_ai_settings.get("t2i_premium_api_key", "")),
+        "t2i_premium_model": chat_ai_settings.get("t2i_premium_model", ""),
+        "t2i_premium_size": chat_ai_settings.get("t2i_premium_size", ""),
+        "t2i_premium_quality": chat_ai_settings.get("t2i_premium_quality", ""),
+        "t2i_premium_daily_limit": chat_ai_settings.get("t2i_premium_daily_limit", 30),
+        "t2i_premium_daily_count": chat_ai_settings.get("t2i_premium_daily_count", 0),
+        "t2i_premium_daily_date": chat_ai_settings.get("t2i_premium_daily_date", ""),
     })
 
 
@@ -8603,6 +8690,20 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["t2i_owner_exempt"] = bool(body["t2i_owner_exempt"])
     if "t2i_auto_detect" in body:
         chat_ai_settings["t2i_auto_detect"] = bool(body["t2i_auto_detect"])
+    if "t2i_premium_enabled" in body:
+        chat_ai_settings["t2i_premium_enabled"] = bool(body["t2i_premium_enabled"])
+    if "t2i_premium_api_url" in body:
+        chat_ai_settings["t2i_premium_api_url"] = body["t2i_premium_api_url"]
+    if "t2i_premium_api_key" in body and body["t2i_premium_api_key"]:
+        chat_ai_settings["t2i_premium_api_key"] = body["t2i_premium_api_key"]
+    if "t2i_premium_model" in body:
+        chat_ai_settings["t2i_premium_model"] = body["t2i_premium_model"]
+    if "t2i_premium_size" in body:
+        chat_ai_settings["t2i_premium_size"] = body["t2i_premium_size"]
+    if "t2i_premium_quality" in body:
+        chat_ai_settings["t2i_premium_quality"] = body["t2i_premium_quality"]
+    if "t2i_premium_daily_limit" in body:
+        chat_ai_settings["t2i_premium_daily_limit"] = int(body["t2i_premium_daily_limit"])
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -9255,9 +9356,10 @@ async def api_test_all_functions(request):
             t2_result = await _generate_image("a simple red circle on white background", chat_ai_settings)
             t2_elapsed = int((_time.monotonic() - t2_t0) * 1000)
             if t2_result.get("success"):
+                channel = t2_result.get("channel", "?")
                 results.append({"label": "🎨 文生圖", "type": "image", "status": "ok",
                                 "latency_ms": t2_elapsed, "model": t2i_model,
-                                "response_snippet": "圖片生成成功"})
+                                "response_snippet": f"圖片生成成功（通道: {channel}）"})
                 # 清掉測試產生的暫存檔
                 _t2i_test_path = t2_result.get("image_path")
                 if _t2i_test_path:

@@ -547,6 +547,64 @@
     </div>
   </div>
 
+      <!-- 高級生圖通道 -->
+  <div class="bg-[#2b2d31] rounded-xl p-5 border border-yellow-600/30">
+    <h3 class="font-semibold mb-1">✨ 高級生圖通道 <span class="text-xs text-yellow-500 font-normal">（優先使用，額度用完自動降級）</span></h3>
+    <p class="text-xs text-gray-400 mb-4">啟用後每次生圖優先使用高級 API（如 DALL-E 3、GPT-Image-1），失敗或每日額度用完時自動降級回上面的預設生圖模型。兩個通道獨立設定，互不影響。</p>
+    <div class="space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm">啟用高級生圖通道</p>
+          <p class="text-xs text-gray-400">開啟後生圖會先嘗試高級 API，失敗才降級回預設</p>
+        </div>
+        <label class="toggle"><input type="checkbox" id="ai-t2i-premium-enabled"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">高級 API URL</label>
+          <input id="ai-t2i-premium-api-url" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-yellow-500 text-sm" placeholder="https://api.openai.com/v1/images/generations">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">高級 API Key</label>
+          <input id="ai-t2i-premium-api-key" type="password" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-yellow-500 text-sm" placeholder="sk-...（留空=不修改）">
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">高級模型名稱</label>
+          <input id="ai-t2i-premium-model" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-yellow-500 text-sm" placeholder="dall-e-3, gpt-image-1, flux-pro">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">尺寸（留空=沿用預設）</label>
+          <select id="ai-t2i-premium-size" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-yellow-500 text-sm">
+            <option value="">沿用預設</option>
+            <option value="1024x1024">1024×1024（方形）</option>
+            <option value="1792x1024">1792×1024（橫向）</option>
+            <option value="1024x1792">1024×1792（直向）</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">品質（留空=沿用預設）</label>
+          <select id="ai-t2i-premium-quality" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-yellow-500 text-sm">
+            <option value="">沿用預設</option>
+            <option value="standard">標準</option>
+            <option value="hd">HD</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">每日額度（全伺服器共用）</label>
+          <input id="ai-t2i-premium-daily-limit" type="number" min="0" value="30" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-yellow-500 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">今日已用額度</label>
+          <div id="ai-t2i-premium-usage" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm text-gray-400">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
       <!-- 會議排程通知 -->
       <div id="schedule-section" class="bg-[#2b2d31] rounded-xl p-5">
         <h3 class="font-semibold mb-1">📅 會議排程通知系統</h3>
@@ -1091,6 +1149,20 @@ async function showChatAIPanel() {
   document.getElementById('ai-t2i-daily-limit').value = s.t2i_daily_limit ?? 10;
   document.getElementById('ai-t2i-owner-exempt').value = String(s.t2i_owner_exempt !== false);
 
+  // 高級生圖通道
+  document.getElementById('ai-t2i-premium-enabled').checked = s.t2i_premium_enabled || false;
+  document.getElementById('ai-t2i-premium-api-url').value = s.t2i_premium_api_url || '';
+  document.getElementById('ai-t2i-premium-model').value = s.t2i_premium_model || '';
+  document.getElementById('ai-t2i-premium-size').value = s.t2i_premium_size || '';
+  document.getElementById('ai-t2i-premium-quality').value = s.t2i_premium_quality || '';
+  document.getElementById('ai-t2i-premium-daily-limit').value = s.t2i_premium_daily_limit ?? 30;
+  const premiumUsageEl = document.getElementById('ai-t2i-premium-usage');
+  if (premiumUsageEl) {
+    const used = s.t2i_premium_daily_count ?? 0;
+    const limit = s.t2i_premium_daily_limit ?? 30;
+    premiumUsageEl.textContent = used + ' / ' + limit + '（今日）';
+  }
+
   // Turtle Soup
   document.getElementById('ai-turtle-soup-enabled').checked = s.turtle_soup_enabled || false;
   document.getElementById('ai-turtle-soup-channel').value = s.turtle_soup_channel_id || '';
@@ -1370,6 +1442,14 @@ async function saveChatAISettings() {
     t2i_cooldown: parseInt(document.getElementById('ai-t2i-cooldown').value) || 60,
     t2i_daily_limit: parseInt(document.getElementById('ai-t2i-daily-limit').value) || 10,
     t2i_owner_exempt: document.getElementById('ai-t2i-owner-exempt').value === 'true',
+    // 高級生圖通道
+    t2i_premium_enabled: document.getElementById('ai-t2i-premium-enabled').checked,
+    t2i_premium_api_url: document.getElementById('ai-t2i-premium-api-url').value.trim(),
+    t2i_premium_api_key: document.getElementById('ai-t2i-premium-api-key').value.trim(),
+    t2i_premium_model: document.getElementById('ai-t2i-premium-model').value.trim(),
+    t2i_premium_size: document.getElementById('ai-t2i-premium-size').value,
+    t2i_premium_quality: document.getElementById('ai-t2i-premium-quality').value,
+    t2i_premium_daily_limit: parseInt(document.getElementById('ai-t2i-premium-daily-limit').value) || 30,
     // Turtle Soup
     turtle_soup_enabled: document.getElementById('ai-turtle-soup-enabled').checked,
     turtle_soup_channel_id: document.getElementById('ai-turtle-soup-channel').value.trim(),

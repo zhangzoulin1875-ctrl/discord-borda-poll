@@ -861,7 +861,9 @@ async def draw_command(interaction: discord.Interaction, prompt: str):
         image_path = result.get("image_path")
         revised_prompt = result.get("revised_prompt")
 
-        text_parts = [f"🎨 **{interaction.user.display_name}** 生成的圖片！"]
+        channel = result.get("channel", "")
+        channel_tag = " ✨高級通道" if channel == "premium" else ""
+        text_parts = [f"🎨 **{interaction.user.display_name}** 生成的圖片！{channel_tag}"]
         if revised_prompt and revised_prompt != prompt:
             text_parts.append(f"（AI 優化後的提示詞：{revised_prompt[:100]}）")
 
