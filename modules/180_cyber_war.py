@@ -43,6 +43,15 @@ _WAR_BEASTS = {
     },
 }
 
+# ── 陣地升級 ──
+_FORTIFICATIONS = {
+    "trench":    {"name": "升級戰壕",     "emoji": "🛡️", "cost": 3, "desc": "強化防禦工事，減少敵方推進效果，降低我方傷亡"},
+    "medical":   {"name": "升級醫療設備", "emoji": "🏥", "cost": 3, "desc": "改善野戰醫院，每回合恢復士氣，減少傷亡"},
+    "mg_nest":   {"name": "定點機槍",     "emoji": "🔫", "cost": 4, "desc": "壓制敵方步兵衝鋒，大幅降低敵方進攻效果"},
+    "field_gun": {"name": "部署野戰砲",   "emoji": "💥", "cost": 5, "desc": "遠程直射砲擊敵方陣地，增加我方推進力"},
+    "mortar":    {"name": "部署迫擊砲",   "emoji": "💣", "cost": 4, "desc": "曲射攻擊壕溝內敵軍，忽略敵方戰壕防禦"},
+}
+
 # ── 陣營 & 戰場 ──
 # 歷史正確配對：每個戰場對應當時實際交戰的雙方
 _BATTLE_SCENARIOS = [
@@ -399,6 +408,11 @@ async def _start_new_game(guild):
             "defeated": False,
             "war_beast": None,
             "war_beast_destroyed": False,
+            "fortifications": {
+                "trench": 0, "medical": 0, "mg_nest": 0,
+                "field_gun": 0, "mortar": 0,
+            },
+            "supply_points": 0,
         }
 
     fac_a = _build_faction("A", fac_a_info, side_a_members)
@@ -553,11 +567,18 @@ def _build_war_embed():
         # 砲擊次數
         turn = str(s.get("turn", 0))
         arty = len(s.get("artillery", {}).get(turn, {}).get(key, []))
+        fort = f.get("fortifications", {})
+        supply_pts = f.get("supply_points", 0)
+        fort_line = (
+            f"🛡️戰壕{fort.get('trench',0)} 🏥醫療{fort.get('medical',0)} "
+            f"🔫機槍{fort.get('mg_nest',0)} 💥野砲{fort.get('field_gun',0)} 💣迫砲{fort.get('mortar',0)}"
+        )
         return (
             f"{f['flag']} **{f['name']}**{defeated}\n"
-            f"```\n推進 [{bar}] {prog}%\n士氣 ❤️ {morale}  補給 📦 {supplies}\n"
+            f"```\n推進 [{bar}] {prog}%\n士氣 ❤️ {morale}  補給 📦 {supplies}  補給點數 ⚡{supply_pts}\n"
             f"軍官 {n_off}/{OFFICERS_PER_SIDE} | 小隊長 {n_sl}/{SQUAD_LEADERS_PER_SIDE} | 士兵 {n_sol}\n"
-            f"本回合砲擊/空襲：{arty}/{MAX_ARTILLERY_PER_TURN}```"
+            f"本回合砲擊/空襲：{arty}/{MAX_ARTILLERY_PER_TURN}\n"
+            f"陣地：{fort_line}```"
         )
 
     embed.add_field(name="陣營 A", value=_faction_field("A", "A"), inline=True)
@@ -840,6 +861,28 @@ class CyberWarPanelView(discord.ui.View):
         )
         await interaction.response.send_modal(CyberWarBeastModal(uid, fkey, turn, header))
 
+    @discord.ui.button(label="陣地升級", style=discord.ButtonStyle.secondary, emoji="🏗️", custom_id="cw_fortify_btn")
+    async def fortify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        info = _get_player_role(uid)
+        if not info:
+            await interaction.response.send_message("❌ 你不在本局參戰名單中。", ephemeral=True)
+            return
+        fkey, role, fac = info
+        if role != "officer":
+            await interaction.response.send_message("❌ 只有軍官可以升級陣地。", ephemeral=True)
+            return
+        view = _FortifyView(uid, fkey)
+        await interaction.response.send_message(
+            f"🏗️ **陣地升級面板** — {fac['flag']} {fac['name']}\n"
+            f"⚡ 可用補給點數：**{fac.get('supply_points', 0)}**\n\n"
+            f"點擊下方按鈕消耗補給點數升級陣地：",
+            view=view, ephemeral=True
+        )
+
     @discord.ui.button(label="遊戲規則", style=discord.ButtonStyle.success, emoji="📖", custom_id="cw_rules_btn")
     async def rules_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         rules_text = (
@@ -855,7 +898,7 @@ class CyberWarPanelView(discord.ui.View):
             "🔫 **四兵種**\n"
             "  • 突擊兵🔫 — 進攻時有傷害加成\n"
             "  • 醫療兵💊 — 減少傷亡、恢復士氣\n"
-            "  • 支援兵🔧 — 提供補給\n"
+            "  • 支援兵🔧 — 提供補給，其行動品質決定每回合獲得的補給點數\n"
             "  • 偵查兵🔭 — 降低敵方突襲效果\n\n"
             "📋 **各身分責任**\n"
             "**軍官**：\n"
@@ -875,6 +918,13 @@ class CyberWarPanelView(discord.ui.View):
             "  ✅ 「在左翼構築第二道防線，挖掘防空洞以防砲擊」\n"
             "  ✅ 「集中火力壓制敵方前沿陣地，掩護突擊兵衝鋒」\n"
             "  ✅ 「派偵察兵潛入敵後，搜集敵軍補給線位置情報」\n\n"
+            "🏗️ **陣地升級**（軍官專屬，消耗補給點數）\n"
+            "  • 🛡️ 戰壕（3點）— 強化防禦，減少敵方推進效果\n"
+            "  • 🏥 醫療設備（3點）— 每回合恢復士氣，減少傷亡\n"
+            "  • 🔫 定點機槍（4點）— 壓制敵方步兵衝鋒\n"
+            "  • 💥 野戰砲（5點）— 遠程砲擊，增加推進力\n"
+            "  • 💣 迫擊砲（4點）— 曲射攻擊，越過戰壕\n"
+            "  補給點數由每回合AI根據支援兵數量與後勤行動判定（0-15點）。\n\n"
             "⚠️ **禁止事項 — 濫用會受罰！**\n"
             "以下行為會被AI裁判判定為「濫用」，該方**全陣營**遭受debuff：\n"
             "  ❌ 使用核彈、原子彈、飛彈、火箭等二戰後武器\n"
@@ -924,6 +974,89 @@ class CyberWarPanelView(discord.ui.View):
         )
 
 # ── WW1測試 View ──
+class _FortifyView(discord.ui.View):
+    """陣地升級面板 — 5個按鈕，每個消耗補給點數。"""
+    def __init__(self, uid, fkey):
+        super().__init__(timeout=300)  # 5分鐘超時
+        self.uid = uid
+        self.fkey = fkey
+
+    def _get_fac(self):
+        return _cyber_war_state.get("factions", {}).get(self.fkey, {})
+
+    def _do_upgrade(self, fort_key):
+        """嘗試升級指定陣地。回傳 (success, message)。"""
+        fac = self._get_fac()
+        info = _FORTIFICATIONS.get(fort_key, {})
+        cost = info.get("cost", 0)
+        name = info.get("name", "?")
+        emoji = info.get("emoji", "")
+        current_pts = fac.get("supply_points", 0)
+        if current_pts < cost:
+            return False, f"❌ 補給點數不足。{name}需要{cost}點，你只有{current_pts}點。"
+        fort = fac.setdefault("fortifications", {"trench":0,"medical":0,"mg_nest":0,"field_gun":0,"mortar":0})
+        fort[fort_key] = fort.get(fort_key, 0) + 1
+        fac["supply_points"] = current_pts - cost
+        save_cyber_war()
+        lvl = fort[fort_key]
+        return True, f"✅ {emoji} **{name}** 已升級至第{lvl}級！（消耗{cost}點，剩餘{fac['supply_points']}點）"
+
+    @discord.ui.button(label="升級戰壕(3點)", style=discord.ButtonStyle.secondary, emoji="🛡️", custom_id="cw_fort_trench")
+    async def fort_trench(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ok, msg = self._do_upgrade("trench")
+        if ok:
+            try:
+                await refresh_war_panel()
+            except Exception:
+                pass
+        view = _FortifyView(self.uid, self.fkey) if ok else self
+        await interaction.response.edit_message(content=f"{msg}\n\n⚡ 剩餘補給點數：**{self._get_fac().get('supply_points',0)}**", view=view)
+
+    @discord.ui.button(label="升級醫療(3點)", style=discord.ButtonStyle.success, emoji="🏥", custom_id="cw_fort_medical")
+    async def fort_medical(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ok, msg = self._do_upgrade("medical")
+        if ok:
+            try:
+                await refresh_war_panel()
+            except Exception:
+                pass
+        view = _FortifyView(self.uid, self.fkey) if ok else self
+        await interaction.response.edit_message(content=f"{msg}\n\n⚡ 剩餘補給點數：**{self._get_fac().get('supply_points',0)}**", view=view)
+
+    @discord.ui.button(label="定點機槍(4點)", style=discord.ButtonStyle.danger, emoji="🔫", custom_id="cw_fort_mg")
+    async def fort_mg(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ok, msg = self._do_upgrade("mg_nest")
+        if ok:
+            try:
+                await refresh_war_panel()
+            except Exception:
+                pass
+        view = _FortifyView(self.uid, self.fkey) if ok else self
+        await interaction.response.edit_message(content=f"{msg}\n\n⚡ 剩餘補給點數：**{self._get_fac().get('supply_points',0)}**", view=view)
+
+    @discord.ui.button(label="野戰砲(5點)", style=discord.ButtonStyle.danger, emoji="💥", custom_id="cw_fort_fg")
+    async def fort_fg(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ok, msg = self._do_upgrade("field_gun")
+        if ok:
+            try:
+                await refresh_war_panel()
+            except Exception:
+                pass
+        view = _FortifyView(self.uid, self.fkey) if ok else self
+        await interaction.response.edit_message(content=f"{msg}\n\n⚡ 剩餘補給點數：**{self._get_fac().get('supply_points',0)}**", view=view)
+
+    @discord.ui.button(label="迫擊砲(4點)", style=discord.ButtonStyle.danger, emoji="💣", custom_id="cw_fort_mortar")
+    async def fort_mortar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ok, msg = self._do_upgrade("mortar")
+        if ok:
+            try:
+                await refresh_war_panel()
+            except Exception:
+                pass
+        view = _FortifyView(self.uid, self.fkey) if ok else self
+        await interaction.response.edit_message(content=f"{msg}\n\n⚡ 剩餘補給點數：**{self._get_fac().get('supply_points',0)}**", view=view)
+
+
 class _CWTestView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)  # 永不超時，避免按鈕卡住
@@ -1600,7 +1733,9 @@ async def _ai_evaluate_turn(turn: int):
         f"戰場：{s.get('battlefield', '?')}\n"
         f"當前狀態：\n"
         f"  {fac_a.get('flag','')} {fac_a.get('name','')} — 推進{fac_a.get('progress',0)}%，士氣{fac_a.get('morale',100)}，補給{fac_a.get('supplies',100)}\n"
-        f"  {fac_b.get('flag','')} {fac_b.get('name','')} — 推進{fac_b.get('progress',0)}%，士氣{fac_b.get('morale',100)}，補給{fac_b.get('supplies',100)}\n\n"
+        f"  陣地：🛡️戰壕{fac_a.get('fortifications',{}).get('trench',0)} 🏥醫療{fac_a.get('fortifications',{}).get('medical',0)} 🔫機槍{fac_a.get('fortifications',{}).get('mg_nest',0)} 💥野砲{fac_a.get('fortifications',{}).get('field_gun',0)} 💣迫砲{fac_a.get('fortifications',{}).get('mortar',0)}\n"
+        f"  {fac_b.get('flag','')} {fac_b.get('name','')} — 推進{fac_b.get('progress',0)}%，士氣{fac_b.get('morale',100)}，補給{fac_b.get('supplies',100)}\n"
+        f"  陣地：🛡️戰壕{fac_b.get('fortifications',{}).get('trench',0)} 🏥醫療{fac_b.get('fortifications',{}).get('medical',0)} 🔫機槍{fac_b.get('fortifications',{}).get('mg_nest',0)} 💥野砲{fac_b.get('fortifications',{}).get('field_gun',0)} 💣迫砲{fac_b.get('fortifications',{}).get('mortar',0)}\n\n"
         f"{fac_a.get('name','A')}方行動：\n{side_a_text}\n\n"
         f"{fac_b.get('name','B')}方行動：\n{side_b_text}\n\n"
         "【最重要規則 — 歷史背景強制檢查】\n"
@@ -1624,7 +1759,15 @@ async def _ai_evaluate_turn(turn: int):
         "考慮因素：行動的具體性、與上級指令的一致性、砲擊效果、補給消耗等。\n"
         "注意：標註〔服從小隊長/軍官指令〕的行動表示該玩家本人未提交行動，由上級統一指令代為執行，效果權重應低於玩家親自撰寫的行動。\n"
         "兵種特性：突擊兵進攻加成、醫療兵減少傷亡/恢復士氣、支援兵提供補給、偵查兵降低敵方突襲效果。\n"
+        "陣地影響：\n"
+        "  戰壕🛡️：每級減少敵方對我方的推進效果2%、降低我方傷亡。\n"
+        "  醫療設備🏥：每級恢復士氣2、進一步減少傷亡。\n"
+        "  定點機槍🔫：每級降低敵方進攻效果3%（壓制步兵衝鋒）。\n"
+        "  野戰砲💥：每級增加我方推進效果2%（遠程砲擊敵陣）。\n"
+        "  迫擊砲💣：每級增加我方推進效果1.5%（可越過戰溝攻擊）。\n"
+        "  判定時必須將雙方陣地等級納入考量，陣地等級高的一方在防禦/進攻上有顯著優勢。\n"
         "戰爭巨獸：標註[WAR_BEAST]的行動為戰爭巨獸（齊柏林飛艇/裝甲列車/無畏艦），具有強大戰力但有限血量。巨獸行動可顯著影響戰局，但若該方戰況不佳巨獸會受損甚至被摧毀。\n"
+        "補給點數判定：根據雙方支援兵數量、支援兵/軍官/小隊長的後勤相關行動（運送補給、後勤調度、維修裝備等）的質量與數量，判定本回合各方獲得的補給點數（0-15）。支援兵人數多且行動品質佳的一方獲得較多補給點數。\n"
         "推進進度變化範圍：-10到+15，士氣變化：-20到+10，補給變化：-15到+5。\n"
         "若一方有濫用行為，該方進度/士氣可超出上述下限（最多-20/-25）。\n\n"
         "請用以下格式回覆（不要加其他文字）：\n"
@@ -1634,6 +1777,8 @@ async def _ai_evaluate_turn(turn: int):
         "===B_MORALE_DELTA===\n數字\n"
         "===A_SUPPLIES_DELTA===\n數字\n"
         "===B_SUPPLIES_DELTA===\n數字\n"
+        "===A_SUPPLY_POINTS===\n數字(0-15)\n"
+        "===B_SUPPLY_POINTS===\n數字(0-15)\n"
         "===SUMMARY===\n一段100字以內的戰況描述（繁體中文）"
     )
 
@@ -1708,6 +1853,8 @@ async def _ai_evaluate_turn(turn: int):
         b_mor = _extract("B_MORALE_DELTA", 0)
         a_sup = _extract("A_SUPPLIES_DELTA", 0)
         b_sup = _extract("B_SUPPLIES_DELTA", 0)
+        a_sp = _extract("A_SUPPLY_POINTS", 0)
+        b_sp = _extract("B_SUPPLY_POINTS", 0)
 
         summary = ""
         for tag in ("===SUMMARY===", "=== SUMMARY ==="):
@@ -1726,6 +1873,8 @@ async def _ai_evaluate_turn(turn: int):
             "b_morale": max(-25, min(10, b_mor)),
             "a_supplies": max(-15, min(5, a_sup)),
             "b_supplies": max(-15, min(5, b_sup)),
+            "a_supply_points": max(0, min(15, a_sp)),
+            "b_supply_points": max(0, min(15, b_sp)),
             "summary": summary,
         }
     except Exception as e:
@@ -1780,6 +1929,13 @@ def _algo_evaluate_turn(turn):
         abuse_mor = 0
         summary_parts = []
         action_count = 0
+        support_supply_points = 0.0
+        fort = fac.get("fortifications", {})
+        trench_lvl = fort.get("trench", 0)
+        medical_lvl = fort.get("medical", 0)
+        mg_lvl = fort.get("mg_nest", 0)
+        fg_lvl = fort.get("field_gun", 0)
+        mortar_lvl = fort.get("mortar", 0)
 
         # ── 軍官行動 ──
         for officer in fac.get("officers", []):
@@ -1859,8 +2015,10 @@ def _algo_evaluate_turn(turn):
                 elif spec == "支援兵":
                     if any(kw in text for kw in _SUPPLY_KEYWORDS):
                         supply_delta += 2
+                        support_supply_points += 1
                     else:
                         supply_delta += 0.5
+                        support_supply_points += 0.3
                 elif spec == "偵查兵":
                     if any(kw in text for kw in _RECON_KEYWORDS):
                         defense_score += 0.5
@@ -1911,19 +2069,36 @@ def _algo_evaluate_turn(turn):
         elif active_specs >= 3:
             offense_score += 0.8
 
+        # 陣地效果
+        defense_score += trench_lvl * 1.5
+        morale_delta += medical_lvl * 1
+        offense_score += fg_lvl * 1.2
+        offense_score += mortar_lvl * 0.8
+
+        # 補給點數：支援兵貢獻 + 基礎值
+        supply_pts = int(support_supply_points + _cw_random.randint(0, 3))
+
         return (offense_score, defense_score, supply_delta, morale_delta,
-                abuse_prog, abuse_mor, summary_parts, action_count)
+                abuse_prog, abuse_mor, summary_parts, action_count, supply_pts,
+                trench_lvl, medical_lvl, mg_lvl, fg_lvl, mortar_lvl)
 
     fac_a = s["factions"].get("A", {})
     fac_b = s["factions"].get("B", {})
 
-    a_off, a_def, a_sup, a_mor, a_abuse_p, a_abuse_m, a_parts, a_count = _eval_side("A", fac_a)
-    b_off, b_def, b_sup, b_mor, b_abuse_p, b_abuse_m, b_parts, b_count = _eval_side("B", fac_b)
+    a_off, a_def, a_sup, a_mor, a_abuse_p, a_abuse_m, a_parts, a_count, a_spts, a_trench, a_med, a_mg, a_fg, a_mor_b = _eval_side("A", fac_a)
+    b_off, b_def, b_sup, b_mor, b_abuse_p, b_abuse_m, b_parts, b_count, b_spts, b_trench, b_med, b_mg, b_fg, b_mor_b = _eval_side("B", fac_b)
+
+    # ── 陣地機槍壓制效果 ──
+    # 敵方機槍每級降低我方進攻效果3%
+    a_off_after_mg = a_off * max(0.4, 1 - b_mg * 0.03)
+    b_off_after_mg = b_off * max(0.4, 1 - a_mg * 0.03)
+    # 敵方戰壕每級額外降低我方進攻效果2%
+    a_off_final = a_off_after_mg * max(0.5, 1 - b_trench * 0.02)
+    b_off_final = b_off_after_mg * max(0.5, 1 - a_trench * 0.02)
 
     # ── 計算進度變化 ──
-    # 一方進攻分數減去對方防禦分數 = 淨進攻力
-    a_net_offense = a_off - b_def
-    b_net_offense = b_off - a_def
+    a_net_offense = a_off_final - b_def
+    b_net_offense = b_off_final - a_def
 
     # 轉換為進度變化（每5分淨進攻力 = +1進度，上限+12）
     a_progress = max(-10, min(12, int(a_net_offense / 5) + _cw_random.randint(-1, 1)))
@@ -1965,6 +2140,21 @@ def _algo_evaluate_turn(turn):
     # 加上行動統計
     summary_lines.append(f"行動數：{a_flag}{a_count} vs {b_flag}{b_count}")
 
+    # 陣地摘要
+    a_fort_s, b_fort_s = [], []
+    if a_trench: a_fort_s.append(f"戰壕{a_trench}")
+    if a_med: a_fort_s.append(f"醫療{a_med}")
+    if a_mg: a_fort_s.append(f"機槍{a_mg}")
+    if a_fg: a_fort_s.append(f"野砲{a_fg}")
+    if a_mor_b: a_fort_s.append(f"迫砲{a_mor_b}")
+    if b_trench: b_fort_s.append(f"戰壕{b_trench}")
+    if b_med: b_fort_s.append(f"醫療{b_med}")
+    if b_mg: b_fort_s.append(f"機槍{b_mg}")
+    if b_fg: b_fort_s.append(f"野砲{b_fg}")
+    if b_mor_b: b_fort_s.append(f"迫砲{b_mor_b}")
+    if a_fort_s: summary_lines.append(f"{a_flag}陣地：{'、'.join(a_fort_s)}")
+    if b_fort_s: summary_lines.append(f"{b_flag}陣地：{'、'.join(b_fort_s)}")
+
     summary = "。".join(summary_lines) + "。"
 
     return {
@@ -1974,6 +2164,8 @@ def _algo_evaluate_turn(turn):
         "b_morale": b_morale,
         "a_supplies": a_supplies,
         "b_supplies": b_supplies,
+        "a_supply_points": max(0, min(15, a_spts)),
+        "b_supply_points": max(0, min(15, b_spts)),
         "summary": summary[:500],
     }
 
@@ -1991,6 +2183,8 @@ def _default_turn_result():
             "b_morale": _cw_random.randint(-5, 2),
             "a_supplies": _cw_random.randint(-5, 0),
             "b_supplies": _cw_random.randint(-5, 0),
+            "a_supply_points": _cw_random.randint(0, 8),
+            "b_supply_points": _cw_random.randint(0, 8),
             "summary": "本回合戰況膠著，雙方各有小幅推進。",
         }
 
@@ -2068,6 +2262,25 @@ async def _process_turn_end():
         fac_b["morale"] = max(0, min(100, fac_b.get("morale", 100) + result["b_morale"]))
         fac_a["supplies"] = max(0, min(100, fac_a.get("supplies", 100) + result["a_supplies"]))
         fac_b["supplies"] = max(0, min(100, fac_b.get("supplies", 100) + result["b_supplies"]))
+
+        # 補給點數累加（每回合由AI根據支援兵表現判定）
+        a_sp = result.get("a_supply_points", 0)
+        b_sp = result.get("b_supply_points", 0)
+        fac_a["supply_points"] = fac_a.get("supply_points", 0) + a_sp
+        fac_b["supply_points"] = fac_b.get("supply_points", 0) + b_sp
+        # 補給點數上限50
+        if fac_a["supply_points"] > 50:
+            fac_a["supply_points"] = 50
+        if fac_b["supply_points"] > 50:
+            fac_b["supply_points"] = 50
+
+        # 醫療設備每級回復士氣
+        a_med = fac_a.get("fortifications", {}).get("medical", 0)
+        b_med = fac_b.get("fortifications", {}).get("medical", 0)
+        if a_med > 0:
+            fac_a["morale"] = min(100, fac_a["morale"] + a_med * 2)
+        if b_med > 0:
+            fac_b["morale"] = min(100, fac_b["morale"] + b_med * 2)
 
         # 補給耗盡影響士氣
         if fac_a["supplies"] <= 0:
