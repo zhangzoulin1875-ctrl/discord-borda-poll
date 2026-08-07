@@ -11103,7 +11103,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), HOI4Group()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), StormGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -11213,7 +11213,7 @@ async def setup_hook():
     asyncio.ensure_future(community_chronicle_loop())
     asyncio.ensure_future(token_log_loop())
     asyncio.ensure_future(economy_panel_loop())  # 經濟系統看板
-    asyncio.ensure_future(hoi4_panel_loop())  # HOI4 戰略遊戲面板  # 經濟系統看板：重啟自動清理廢棄面板+即時更新
+    asyncio.ensure_future(hoi4_panel_loop())  # 鋼鐵風暴 戰略遊戲面板  # 經濟系統看板：重啟自動清理廢棄面板+即時更新
     asyncio.ensure_future(stock_market_loop())  # AI 股票市場：每2小時一回合
     asyncio.ensure_future(horse_racing_loop())  # 賽馬賭博系統：每30分鐘一局
     # Load community awareness + chronicle data

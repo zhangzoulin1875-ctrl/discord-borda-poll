@@ -1,7 +1,7 @@
 # ════════════════════════════════════════════════════════════════════════════
-# HOI4 文字版 — Discord 面板 + 網頁面板並行的簡化版鋼鐵雄心4
+# 鋼鐵風暴 — Discord 面板 + 網頁面板並行的大戰略遊戲
 # 模組 170 — Discord 端持久面板、tick 結算、按鈕互動
-# 網頁端（地圖/前線微操/師級編制）由 dashboard.html + /api/game/hoi4/* 提供
+# 網頁端（地圖/前線微操/師級編制）由 hoi4.html + /api/game/hoi4/* 提供
 # ════════════════════════════════════════════════════════════════════════════
 
 import os, json, asyncio, random, math, time, datetime as _dt
@@ -9,7 +9,7 @@ from collections import OrderedDict
 
 # ── 常數 ──
 GUILD_ID = 1425065927027720286
-HOI4_PANEL_TITLE_MARKER = "🎭 戰略指揮部"
+HOI4_PANEL_TITLE_MARKER = "⚔️ 鋼鐵風暴 指揮部"
 TICK_INTERVAL_SECONDS = 1800          # 30 分鐘 = 遊戲內 1 天
 PANEL_REFRESH_SECONDS = 60            # 面板刷新間隔
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -77,7 +77,7 @@ def _load_map_template():
         with open(_MAP_TEMPLATE_FILE, "r", encoding="utf-8") as f:
             _map_template_cache = json_module.loads(f.read())
     except Exception as e:
-        print("HOI4 地圖模板載入失敗，改用備援格子地圖: {}".format(e))
+        print("鋼鐵風暴 地圖模板載入失敗，改用備援格子地圖: {}".format(e))
         _map_template_cache = None
     return _map_template_cache
 
@@ -87,16 +87,21 @@ def _generate_default_provinces():
         provinces = {}
         resource_types = ["steel","oil","rubber","tungsten","aluminum"]
         for pid, p in tpl.items():
+            area = p.get("area", 1.0)
+            vp_chance = min(0.6, area / 100.0)
+            vp_val = random.randint(3, 10) if random.random() < vp_chance else (random.randint(1,3) if random.random() < 0.15 else 0)
             provinces[pid] = {
                 "id": pid, "name": p["name"], "owner": None,
-                "type": p["type"],
-                "victory_points": random.randint(1,5) if random.random() < 0.3 else 0,
-                "fortifications": 0, "infrastructure": 1, "resources": {},
+                "type": p.get("type", "plains"),
+                "country": p.get("country", ""),
+                "victory_points": vp_val,
+                "fortifications": 0, "infrastructure": 1 if area < 5 else 2, "resources": {},
                 "polygon": p["polygon"], "centroid": p["centroid"], "neighbors": list(p["neighbors"]),
+                "area": area,
             }
-            if random.random() < 0.4:
+            if random.random() < 0.35:
                 res = random.choice(resource_types)
-                provinces[pid]["resources"][res] = random.randint(2,8)
+                provinces[pid]["resources"][res] = random.randint(2, 12)
         return provinces
     # 備援：地圖模板檔案讀取失敗時，退回原本的簡易格子地圖，確保遊戲仍可運作
     provinces = {}
@@ -144,9 +149,9 @@ def _load_hoi4_state():
             if loaded.get("focus_tree"): hoi4_state["focus_tree"] = loaded["focus_tree"]
             if loaded.get("tech_tree"): hoi4_state["tech_tree"] = loaded["tech_tree"]
             hoi4_state.update({k: v for k, v in loaded.items() if k not in ("focus_tree","tech_tree")})
-            print("HOI4 狀態已載入（tick={}, 國家數={}）".format(hoi4_state.get("tick",0), len(hoi4_state.get("countries",{}))))
+            print("鋼鐵風暴 狀態已載入（tick={}, 國家數={}）".format(hoi4_state.get("tick",0), len(hoi4_state.get("countries",{}))))
     except Exception as e:
-        print("HOI4 狀態載入失敗: {}".format(e))
+        print("鋼鐵風暴 狀態載入失敗: {}".format(e))
     global hoi4_panel
     try:
         if os.path.exists(HOI4_PANEL_FILE):
@@ -841,9 +846,9 @@ async def _hoi4_show_map_link(interaction: discord.Interaction):
 # Slash 指令群組
 # ════════════════════════════════════════════════════════════════════════════
 
-class HOI4Group(app_commands.Group):
+class StormGroup(app_commands.Group):
     def __init__(self):
-        super().__init__(name="hoi4", description="鋼鐵雄心4 文字版遊戲")
+        super().__init__(name="storm", description="鋼鐵風暴 — 大戰略遊戲")
 
     @app_commands.command(name="start", description="重置整個遊戲世界（機器人擁有者限定，清空後任何人都能重新加入）")
     async def hoi4_start(self, interaction: discord.Interaction):
@@ -864,7 +869,7 @@ class HOI4Group(app_commands.Group):
         c = hoi4_state["countries"][new_cid]
         prov_name = hoi4_state["provinces"][c["provinces_owned"][0]]["name"] if c.get("provinces_owned") else "?"
         await refresh_hoi4_panel()
-        await interaction.response.send_message("你已加入遊戲！國名：{}，起始地：{}。到 /hoi4 網頁地圖上點鄰近省份可以慢慢擴張，或用 /hoi4 expand 指令。".format(name, prov_name))
+        await interaction.response.send_message("你已加入遊戲！國名：{}，起始地：{}。到 /storm 網頁地圖上點鄰近省份可以慢慢擴張，或用 /storm expand 指令。".format(name, prov_name))
 
     @app_commands.command(name="expand", description="和平擴張到相鄰的無主省份（花政治點數，有冷卻時間）")
     @app_commands.describe(province="目標省份名稱（可從 /hoi4 網頁地圖查看鄰接省份）")

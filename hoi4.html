@@ -1,427 +1,743 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HOI4 戰略指揮部</title>
+<title>鋼鐵風暴 — 大戰略</title>
 <style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{background:#1a1b1e;color:#e3e5e8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:14px}
-  ::-webkit-scrollbar{width:6px;height:6px}
-  ::-webkit-scrollbar-thumb{background:#4a4d53;border-radius:3px}
-  ::-webkit-scrollbar-track{background:transparent}
-  .panel{background:#2b2d31;border-radius:12px;padding:16px}
-  .btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:.15s}
-  .btn-primary{background:#5865f2;color:#fff}
-  .btn-primary:hover{background:#4752c4}
-  .btn-green{background:#3ba55d;color:#fff}
-  .btn-green:hover{background:#2d7d46}
-  .btn-red{background:#ed4245;color:#fff}
-  .btn-red:hover{background:#c23a3d}
-  .btn-ghost{background:#3a3c43;color:#e3e5e8}
-  .btn-ghost:hover{background#4a4d53}
-  .btn:disabled{opacity:.4;cursor:not-allowed}
-  .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600}
-  input,select{background:#1e1f22;color:#e3e5e8;border:1px solid#3a3c43;border-radius:8px;padding:8px 12px;font-size:13px;outline:none}
-  input:focus{border-color:#5865f2}
-  .fade-in{animation:fi .2s ease}
-  @keyframes fi{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-  svg .province{cursor:pointer;transition:opacity .15s}
-  svg .province:hover{opacity:.85}
-  svg .province.selected{stroke:#fff;stroke-width:2;stroke-opacity:1}
-  svg .province.movable{stroke:#3ba55d;stroke-width:2;stroke-dasharray:4 2;stroke-opacity:.8}
-  .div-marker{pointer-events:none}
-  .tooltip{position:absolute;background:#1e1f22;border:1px solid#3a3c43;border-radius:8px;padding:8px 12px;font-size:12px;pointer-events:none;z-index:50;max-width:240px;display:none;box-shadow:0 4px 12px rgba(0,0,0,.4)}
+:root {
+  --bg: #0a0d14;
+  --bg-panel: #111821;
+  --bg-panel2: #0d141c;
+  --bg-hover: #1a2433;
+  --border: #1e2a3a;
+  --border-light: #2a3a4e;
+  --text: #c9d1d9;
+  --text-muted: #6b7a8e;
+  --text-dim: #4a5568;
+  --gold: #c9a84e;
+  --gold-dim: #8a6f3a;
+  --green: #3ba55d;
+  --red: #ed4245;
+  --blue: #3b82f6;
+  --water: #08111e;
+  --land-unowned: #2a2e1f;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+  height: 100vh;
+}
+/* === TOP BAR === */
+#topbar {
+  height: 44px;
+  background: linear-gradient(180deg, #14202e 0%, #0d141c 100%);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 16px;
+  z-index: 100;
+}
+#topbar .logo {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--gold);
+  letter-spacing: 2px;
+  text-shadow: 0 0 8px rgba(201,168,78,0.3);
+  white-space: nowrap;
+}
+.res-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: rgba(0,0,0,0.3);
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+.res-item .res-icon { font-size: 14px; }
+.res-item .res-val { font-weight: 700; color: var(--text); }
+.res-item .res-label { font-size: 10px; color: var(--text-muted); }
+#topbar .spacer { flex: 1; }
+#topbar .btn-logout {
+  background: none; border: 1px solid var(--border-light); color: var(--text-muted);
+  padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+#topbar .btn-logout:hover { border-color: var(--red); color: var(--red); }
+
+/* === MAIN LAYOUT === */
+#main {
+  display: flex;
+  height: calc(100vh - 44px);
+}
+#left-panel {
+  width: 240px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+#map-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--water);
+}
+#map-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+#right-panel {
+  width: 300px;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+#bottom-panel {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  background: rgba(13,20,28,0.95);
+  border-top: 1px solid var(--border-light);
+  padding: 8px 12px;
+  max-height: 120px;
+  z-index: 50;
+}
+
+/* === MAP === */
+.province-poly {
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.province-poly:hover {
+  filter: brightness(1.4);
+}
+.province-poly.selected {
+  filter: brightness(1.5) drop-shadow(0 0 4px #fff);
+}
+.province-poly.movable {
+  filter: brightness(1.3);
+}
+.province-poly.pickable {
+  filter: brightness(1.2);
+}
+#tooltip {
+  position: absolute;
+  background: rgba(10,15,25,0.97);
+  border: 1px solid var(--gold-dim);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text);
+  pointer-events: none;
+  z-index: 200;
+  display: none;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+
+/* === PANELS === */
+.panel-section {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--gold);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.panel-title::before {
+  content: '';
+  display: inline-block;
+  width: 3px; height: 12px;
+  background: var(--gold);
+  border-radius: 1px;
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  font-size: 12px;
+}
+.stat-row .stat-label { color: var(--text-muted); }
+.stat-row .stat-val { font-weight: 600; }
+
+/* === TABS === */
+.tab-bar {
+  display: flex;
+  border-bottom: 2px solid var(--border);
+  background: var(--bg-panel2);
+}
+.tab-btn {
+  flex: 1;
+  padding: 8px 4px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+.tab-btn:hover { color: var(--text); background: var(--bg-hover); }
+.tab-btn.active {
+  color: var(--gold);
+  border-bottom-color: var(--gold);
+}
+.tab-content { display: none; padding: 8px; }
+.tab-content.active { display: block; }
+
+/* === FOCUS TREE === */
+.focus-node {
+  display: inline-block;
+  padding: 4px 8px;
+  margin: 2px;
+  background: var(--bg-panel2);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: center;
+  max-width: 100px;
+  vertical-align: top;
+}
+.focus-node:hover { border-color: var(--gold); }
+.focus-node.completed {
+  background: rgba(59,165,93,0.15);
+  border-color: var(--green);
+  color: var(--green);
+}
+.focus-node.in-progress {
+  background: rgba(201,168,78,0.15);
+  border-color: var(--gold);
+}
+.focus-node.locked { opacity: 0.4; cursor: not-allowed; }
+.focus-col { display: inline-block; vertical-align: top; }
+
+/* === BUTTONS === */
+.btn {
+  padding: 6px 12px;
+  border-radius: 3px;
+  border: 1px solid var(--border-light);
+  background: var(--bg-panel2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.15s;
+}
+.btn:hover { background: var(--bg-hover); border-color: var(--gold-dim); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary {
+  background: linear-gradient(180deg, #1a3a5e 0%, #14202e 100%);
+  border-color: #2a5a8e;
+  color: #a0c4ee;
+}
+.btn-primary:hover { background: linear-gradient(180deg, #2a4a6e 0%, #1a2a3e 100%); }
+.btn-gold {
+  background: linear-gradient(180deg, #3a3020 0%, #2a2010 100%);
+  border-color: var(--gold-dim);
+  color: var(--gold);
+}
+.btn-gold:hover { background: linear-gradient(180deg, #4a3a25 0%, #3a2a15 100%); }
+.btn-green {
+  background: rgba(59,165,93,0.15);
+  border-color: var(--green);
+  color: var(--green);
+}
+.btn-green:hover { background: rgba(59,165,93,0.25); }
+.btn-red {
+  background: rgba(237,66,69,0.15);
+  border-color: var(--red);
+  color: var(--red);
+}
+.btn-red:hover { background: rgba(237,66,69,0.25); }
+.btn-row { display: flex; gap: 4px; margin-top: 4px; }
+
+/* === MISC === */
+.prog-bar {
+  height: 6px;
+  background: var(--bg);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.prog-fill {
+  height: 100%;
+  background: var(--gold);
+  transition: width 0.3s;
+}
+.log-entry {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.log-entry:last-child { border: none; }
+
+/* === LOGIN === */
+#login-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(5,8,12,0.97);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+#login-box {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 32px;
+  width: 380px;
+  text-align: center;
+}
+#login-box h1 {
+  font-size: 24px;
+  color: var(--gold);
+  letter-spacing: 4px;
+  margin-bottom: 4px;
+}
+#login-box p {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+#login-box input {
+  width: 100%;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+#login-box input:focus { border-color: var(--gold-dim); outline: none; }
+#login-box .btn { width: 100%; padding: 10px; font-size: 14px; }
+#login-msg { color: var(--red); font-size: 12px; margin-top: 6px; }
+
+/* Toast */
+#toast {
+  position: fixed;
+  top: 60px; right: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--gold-dim);
+  border-radius: 4px;
+  padding: 8px 14px;
+  color: var(--text);
+  font-size: 12px;
+  z-index: 500;
+  display: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
 </style>
 </head>
 <body>
 
-<!-- Nav -->
-<nav style="background:#2b2d31;border-bottom:1px solid#1e1f22;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10">
-  <div style="display:flex;align-items:center;gap:12px">
-    <span style="font-size:18px;font-weight:700">🎭 戰略指揮部</span>
-    <span id="nav-info" style="font-size:12px;color:#949ba4"></span>
-  </div>
-  <div id="nav-user" style="display:flex;align-items:center;gap:10px;font-size:13px"></div>
-</nav>
+<!-- TOP BAR -->
+<div id="topbar" style="display:none">
+  <span class="logo">⚔️ 鋼鐵風暴</span>
+  <div class="res-item"><span class="res-icon">🔵</span><span class="res-val" id="r-pp">0</span><span class="res-label">PP</span></div>
+  <div class="res-item"><span class="res-icon">👥</span><span class="res-val" id="r-mp">0</span><span class="res-label">人力</span></div>
+  <div class="res-item"><span class="res-icon">🏭</span><span class="res-val" id="r-cf">0</span><span class="res-label">民工</span></div>
+  <div class="res-item"><span class="res-icon">⚔️</span><span class="res-val" id="r-mf">0</span><span class="res-label">軍工</span></div>
+  <div class="res-item"><span class="res-icon">📊</span><span class="res-val" id="r-stab">0%</span><span class="res-label">穩定</span></div>
+  <div class="res-item"><span class="res-icon">🌍</span><span class="res-val" id="r-prov">0</span><span class="res-label">省份</span></div>
+  <div class="spacer"></div>
+  <button class="btn-logout" onclick="logout()">登出</button>
+</div>
 
-<div id="main" style="max-width:1400px;margin:0 auto;padding:16px;display:flex;gap:16px;flex-wrap:wrap">
-
-  <!-- LEFT: Map -->
-  <div style="flex:1;min-width:600px">
-    <div class="panel" style="position:relative">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <span style="font-weight:600;font-size:15px">🗺️ 戰略地圖</span>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-ghost" onclick="refresh()">🔄</button>
-        </div>
-      </div>
-      <div id="map-container" style="position:relative">
-        <svg id="map-svg" viewBox="0 0 1000 500" style="width:100%;background:#0d0e11;border-radius:8px;display:block"></svg>
-        <div id="tooltip" class="tooltip"></div>
-      </div>
-      <div id="province-detail" style="margin-top:10px;font-size:13px;color:#949ba4;min-height:40px"></div>
+<!-- MAIN LAYOUT -->
+<div id="main" style="display:none">
+  <!-- LEFT: Focus Tree + Country Info -->
+  <div id="left-panel">
+    <div class="panel-section">
+      <div class="panel-title">國家資訊</div>
+      <div id="country-info"></div>
     </div>
-
-    <!-- War panel -->
-    <div class="panel" style="margin-top:12px" id="war-panel">
-      <div style="font-weight:600;font-size:15px;margin-bottom:8px">⚔️ 戰爭狀態</div>
-      <div id="war-list"></div>
+    <div class="panel-section">
+      <div class="panel-title">國策樹</div>
+      <div id="focus-tree"></div>
     </div>
-
-    <!-- Log -->
-    <div class="panel" style="margin-top:12px">
-      <div style="font-weight:600;font-size:15px;margin-bottom:8px">📜 戰報</div>
-      <div id="log-list" style="max-height:140px;overflow-y:auto;font-size:12px;color:#949ba4;line-height:1.6"></div>
+    <div class="panel-section">
+      <div class="panel-title">事件紀錄</div>
+      <div id="game-log" style="max-height:200px;overflow-y:auto"></div>
     </div>
   </div>
 
-  <!-- RIGHT: Control panels -->
-  <div style="width:400px;display:flex;flex-direction:column;gap:12px">
-    
-    <!-- Login / Join -->
-    <div class="panel" id="login-panel">
-      <div id="login-content"></div>
+  <!-- CENTER: MAP -->
+  <div id="map-container">
+    <svg id="map-svg" viewBox="0 0 1000 500" preserveAspectRatio="xMidYMid meet"></svg>
+    <div id="tooltip"></div>
+    <div id="bottom-panel"></div>
+  </div>
+
+  <!-- RIGHT: Management Tabs -->
+  <div id="right-panel">
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="switchTab('research')">研究</button>
+      <button class="tab-btn" onclick="switchTab('build')">建設</button>
+      <button class="tab-btn" onclick="switchTab('produce')">生產</button>
+      <button class="tab-btn" onclick="switchTab('diplo')">外交</button>
+      <button class="tab-btn" onclick="switchTab('units')">部隊</button>
     </div>
-
-    <!-- My Country -->
-    <div class="panel" id="my-country-panel" style="display:none">
-      <div style="font-weight:600;font-size:15px;margin-bottom:10px" id="my-country-title"></div>
-      <div id="my-country-stats" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px"></div>
-      
-      <!-- Tabs -->
-      <div style="display:flex;gap:4px;margin-top:12px;flex-wrap:wrap">
-        <button class="btn btn-ghost tab-btn" data-tab="focus" onclick="switchTab('focus')" style="font-size:12px;padding:6px 10px">國策</button>
-        <button class="btn btn-ghost tab-btn" data-tab="research" onclick="switchTab('research')" style="font-size:12px;padding:6px 10px">研究</button>
-        <button class="btn btn-ghost tab-btn" data-tab="build" onclick="switchTab('build')" style="font-size:12px;padding:6px 10px">建設</button>
-        <button class="btn btn-ghost tab-btn" data-tab="produce" onclick="switchTab('produce')" style="font-size:12px;padding:6px 10px">生產</button>
-        <button class="btn btn-ghost tab-btn" data-tab="divisions" onclick="switchTab('divisions')" style="font-size:12px;padding:6px 10px">部隊</button>
-        <button class="btn btn-ghost tab-btn" data-tab="templates" onclick="switchTab('templates')" style="font-size:12px;padding:6px 10px">編制</button>
-      </div>
-
-      <div id="tab-content" style="margin-top:10px;min-height:80px"></div>
-    </div>
-
-    <!-- Countries overview -->
-    <div class="panel">
-      <div style="font-weight:600;font-size:15px;margin-bottom:8px">🌍 各國概況</div>
-      <div id="countries-list" style="display:flex;flex-direction:column;gap:6px"></div>
-    </div>
-
+    <div class="tab-content active" id="tab-research"></div>
+    <div class="tab-content" id="tab-build"></div>
+    <div class="tab-content" id="tab-produce"></div>
+    <div class="tab-content" id="tab-diplo"></div>
+    <div class="tab-content" id="tab-units"></div>
   </div>
 </div>
 
-<!-- Toast -->
-<div id="toast" style="position:fixed;bottom:20px;right:20px;background:#2b2d31;border-radius:8px;padding:12px 20px;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,.4);display:none;z-index:100;max-width:360px"></div>
+<!-- LOGIN -->
+<div id="login-overlay">
+  <div id="login-box">
+    <h1>鋼鐵風暴</h1>
+    <p>大戰略遊戲 · 真實世界省份地圖</p>
+    <div id="login-content">
+      <a href="/login?next=/hoi4" style="display:block;width:100%;padding:10px;background:linear-gradient(180deg,#5865F2 0%,#4752C4 100%);color:#fff;border-radius:4px;text-decoration:none;font-weight:700;margin-bottom:8px">Discord 登入</a>
+    </div>
+    <div id="login-msg"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
 
 <script>
-// ── API helper ──
+let S = null, me = null, myCid = null, selProv = null, selDiv = null;
+let pickingStart = false, pickedProv = null, pendingName = '';
+const EXPAND_PP_COST = 30;
+const TERRAIN_COLORS = {plains:'#3d4a2e', mountains:'#5a4a3a', forest:'#2a3a20', urban:'#4a4a4a', desert:'#6a5a3a'};
+const TERRAIN_ZH = {plains:'平原', mountains:'山地', forest:'森林', urban:'都市', desert:'沙漠'};
+
+// === API ===
 async function api(path, method, body) {
+  const opts = { method: method||'GET', headers: {} };
+  if (body) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
   try {
-    const opts = {method: method||'GET', headers: {'Content-Type':'application/json'}};
-    if (body !== undefined) opts.body = JSON.stringify(body);
-    const res = await fetch(path, opts);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return {error: data.error || ('HTTP '+res.status)};
-    return data;
-  } catch(e) { return {error: e.message}; }
+    const r = await fetch(path, opts);
+    return await r.json();
+  } catch(e) { return { error: e.message }; }
 }
 
-// ── State ──
-let S = null;       // game state
-let me = null;       // {user_id, username, avatar_url}
-let myCid = null;     // my country id
-let selProv = null;   // selected province id
-let selDiv = null;    // selected division id (for moving)
-let curTab = 'focus';
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(t._timer); t._timer = setTimeout(() => t.style.display='none', 3000);
+}
 
-const TERRAIN_COLORS = {
-  plains: '#7a9e4a', mountains: '#8b7355', forest: '#4a7a3a',
-  urban: '#6b6b6b', desert: '#c4a86a'
-};
-const WAR_ICONS = { attacker: '⚔️', defender: '🛡️' };
-
-// ── Init ──
+// === INIT ===
 async function init() {
-  // Check login
-  const userRes = await api('/api/me');
-  if (userRes.error) {
-    renderLoginPrompt();
-  } else {
-    me = userRes;
-    renderUserInfo();
-  }
+  const meResp = await api('/api/me');
+  if (meResp.error || !meResp.user_id) { showLogin(); return; }
+  me = meResp;
   await refresh();
-  // Auto-refresh every 20s
-  setInterval(refresh, 20000);
+  setInterval(refresh, 15000);
 }
 
-function renderLoginPrompt() {
-  document.getElementById('login-content').innerHTML = `
-    <div style="font-weight:600;font-size:15px;margin-bottom:8px">🔐 登入</div>
-    <p style="color:#949ba4;font-size:13px;margin-bottom:10px">用 Discord 帳號登入後即可加入遊戲、操作你的國家。不用手動輸入 ID。</p>
-    <a href="/login?next=/hoi4" class="btn btn-primary" style="text-decoration:none;display:inline-block">用 Discord 登入</a>
-  `;
-  document.getElementById('login-panel').style.display = '';
-  document.getElementById('my-country-panel').style.display = 'none';
+function showLogin() {
+  document.getElementById('login-overlay').style.display = 'flex';
+  document.getElementById('main').style.display = 'none';
+  document.getElementById('topbar').style.display = 'none';
 }
 
-function renderUserInfo() {
-  const avatar = me.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png';
-  document.getElementById('nav-user').innerHTML = `
-    <img src="${avatar}" style="width:28px;height:28px;border-radius:50%" onerror="this.src='https://cdn.discordapp.com/embed/avatars/0.png'">
-    <span>${me.username}</span>
-    <a href="/logout" style="color:#949ba4;font-size:12px;text-decoration:none">登出</a>
-  `;
-}
-
-// ── Refresh state ──
 async function refresh() {
-  const s = await api('/api/game/hoi4/state');
-  if (s.error) { toast('載入失敗: '+s.error); return; }
-  S = s;
-  document.getElementById('nav-info').textContent = s.game_active
-    ? `Day ${s.tick||0} · ${Object.keys(s.countries||{}).length} 國 · ${Object.keys(s.wars||{}).length} 戰爭`
-    : '等待第一位玩家加入即可開始';
-
+  S = await api('/api/game/hoi4/state');
+  if (!S || S.error) { setTimeout(refresh, 3000); return; }
+  if (!me) { showLogin(); return; }
   // Find my country
   myCid = null;
-  if (me) {
-    for (const [cid, c] of Object.entries(S.countries||{})) {
-      if (c.owner === me.user_id) { myCid = cid; break; }
-    }
+  for (const [cid, c] of Object.entries(S.countries||{})) {
+    if (c.owner == me.user_id) { myCid = cid; break; }
   }
-
-  renderLoginOrJoin();
-  renderMap();
-  renderCountries();
-  renderWars();
+  if (!myCid) { renderLoginOrJoin(); return; }
+  // Logged in & playing
+  document.getElementById('login-overlay').style.display = 'none';
+  document.getElementById('main').style.display = 'flex';
+  document.getElementById('topbar').style.display = 'flex';
+  renderTopbar();
+  renderCountryInfo();
+  renderFocusTree();
   renderLog();
-  if (myCid) {
-    document.getElementById('my-country-panel').style.display = '';
-    renderMyCountry();
-    renderTab();
-  } else {
-    document.getElementById('my-country-panel').style.display = 'none';
-  }
+  renderMap();
+  renderTabs();
+  if (selProv) renderProvinceDetail(selProv);
 }
 
-// ── Login / Join panel ──
-function renderLoginOrJoin() {
-  if (!me) return; // login prompt already shown
+function logout() { window.location.href = '/'; }
 
-  if (myCid) {
-    document.getElementById('login-panel').style.display = 'none';
-    return;
-  }
+// === TOP BAR ===
+function renderTopbar() {
+  if (!myCid) return;
+  const c = S.countries[myCid];
+  document.getElementById('r-pp').textContent = Math.floor(c.political_power||0);
+  document.getElementById('r-mp').textContent = Math.floor(c.manpower||0);
+  document.getElementById('r-cf').textContent = c.civilian_factories||0;
+  document.getElementById('r-mf').textContent = c.military_factories||0;
+  document.getElementById('r-stab').textContent = Math.round((c.stability||0)*100)+'%';
+  document.getElementById('r-prov').textContent = (c.provinces_owned||[]).length;
+}
 
-  document.getElementById('login-panel').style.display = '';
-  if (pickingStart) {
-    document.getElementById('login-content').innerHTML = `
-      <div style="font-weight:600;font-size:15px;margin-bottom:8px">🗺️ 選擇起始地區</div>
-      <p style="color:#949ba4;font-size:13px;margin-bottom:10px">在地圖上點一個<b style="color:#fee75c">金色邊框</b>的無主省份當作起始地。</p>
-      ${pickedProv ? `<div style="background:#1e1f22;border-radius:6px;padding:8px;margin-bottom:8px">已選擇：<b>${S.provinces[pickedProv].name}</b></div>` : '<div style="color:#949ba4;font-size:12px">還沒選擇...</div>'}
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-primary" onclick="confirmJoin()" ${pickedProv?'':'disabled'}>✅ 在此建國</button>
-        <button class="btn btn-ghost" onclick="cancelPickStart()">取消</button>
-      </div>
-      <div id="join-msg" style="margin-top:6px;font-size:12px;color:#ed4245"></div>
-    `;
-    return;
-  }
-  document.getElementById('login-content').innerHTML = `
-    <div style="font-weight:600;font-size:15px;margin-bottom:8px">🚩 加入遊戲</div>
-    <p style="color:#949ba4;font-size:13px;margin-bottom:10px">沒有人數上限，不用報名，隨時可加入。從一個省份開始，之後可以和平擴張或發動戰爭慢慢長大。</p>
-    <div style="display:flex;gap:8px">
-      <input id="join-name" type="text" placeholder="你的國家名稱" style="flex:1" onkeydown="if(event.key==='Enter')startPickLocation()">
-      <button class="btn btn-primary" onclick="startPickLocation()">🗺️ 選地建國</button>
-    </div>
-    <div id="join-msg" style="margin-top:6px;font-size:12px;color:#ed4245"></div>
+// === COUNTRY INFO ===
+function renderCountryInfo() {
+  if (!myCid) return;
+  const c = S.countries[myCid];
+  const html = `
+    <div style="font-size:16px;font-weight:700;color:${c.color};margin-bottom:4px">${c.name}</div>
+    <div class="stat-row"><span class="stat-label">政治點數</span><span class="stat-val">${Math.floor(c.political_power||0)}</span></div>
+    <div class="stat-row"><span class="stat-label">穩定度</span><span class="stat-val">${Math.round((c.stability||0)*100)}%</span></div>
+    <div class="stat-row"><span class="stat-label">人力</span><span class="stat-val">${Math.floor(c.manpower||0)}</span></div>
+    <div class="stat-row"><span class="stat-label">民用工廠</span><span class="stat-val">${c.civilian_factories||0}</span></div>
+    <div class="stat-row"><span class="stat-label">軍工廠</span><span class="stat-val">${c.military_factories||0}</span></div>
+    <div class="stat-row"><span class="stat-label">研究槽</span><span class="stat-val">${c.research_slots||0}</span></div>
+    <div class="stat-row"><span class="stat-label">領土</span><span class="stat-val">${(c.provinces_owned||[]).length} 省</span></div>
+    <div class="stat-row"><span class="stat-label">師團</span><span class="stat-val">${(c.divisions||[]).length}</span></div>
+    ${(c.at_war_with||[]).length ? `<div style="margin-top:4px;color:var(--red);font-weight:600">⚔️ 戰爭中: ${c.at_war_with.map(w=>S.countries[w]?.name||w).join(', ')}</div>` : ''}
   `;
+  document.getElementById('country-info').innerHTML = html;
 }
 
-let pickingStart = false;
-let pickedProv = null;
-let pendingCountryName = '';
-
-function startPickLocation() {
-  const name = document.getElementById('join-name').value.trim();
-  if (!name) { document.getElementById('join-msg').textContent = '請輸入國家名稱'; return; }
-  pendingCountryName = name;
-  pickingStart = true;
-  pickedProv = null;
-  renderLoginOrJoin();
-  renderMap();
-  toast('在地圖上點選一個無主省份（金色邊框）當起始地');
+// === FOCUS TREE ===
+function renderFocusTree() {
+  if (!myCid) return;
+  const c = S.countries[myCid];
+  const tree = S.focus_tree || [];
+  const completed = new Set(c.completed_focuses||[]);
+  const current = c.current_focus;
+  // Group by x column
+  const cols = {};
+  for (const f of tree) {
+    if (!cols[f.x]) cols[f.x] = [];
+    cols[f.x].push(f);
+  }
+  let html = '';
+  for (const x of Object.keys(cols).sort((a,b)=>a-b)) {
+    html += '<div class="focus-col">';
+    for (const f of cols[x].sort((a,b)=>a.y-b.y)) {
+      const done = completed.has(f.id);
+      const inProg = current === f.id;
+      const locked = !done && !inProg && f.prereq && !f.prereq.every(p => completed.has(p));
+      const cls = done ? 'completed' : inProg ? 'in-progress' : locked ? 'locked' : '';
+      const prog = inProg ? ` (${Math.round((c.focus_progress||0)/f.cost*100)}%)` : '';
+      html += `<div class="focus-node ${cls}" onclick="setFocus('${f.id}')" title="${f.desc||''}">${f.name}${prog}</div>`;
+    }
+    html += '</div>';
+  }
+  document.getElementById('focus-tree').innerHTML = html;
 }
 
-function cancelPickStart() {
-  pickingStart = false;
-  pickedProv = null;
-  renderLoginOrJoin();
-  renderMap();
+// === LOG ===
+function renderLog() {
+  const log = (S.log||[]).slice(-15).reverse();
+  document.getElementById('game-log').innerHTML = log.map(l => `<div class="log-entry">${l}</div>`).join('');
 }
 
-async function confirmJoin() {
-  if (!pickedProv) return;
-  const r = await api('/api/game/hoi4/join', 'POST', { user_id: me.user_id, name: pendingCountryName, start_province: pickedProv });
-  if (r.error) { document.getElementById('join-msg').textContent = r.error; return; }
-  pickingStart = false;
-  pickedProv = null;
-  toast('建國成功！起始地：' + S.provinces[r.country.provinces_owned[0]].name);
-  await refresh();
-}
-
-// ── Map rendering ──
+// === MAP ===
 function renderMap() {
   if (!S || !S.provinces) return;
   const svg = document.getElementById('map-svg');
+  const provinces = S.provinces;
+  const owned = myCid ? new Set(S.countries[myCid].provinces_owned||[]) : new Set();
+  
   let parts = '';
-
-  // Background water
-  parts += `<rect x="0" y="0" width="1000" height="500" fill="#0d1117"/>`;
-
-  // Draw provinces
-  for (const [pid, p] of Object.entries(S.provinces)) {
-    const polyStr = (p.polygon||[]).map(pt => pt[0]+','+pt[1]).join(' ');
-    if (!polyStr) continue;
+  // Water background
+  parts += '<rect x="0" y="0" width="1000" height="500" fill="#08111e"/>';
+  
+  // Province polygons
+  for (const [pid, p] of Object.entries(provinces)) {
     const owner = S.countries[p.owner];
-    let fill = TERRAIN_COLORS[p.type] || '#5a5a5a';
-    if (owner) fill = owner.color || fill;
-    fill = fill;
-    const opacity = owner ? 0.75 : 0.5;
-    const sel = (pid === selProv || pid === pickedProv) ? ' selected' : '';
-    const movable = (selDiv && myCid && selProv && isAdjacent(selProv, pid)) ? ' movable' : '';
-    const pickable = (pickingStart && !owner) ? ' movable' : '';
-    let extraStroke = '';
-    if (pickingStart && !owner) extraStroke = 'stroke="#fee75c" stroke-width="1.2" stroke-opacity="0.9"';
-
-    parts += `<polygon class="province${sel}${movable}${pickable}" points="${polyStr}" fill="${fill}" fill-opacity="${opacity}" ${extraStroke || 'stroke="#2a2a2a" stroke-width="0.5" stroke-opacity="0.6"'} onclick="onProvinceClick('${pid}')" onmousemove="showTooltip(event,'${pid}')" onmouseout="hideTooltip()"/>`;
-
-    // Province name — 世界地圖省份很多，小國/無主省份不擠標籤，只在擁有國家或夠大時顯示，避免密密麻麻看不清楚
-    const [cx, cy] = p.centroid || [0,0];
-    const xs = (p.polygon||[]).map(pt=>pt[0]), ys = (p.polygon||[]).map(pt=>pt[1]);
-    const bboxW = xs.length ? Math.max(...xs)-Math.min(...xs) : 0;
-    const bboxH = ys.length ? Math.max(...ys)-Math.min(...ys) : 0;
-    const bigEnough = Math.max(bboxW, bboxH) > 14;
-    if (owner || bigEnough) {
-      const fontSize = owner ? 9 : 8;
-      parts += `<text x="${cx}" y="${cy-4}" text-anchor="middle" fill="#fff" fill-opacity="0.9" font-size="${fontSize}" style="pointer-events:none;font-weight:600;paint-order:stroke;stroke:#000;stroke-width:2;stroke-opacity:0.5">${p.name}</text>`;
-    }
-
-    // VP star
-    if (p.victory_points > 0) {
-      parts += `<text x="${cx+14}" y="${cy-4}" text-anchor="middle" fill="#fee75c" font-size="10" style="pointer-events:none">★</text>`;
-    }
-
-    // Division markers
-    if (owner) {
-      const divs = (owner.divisions||[]).filter(d => d.province === pid);
-      if (divs.length > 0) {
-        const avgStr = divs.reduce((s,d) => s + (d.strength||0), 0) / divs.length;
-        const strColor = avgStr > 0.7 ? '#3ba55d' : avgStr > 0.3 ? '#fee75c' : '#ed4245';
-        parts += `<circle class="div-marker" cx="${cx}" cy="${cy+8}" r="5" fill="${owner.color}" stroke="${strColor}" stroke-width="1.5"/>`;
-        parts += `<text class="div-marker" x="${cx}" y="${cy+11}" text-anchor="middle" fill="#fff" font-size="8" font-weight="700">${divs.length}</text>`;
+    let fill = owner ? (owner.color || '#5a5a5a') : TERRAIN_COLORS[p.type] || '#3d3525';
+    let opacity = owner ? 0.85 : 0.6;
+    
+    const isSel = (pid === selProv || pid === pickedProv);
+    const isMovable = (selDiv && myCid && selProv && isAdjacent(selProv, pid)) ? ' movable' : '';
+    const isPickable = (pickingStart && !owner) ? ' pickable' : '';
+    const selClass = isSel ? ' selected' : '';
+    
+    // Build polygon path from multipolygon data
+    // Format: [[[ext_ring], [hole], ...], [[ext2], ...], ...]
+    const poly = p.polygon;
+    let polyStr = '';
+    if (poly && poly[0] && poly[0][0] && Array.isArray(poly[0][0][0])) {
+      // multipolygon
+      for (const mp of poly) {
+        if (!mp || !mp[0]) continue;
+        const ring = mp[0]; // exterior ring only for fill
+        polyStr += ring.map(pt => pt[0]+','+pt[1]).join(' ') + ' ';
       }
+    } else if (poly && poly[0] && Array.isArray(poly[0][0])) {
+      // single polygon: [[ext_ring], [hole], ...]
+      const ring = poly[0];
+      polyStr = ring.map(pt => pt[0]+','+pt[1]).join(' ');
+    } else if (poly && poly[0] && !Array.isArray(poly[0][0])) {
+      // flat: [[x,y], [x,y], ...]
+      polyStr = poly.map(pt => pt[0]+','+pt[1]).join(' ');
     }
-
-    // Fortification
-    if (p.fortifications > 0) {
-      parts += `<text x="${cx-12}" y="${cy+12}" text-anchor="middle" fill="#ed4245" font-size="10" style="pointer-events:none">🛡</text>`;
+    if (!polyStr) continue;
+    
+    parts += `<polygon class="province-poly${selClass}${isMovable}${isPickable}" points="${polyStr}" fill="${fill}" fill-opacity="${opacity}" stroke="#1a1a2a" stroke-width="0.3" onclick="onProvinceClick('${pid}')" onmousemove="showTooltip(event,'${pid}')" onmouseout="hideTooltip()"/>`;
+  }
+  
+  // Labels: only for owned provinces (max ~100)
+  for (const pid of owned) {
+    const p = provinces[pid];
+    if (!p || !p.centroid) continue;
+    const [cx, cy] = p.centroid;
+    parts += `<text x="${cx}" y="${cy-3}" text-anchor="middle" fill="#fff" fill-opacity="0.7" font-size="7" style="pointer-events:none;font-weight:600;paint-order:stroke;stroke:#000;stroke-width:1.5;stroke-opacity:0.5">${p.name}</text>`;
+    // Division markers
+    const c = S.countries[myCid];
+    const divs = (c.divisions||[]).filter(d => d.province === pid);
+    if (divs.length > 0) {
+      const avgStr = divs.reduce((s,d) => s + (d.strength||0), 0) / divs.length;
+      const strColor = avgStr > 0.7 ? '#3ba55d' : avgStr > 0.3 ? '#c9a84e' : '#ed4245';
+      parts += `<circle cx="${cx}" cy="${cy+5}" r="3.5" fill="${c.color}" stroke="${strColor}" stroke-width="1" style="pointer-events:none"/>`;
+      parts += `<text x="${cx}" y="${cy+7.5}" text-anchor="middle" fill="#fff" font-size="5" font-weight="700" style="pointer-events:none">${divs.length}</text>`;
     }
   }
-
-  // Draw war borders (red dashed lines between contested provinces)
-  for (const [wid, war] of Object.entries(S.wars||{})) {
-    const atkC = S.countries[war.attacker];
-    const defC = S.countries[war.defender];
-    if (!atkC || !defC) continue;
-    const atkPids = new Set(atkC.provinces_owned||[]);
-    const defPids = new Set(defC.provinces_owned||[]);
-    for (const pid of atkPids) {
-      const prov = S.provinces[pid];
+  
+  // VP stars for owned provinces
+  for (const pid of owned) {
+    const p = provinces[pid];
+    if (p && p.victory_points > 0 && p.centroid) {
+      const [cx, cy] = p.centroid;
+      parts += `<text x="${cx+6}" y="${cy-3}" text-anchor="middle" fill="#c9a84e" font-size="7" style="pointer-events:none">★</text>`;
+    }
+  }
+  
+  // War borders (red dashed)
+  for (const c of Object.values(S.countries||{})) {
+    if (!myCid) break;
+    if (!(c.at_war_with||[]).includes(myCid)) continue;
+    const myPids = new Set(S.countries[myCid].provinces_owned||[]);
+    for (const pid of (c.provinces_owned||[])) {
+      const prov = provinces[pid];
       if (!prov) continue;
-      for (const nPid of (prov.neighbors||[])) {
-        if (defPids.has(nPid)) {
-          const nProv = S.provinces[nPid];
-          if (!nProv) continue;
-          const [x1,y1] = prov.centroid||[0,0];
-          const [x2,y2] = nProv.centroid||[0,0];
-          parts += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#ed4245" stroke-width="2" stroke-dasharray="6 3" opacity="0.7" style="pointer-events:none"/>`;
+      for (const n of (prov.neighbors||[])) {
+        if (myPids.has(n)) {
+          const np = provinces[n];
+          if (!np || !np.centroid || !prov.centroid) continue;
+          parts += `<line x1="${prov.centroid[0]}" y1="${prov.centroid[1]}" x2="${np.centroid[0]}" y2="${np.centroid[1]}" stroke="#ed4245" stroke-width="1.5" stroke-dasharray="4 2" opacity="0.8" style="pointer-events:none"/>`;
         }
       }
     }
   }
-
+  
   svg.innerHTML = parts;
 }
 
-function isAdjacent(fromPid, toPid) {
-  const p = S.provinces[fromPid];
-  if (!p) return false;
-  return (p.neighbors||[]).includes(toPid);
+function isAdjacent(from, to) {
+  const p = S.provinces[from];
+  return p && (p.neighbors||[]).includes(to);
 }
+
+function showTooltip(e, pid) {
+  const p = S.provinces[pid];
+  if (!p) return;
+  const owner = S.countries[p.owner];
+  const ownerName = owner ? owner.name : '無主';
+  const t = document.getElementById('tooltip');
+  t.innerHTML = `<b>${p.name}</b> · ${TERRAIN_ZH[p.type]||p.type} · ${ownerName}`;
+  if (p.victory_points > 0) t.innerHTML += ` · ⭐${p.victory_points}`;
+  t.style.display = 'block';
+  const rect = document.getElementById('map-container').getBoundingClientRect();
+  t.style.left = (e.clientX - rect.left + 12) + 'px';
+  t.style.top = (e.clientY - rect.top + 12) + 'px';
+}
+
+function hideTooltip() { document.getElementById('tooltip').style.display = 'none'; }
 
 function onProvinceClick(pid) {
   const prov = S.provinces[pid];
   if (!prov) return;
-
-  // Picking a starting location for a new country
   if (pickingStart) {
-    if (prov.owner) { toast('這個省份已經有主人了，選別的地方'); return; }
+    if (prov.owner) { toast('已有主人，選別處'); return; }
     pickedProv = pid;
     renderLoginOrJoin();
     renderMap();
     return;
   }
-
-  // If we have a division selected and this is adjacent, move it
   if (selDiv && myCid && selProv && isAdjacent(selProv, pid)) {
     moveDivision(selDiv, pid);
     return;
   }
-
-  // Otherwise just select the province
   selProv = pid;
   selDiv = null;
   renderProvinceDetail(pid);
   renderMap();
-
-  // If this is my province and has divisions, show division selector
   if (myCid && prov.owner === myCid) {
     const c = S.countries[myCid];
     const divs = (c.divisions||[]).filter(d => d.province === pid);
-    if (divs.length > 0) {
-      renderDivisionSelector(divs);
-    }
-  }
-
-  // If this is an unowned province adjacent to my territory, offer peaceful expansion
-  if (myCid && !prov.owner) {
-    const c = S.countries[myCid];
-    const owned = new Set(c.provinces_owned||[]);
-    const isAdjacentToMine = (prov.neighbors||[]).some(n => owned.has(n));
-    if (isAdjacentToMine) {
-      document.getElementById('province-detail').innerHTML += `<div style="margin-top:8px">
-        <button class="btn btn-green" onclick="doExpand('${pid}')">🌱 和平擴張至此（花費 ${EXPAND_PP_COST} 政治點數）</button>
-      </div>`;
-    }
-  }
-
-  // If this is an enemy province, offer war declaration shortcut
-  if (myCid && prov.owner && prov.owner !== myCid) {
-    const c = S.countries[myCid];
-    const alreadyAtWar = (c.at_war_with||[]).includes(prov.owner);
-    if (!alreadyAtWar) {
-      const enemy = S.countries[prov.owner];
-      document.getElementById('province-detail').innerHTML += `<div style="margin-top:8px">
-        <button class="btn btn-red" onclick="doDeclareWar('${prov.owner}')">⚔️ 向 ${enemy.name} 宣戰</button>
-      </div>`;
-    }
+    if (divs.length > 0) renderDivisionSelector(divs);
   }
 }
 
-const EXPAND_PP_COST = 30;
+function renderProvinceDetail(pid) {
+  const p = S.provinces[pid];
+  if (!p) { document.getElementById('bottom-panel').innerHTML = ''; return; }
+  const owner = S.countries[p.owner];
+  const ownerName = owner ? `<span style="color:${owner.color};font-weight:600">${owner.name}</span>` : '<span style="color:var(--text-muted)">無主</span>';
+  const res = Object.entries(p.resources||{}).map(([k,v]) => `${k}:${v}`).join(' · ') || '無';
+  let html = `<div style="font-weight:700;font-size:14px">${p.name}</div>`;
+  html += `<div style="font-size:12px;color:var(--text-muted)">${TERRAIN_ZH[p.type]||p.type} · ${ownerName} · 基建:${p.infrastructure} · 工事:${p.fortifications||0} · 資源:${res}${p.victory_points>0?` · VP:${p.victory_points}`:''}</div>`;
+  const neighbors = (p.neighbors||[]).slice(0,8).map(n => S.provinces[n]?.name||n).join('、');
+  if (neighbors) html += `<div style="font-size:11px;color:var(--text-dim);margin-top:2px">鄰接: ${neighbors}${(p.neighbors||[]).length>8?'...':''}</div>`;
+  
+  // Expand button
+  if (myCid && !p.owner) {
+    const c = S.countries[myCid];
+    const owned = new Set(c.provinces_owned||[]);
+    if ((p.neighbors||[]).some(n => owned.has(n))) {
+      html += `<div class="btn-row"><button class="btn btn-green" onclick="doExpand('${pid}')">🌱 和平擴張 (30PP)</button></div>`;
+    }
+  }
+  // Declare war button
+  if (myCid && p.owner && p.owner !== myCid) {
+    const c = S.countries[myCid];
+    if (!(c.at_war_with||[]).includes(p.owner)) {
+      html += `<div class="btn-row"><button class="btn btn-red" onclick="doDeclareWar('${p.owner}')">⚔️ 宣戰</button></div>`;
+    }
+  }
+  document.getElementById('bottom-panel').innerHTML = html;
+}
+
+function renderDivisionSelector(divs) {
+  let html = '<div style="margin-top:6px;font-size:12px;font-weight:600">選擇部隊移防:</div>';
+  for (const d of divs) {
+    html += `<button class="btn" style="margin:2px;font-size:11px" onclick="selectDivision('${d.id}')">${d.template_name||'師'} (戰力${Math.round((d.strength||0)*100)}%)</button>`;
+  }
+  document.getElementById('bottom-panel').innerHTML += html;
+}
+
+function selectDivision(divId) {
+  selDiv = divId;
+  toast('已選部隊，點擊相鄰省份移防');
+  renderMap();
+}
+
+async function moveDivision(divId, toPid) {
+  const r = await api('/api/game/hoi4/move-division', 'POST', { country_id: myCid, division_id: divId, to_province: toPid });
+  if (r.error) { toast(r.error); return; }
+  selDiv = null; selProv = toPid;
+  toast('部隊已移防');
+  await refresh();
+}
 
 async function doExpand(pid) {
   const r = await api('/api/game/hoi4/expand', 'POST', { country_id: myCid, province: pid });
@@ -437,383 +753,253 @@ async function doDeclareWar(targetId) {
   await refresh();
 }
 
-function renderProvinceDetail(pid) {
-  const p = S.provinces[pid];
-  if (!p) { document.getElementById('province-detail').innerHTML = ''; return; }
-  const owner = S.countries[p.owner];
-  const ownerName = owner ? `<span style="color:${owner.color};font-weight:600">${owner.name}</span>` : '<span style="color:#949ba4">無主</span>';
-  const res = Object.entries(p.resources||{}).map(([k,v]) => `${k}:${v}`).join(' · ') || '無';
-  const terrainMap = {plains:'平原',mountains:'山地',forest:'森林',urban:'都市',desert:'沙漠'};
-  let html = `<b>${p.name}</b> · ${terrainMap[p.type]||p.type} · ${ownerName}<br>` +
-    `<span style="font-size:12px">基建:${p.infrastructure} · 工事:${p.fortifications} · 資源:${res}` +
-    (p.victory_points > 0 ? ` · VP:${p.victory_points}` : '') + `</span>`;
-  
-  // Show neighbors
-  const neighbors = (p.neighbors||[]).map(n => {
-    const np = S.provinces[n];
-    return np ? np.name : n;
-  }).join('、');
-  html += `<br><span style="font-size:11px;color:#949ba4">鄰接: ${neighbors}</span>`;
-  document.getElementById('province-detail').innerHTML = html;
-}
-
-function renderDivisionSelector(divs) {
-  let html = '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">';
-  for (const d of divs) {
-    const tpl = (S.countries[myCid].division_templates||[]).find(t => t.id === d.template_id);
-    const name = tpl ? tpl.name : d.template_id;
-    const strPct = Math.floor((d.strength||0)*100);
-    const strColor = strPct > 70 ? '#3ba55d' : strPct > 30 ? '#fee75c' : '#ed4245';
-    html += `<button class="btn btn-ghost" onclick="selectDiv('${d.id}')" style="font-size:12px;padding:5px 10px;border:1px solid ${strColor}">` +
-      `${name} · 戰力${strPct}% · 組織${d.org||0}</button>`;
-  }
-  html += '</div>';
-  document.getElementById('province-detail').innerHTML += html;
-}
-
-function selectDiv(divId) {
-  selDiv = divId;
-  toast('已選擇部隊，點擊相鄰省份（綠色虛線）移防');
-  renderMap();
-}
-
-async function moveDivision(divId, toPid) {
-  const r = await api('/api/game/hoi4/move-division', 'POST', {
-    country_id: myCid, division_id: divId, province: toPid
-  });
+async function setFocus(fid) {
+  const r = await api('/api/game/hoi4/set-focus', 'POST', { country_id: myCid, focus_id: fid });
   if (r.error) { toast(r.error); return; }
-  selDiv = null;
-  selProv = toPid;
-  toast('部隊已移防');
+  toast('已選擇國策');
   await refresh();
 }
 
-function showTooltip(e, pid) {
-  const p = S.provinces[pid];
-  if (!p) return;
-  const owner = S.countries[p.owner];
-  const terrainMap = {plains:'平原',mountains:'山地',forest:'森林',urban:'都市',desert:'沙漠'};
-  let html = `<b>${p.name}</b><br>地形: ${terrainMap[p.type]||p.type}`;
-  if (owner) html += `<br>屬於: ${owner.name}`;
-  const divs = owner ? (owner.divisions||[]).filter(d => d.province === pid) : [];
-  if (divs.length > 0) html += `<br>駐軍: ${divs.length} 師`;
-  const tt = document.getElementById('tooltip');
-  tt.innerHTML = html;
-  tt.style.display = 'block';
-  tt.style.left = (e.offsetX + 15) + 'px';
-  tt.style.top = (e.offsetY + 15) + 'px';
+// === TABS ===
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-'+name).classList.add('active');
+  renderTabs();
 }
 
-function hideTooltip() {
-  document.getElementById('tooltip').style.display = 'none';
+function renderTabs() {
+  renderResearch();
+  renderBuild();
+  renderProduce();
+  renderDiplo();
+  renderUnits();
 }
 
-// ── My country rendering ──
-function renderMyCountry() {
-  if (!myCid || !S.countries[myCid]) return;
-  const c = S.countries[myCid];
-  document.getElementById('my-country-title').innerHTML = `<span style="color:${c.color}">${c.name}</span>`;
-
-  const focusName = c.current_focus
-    ? (() => { const f = (S.focus_tree||[]).find(x => x.id === c.current_focus); const pct = f ? Math.min(100, Math.floor((c.focus_progress||0)/(f.cost||70)*100)) : 0; return (f ? f.name : c.current_focus) + ' ('+pct+'%)'; })()
-    : '無';
-
-  const stats = [
-    ['政治點數', Math.floor(c.political_power||0)],
-    ['穩定度', Math.floor((c.stability||0)*100) + '%'],
-    ['民工', c.civilian_factories||0],
-    ['軍工', c.military_factories||0],
-    ['兵員', c.manpower||0],
-    ['部隊', (c.divisions||[]).length + ' 師'],
-    ['領土', (c.provinces_owned||[]).length + ' 省'],
-    ['國策', focusName],
-    ['研究', (c.research||[]).length + '/' + (c.research_slots||3)],
-    ['狀態', c.at_war_with && c.at_war_with.length > 0 ? '⚔️ 戰爭中' : '☮️ 和平'],
-  ];
-  document.getElementById('my-country-stats').innerHTML = stats.map(([k,v]) =>
-    `<div style="background:#1e1f22;border-radius:6px;padding:6px 10px"><div style="color:#949ba4;font-size:11px">${k}</div><div style="font-weight:600">${v}</div></div>`
-  ).join('');
-}
-
-// ── Tabs ──
-function switchTab(tab) {
-  curTab = tab;
-  document.querySelectorAll('.tab-btn').forEach(b => {
-    b.style.background = b.dataset.tab === tab ? '#5865f2' : '#3a3c43';
-    b.style.color = b.dataset.tab === tab ? '#fff' : '#e3e5e8';
-  });
-  renderTab();
-}
-
-function renderTab() {
+function renderResearch() {
   if (!myCid) return;
   const c = S.countries[myCid];
-  if (!c) return;
-  const el = document.getElementById('tab-content');
-
-  if (curTab === 'focus') renderFocusTab(c, el);
-  else if (curTab === 'research') renderResearchTab(c, el);
-  else if (curTab === 'build') renderBuildTab(c, el);
-  else if (curTab === 'produce') renderProduceTab(c, el);
-  else if (curTab === 'divisions') renderDivisionsTab(c, el);
-  else if (curTab === 'templates') renderTemplatesTab(c, el);
-}
-
-function renderFocusTab(c, el) {
-  const tree = S.focus_tree || [];
-  if (c.current_focus) {
-    const f = tree.find(x => x.id === c.current_focus);
-    const pct = f ? Math.min(100, Math.floor((c.focus_progress||0)/(f.cost||70)*100)) : 0;
-    el.innerHTML = `<div style="color:#949ba4;font-size:13px">進行中: <b>${f ? f.name : c.current_focus}</b> (${pct}%)</div>`;
-    return;
-  }
-  // Show available focuses (prereq met)
-  const completed = new Set(c.completed_focuses||[]);
-  const available = tree.filter(f => !completed.has(f.id) && (f.prereq||[]).every(p => completed.has(p)));
-  if (available.length === 0) { el.innerHTML = '<div style="color:#949ba4">所有國策已完成！</div>'; return; }
-  el.innerHTML = available.map(f => {
-    const effects = Object.entries(f.effects||{}).map(([k,v]) => `${k}: +${v}`).join(', ');
-    return `<button class="btn btn-ghost" onclick="setFocus('${f.id}')" style="width:100%;text-align:left;margin-bottom:4px;padding:8px 12px">
-      <b>${f.name}</b> <span style="color:#949ba4;font-size:11px">(${f.cost}天)</span><br>
-      <span style="font-size:11px;color:#949ba4">${f.desc||''} — ${effects}</span>
-    </button>`;
-  }).join('');
-}
-
-async function setFocus(focusId) {
-  const r = await api('/api/game/hoi4/set-focus', 'POST', { country_id: myCid, focus_id: focusId });
-  if (r.error) { toast(r.error); return; }
-  toast('國策已設定');
-  await refresh();
-}
-
-function renderResearchTab(c, el) {
   const tree = S.tech_tree || {};
-  const researching = new Set((c.research||[]).map(r => r.tech_id));
-  const slotsFull = (c.research||[]).length >= (c.research_slots||3);
-  
+  const researched = new Set(c.research||[]);
   let html = '';
   for (const [cat, techs] of Object.entries(tree)) {
     const catName = {industry:'工業',army:'陸軍',air:'空軍',naval:'海軍'}[cat] || cat;
-    html += `<div style="margin-bottom:8px"><div style="font-size:12px;font-weight:600;color:#949ba4;margin-bottom:4px">${catName}</div>`;
+    html += `<div style="margin-bottom:8px"><div style="font-weight:700;color:var(--gold);font-size:11px;margin-bottom:4px">${catName}</div>`;
     for (const t of techs) {
-      const done = (c.completed_tech||{}).hasOwnProperty(t.id) || researching.has(t.id);
-      const prereqMet = !t.prereq || (c.completed_tech||{}).hasOwnProperty(t.prereq) || researching.has(t.prereq);
-      const canResearch = !done && prereqMet && !slotsFull;
-      const inProgress = researching.has(t.id);
-      let btn = '';
-      if (inProgress) {
-        const r = (c.research||[]).find(x => x.tech_id === t.id);
-        const pct = Math.min(100, Math.floor((r.progress||0)/(t.cost||100)*100));
-        btn = `<span class="tag" style="background:#5865f2">研究中 ${pct}%</span>`;
-      } else if (done) {
-        btn = `<span class="tag" style="background:#3ba55d">已完成</span>`;
-      } else if (!prereqMet) {
-        btn = `<span class="tag" style="background:#3a3c43">需先研究${t.prereq}</span>`;
-      } else if (slotsFull) {
-        btn = `<span class="tag" style="background:#3a3c43">研究槽已滿</span>`;
-      } else {
-        btn = `<button class="btn btn-primary" onclick="doResearch('${cat}','${t.id}')" style="font-size:11px;padding:4px 10px">研究</button>`;
+      const done = researched.has(t.id);
+      const inProg = (c.research||[]).some(r => r.id === t.id && r.progress < 100);
+      const locked = t.prereq && !researched.has(t.prereq);
+      let cls = done ? 'color:var(--green)' : inProg ? 'color:var(--gold)' : locked ? 'color:var(--text-dim)' : 'color:var(--text)';
+      html += `<div style="padding:3px 0;font-size:12px;${cls}">${done?'✅':inProg?'⏳':locked?'🔒':'▸'} ${t.name}`;
+      if (inProg) {
+        const r = (c.research||[]).find(r => r.id === t.id);
+        const pct = Math.round((r?.progress||0));
+        html += ` <span style="font-size:10px">${pct}%</span><div class="prog-bar" style="margin-top:2px"><div class="prog-fill" style="width:${pct}%"></div></div>`;
+      } else if (!done && !locked) {
+        html += ` <button class="btn" style="font-size:10px;padding:2px 6px;margin-left:4px" onclick="doResearch('${t.id}')">研究</button>`;
       }
-      html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px">
-        <span>${t.name} <span style="color:#949ba4;font-size:10px">(${t.cost})</span></span>${btn}</div>`;
+      html += '</div>';
     }
     html += '</div>';
   }
-  el.innerHTML = html;
+  document.getElementById('tab-research').innerHTML = html;
 }
 
-async function doResearch(cat, techId) {
-  const r = await api('/api/game/hoi4/research', 'POST', { country_id: myCid, category: cat, tech_id: techId });
+async function doResearch(tid) {
+  const r = await api('/api/game/hoi4/research', 'POST', { country_id: myCid, tech_id: tid });
   if (r.error) { toast(r.error); return; }
-  toast('研究已開始');
+  toast('開始研究');
   await refresh();
 }
 
-function renderBuildTab(c, el) {
-  const costs = {civilian_factory:'民工(100)',military_factory:'軍工(100)',fortification:'工事(80)',infrastructure:'基建(60)'};
-  let html = '<div style="font-size:12px;color:#949ba4;margin-bottom:6px">點選你的省份（地圖上），然後選擇建設類型：</div>';
-  if (!selProv || !(c.provinces_owned||[]).includes(selProv)) {
-    html += '<div style="color:#949ba4;font-size:12px">請先在地圖上點選你的省份</div>';
-  } else {
-    html += `<div style="margin-bottom:8px">已選: <b>${S.provinces[selProv].name}</b></div>`;
-    for (const [type, label] of Object.entries(costs)) {
-      html += `<button class="btn btn-ghost" onclick="doBuild('${type}','${selProv}')" style="width:100%;text-align:left;margin-bottom:3px;padding:6px 10px;font-size:12px">${label}</button>`;
-    }
+function renderBuild() {
+  if (!myCid) return;
+  const c = S.countries[myCid];
+  let html = '<div style="margin-bottom:8px"><b>建設佇列</b></div>';
+  const queue = c.construction_queue||[];
+  for (const item of queue) {
+    const pct = Math.round((item.progress||0) / (item.cost||1) * 100);
+    html += `<div style="margin-bottom:4px"><span>${item.name}</span> <span style="font-size:10px;color:var(--text-muted)">${pct}%</span><div class="prog-bar"><div class="prog-fill" style="width:${pct}%"></div></div></div>`;
   }
-  // Show build queue
-  if (c.construction_queue && c.construction_queue.length > 0) {
-    html += '<div style="margin-top:8px;font-size:12px;font-weight:600">建設序列:</div>';
-    for (const q of c.construction_queue) {
-      const pct = Math.min(100, Math.floor((q.progress||0)/(q.cost||100)*100));
-      const tName = costs[q.type] ? costs[q.type].split('(')[0] : q.type;
-      html += `<div style="font-size:11px;color:#949ba4">${tName} @ ${q.province} — ${pct}%</div>`;
-    }
+  if (!queue.length) html += '<div style="color:var(--text-muted)">無建設中</div>';
+  html += '<div style="margin-top:10px"><b>可建設</b></div>';
+  const opts = [
+    {name:'民用工廠', cost:100, key:'civilian_factory'},
+    {name:'軍用工廠', cost:100, key:'military_factory'},
+    {name:'防禦工事', cost:80, key:'fortification'},
+    {name:'基礎設施', cost:60, key:'infrastructure'},
+  ];
+  for (const o of opts) {
+    html += `<div style="margin-top:4px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px">${o.name} (${o.cost}民工)</span>
+      <button class="btn btn-primary" style="font-size:10px;padding:3px 8px" onclick="doBuild('${o.key}')">建造</button>
+    </div>`;
   }
-  el.innerHTML = html;
+  document.getElementById('tab-build').innerHTML = html;
 }
 
-async function doBuild(type, province) {
-  const r = await api('/api/game/hoi4/build', 'POST', { country_id: myCid, type: type, province: province });
+async function doBuild(key) {
+  const r = await api('/api/game/hoi4/build', 'POST', { country_id: myCid, building: key });
   if (r.error) { toast(r.error); return; }
-  toast('建設已排程');
+  toast('開始建設');
   await refresh();
 }
 
-function renderProduceTab(c, el) {
-  const tpls = c.division_templates || [];
-  let html = '<div style="font-size:12px;color:#949ba4;margin-bottom:6px">選擇模板和軍工數開始生產：</div>';
-  for (const t of tpls) {
-    html += `<div style="background:#1e1f22;border-radius:6px;padding:8px;margin-bottom:6px">`;
-    html += `<div style="font-weight:600;font-size:13px">${t.name} <span style="color:#949ba4;font-size:10px">成本:${t.cost||100}</span></div>`;
-    html += `<div style="font-size:11px;color:#949ba4">攻:${(t.stats||{}).attack||0} 防:${(t.stats||{}).defense||0} HP:${(t.stats||{}).hp||0} 組織:${(t.stats||{}).org||0}</div>`;
-    html += `<div style="display:flex;gap:4px;margin-top:4px">`;
-    for (let f = 1; f <= Math.min(c.military_factories||0, 5); f++) {
-      html += `<button class="btn btn-primary" onclick="doProduce('${t.id}',${f})" style="font-size:11px;padding:3px 8px">${f}軍工</button>`;
-    }
-    html += `</div></div>`;
+function renderProduce() {
+  if (!myCid) return;
+  const c = S.countries[myCid];
+  let html = '<div style="margin-bottom:8px"><b>生產佇列</b></div>';
+  const queue = c.production_queue||[];
+  for (const item of queue) {
+    const pct = Math.round((item.progress||0) / (item.cost||1) * 100);
+    html += `<div style="margin-bottom:4px"><span>${item.template_name||item.name}</span> <span style="font-size:10px;color:var(--text-muted)">${pct}%</span><div class="prog-bar"><div class="prog-fill" style="width:${pct}%"></div></div></div>`;
   }
-  // Show production queue
-  if (c.production_queue && c.production_queue.length > 0) {
-    html += '<div style="margin-top:8px;font-size:12px;font-weight:600">生產序列:</div>';
-    for (const q of c.production_queue) {
-      const pct = Math.min(100, Math.floor((q.progress||0)/(q.cost||100)*100));
-      const tpl = tpls.find(t => t.id === q.template_id);
-      html += `<div style="font-size:11px;color:#949ba4">${tpl?tpl.name:q.template_id} (${q.factories}軍工) — ${pct}%</div>`;
-    }
+  if (!queue.length) html += '<div style="color:var(--text-muted)">無生產中</div>';
+  html += '<div style="margin-top:10px"><b>師團模板</b></div>';
+  for (const t of (c.division_templates||[])) {
+    html += `<div style="margin-top:4px;display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:12px">${t.name} <span style="font-size:10px;color:var(--text-muted)">攻${t.stats?.attack||0} 守${t.stats?.defense||0}</span></span>
+      <button class="btn btn-gold" style="font-size:10px;padding:3px 8px" onclick="doProduce('${t.id}')">生產</button>
+    </div>`;
   }
-  el.innerHTML = html;
+  document.getElementById('tab-produce').innerHTML = html;
 }
 
-async function doProduce(templateId, factories) {
-  const r = await api('/api/game/hoi4/produce', 'POST', { country_id: myCid, template_id: templateId, factories: factories });
+async function doProduce(tid) {
+  const r = await api('/api/game/hoi4/produce', 'POST', { country_id: myCid, template_id: tid });
   if (r.error) { toast(r.error); return; }
-  toast('生產已排程');
+  toast('開始生產');
   await refresh();
 }
 
-function renderDivisionsTab(c, el) {
-  const divs = c.divisions || [];
-  if (divs.length === 0) { el.innerHTML = '<div style="color:#949ba4">沒有部隊。先生產一些吧。</div>'; return; }
-  let html = '';
-  for (const d of divs) {
-    const tpl = (c.division_templates||[]).find(t => t.id === d.template_id);
-    const prov = S.provinces[d.province];
-    const strPct = Math.floor((d.strength||0)*100);
-    const strColor = strPct > 70 ? '#3ba55d' : strPct > 30 ? '#fee75c' : '#ed4245';
-    html += `<div style="background:#1e1f22;border-radius:6px;padding:8px;margin-bottom:4px">
+function renderDiplo() {
+  if (!myCid) return;
+  const c = S.countries[myCid];
+  let html = '<div style="margin-bottom:8px"><b>各國情報</b></div>';
+  for (const [cid, oc] of Object.entries(S.countries||{})) {
+    if (cid === myCid) continue;
+    const atWar = (c.at_war_with||[]).includes(cid);
+    html += `<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="font-weight:600;font-size:13px">${tpl?tpl.name:d.template_id}</span>
-        <span style="font-size:11px;color:#949ba4">@ ${prov?prov.name:d.province}</span>
+        <span style="color:${oc.color};font-weight:600">${oc.name}</span>
+        <span style="font-size:10px;color:var(--text-muted)">${(oc.provinces_owned||[]).length}省 · ${(oc.divisions||[]).length}師</span>
       </div>
       <div style="font-size:11px;margin-top:2px">
-        <span style="color:${strColor}">戰力${strPct}%</span> · 組織${d.org||0}
-        <button class="btn btn-ghost" onclick="selProv='${d.province}';selectDiv('${d.id}')" style="font-size:10px;padding:2px 6px;margin-left:6px">移防</button>
+        ${atWar ? '<span style="color:var(--red)">⚔️ 戰爭中</span>' : `<button class="btn btn-red" style="font-size:10px;padding:2px 6px" onclick="doDeclareWar('${cid}')">宣戰</button>`}
       </div>
     </div>`;
   }
-  el.innerHTML = html;
+  if (Object.keys(S.countries||{}).length <= 1) html += '<div style="color:var(--text-muted)">尚無其他國家</div>';
+  document.getElementById('tab-diplo').innerHTML = html;
 }
 
-function renderTemplatesTab(c, el) {
-  const tpls = c.division_templates || [];
-  const allBn = ['infantry','cavalry','artillery','armor'];
-  const allSup = ['support_artillery','engineer','recon'];
-  let html = '<div style="font-size:12px;color:#949ba4;margin-bottom:6px">現有編制：</div>';
-  for (const t of tpls) {
-    html += `<div style="background:#1e1f22;border-radius:6px;padding:8px;margin-bottom:4px">
-      <b>${t.name}</b> <span style="font-size:10px;color:#949ba4">營:${(t.battalions||[]).join(',')} 支援:${(t.support||[]).join(',')}</span>
+function renderUnits() {
+  if (!myCid) return;
+  const c = S.countries[myCid];
+  let html = '<div style="margin-bottom:8px"><b>師團列表</b></div>';
+  const divs = c.divisions||[];
+  if (!divs.length) { html += '<div style="color:var(--text-muted)">尚無部隊。先在「生產」分頁生產師團。</div>'; }
+  for (const d of divs) {
+    const prov = S.provinces[d.province];
+    const strColor = (d.strength||0) > 0.7 ? 'var(--green)' : (d.strength||0) > 0.3 ? 'var(--gold)' : 'var(--red)';
+    html += `<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
+      <div style="font-weight:600">${d.template_name||'師團'}</div>
+      <div style="font-size:11px;color:var(--text-muted)">駐地: ${prov?.name||'?'} · 戰力: <span style="color:${strColor}">${Math.round((d.strength||0)*100)}%</span></div>
     </div>`;
   }
-  // New template form
-  html += '<div style="margin-top:10px;border-top:1px solid#3a3c43;padding-top:8px"><div style="font-weight:600;font-size:13px;margin-bottom:6px">新建編制</div>';
-  html += '<input id="tpl-name" type="text" placeholder="模板名稱" style="width:100%;margin-bottom:6px"><div style="font-size:11px;color:#949ba4;margin-bottom:4px">營級（勾選）：</div>';
-  for (const b of allBn) {
-    html += `<label style="font-size:12px;margin-right:8px;cursor:pointer"><input type="checkbox" class="tpl-bn" value="${b}" style="width:auto"> ${b}</label>`;
+  html += '<div style="margin-top:10px"><b>編制設計</b></div>';
+  html += '<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">選擇營級和支援連組合新編制</div>';
+  const battalions = ['infantry','cavalry','artillery','armor'];
+  const supports = ['artillery','engineer','recon','anti_air','anti_tank'];
+  html += '<div style="font-size:11px;font-weight:600;margin-bottom:2px">營級</div>';
+  html += '<div id="battalion-checks" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">';
+  for (const b of battalions) {
+    html += `<label style="font-size:10px"><input type="checkbox" value="${b}" style="width:12px;height:12px"> ${b}</label>`;
   }
-  html += '<div style="font-size:11px;color:#949ba4;margin:6px 0 4px">支援連（勾選）：</div>';
-  for (const s of allSup) {
-    html += `<label style="font-size:12px;margin-right:8px;cursor:pointer"><input type="checkbox" class="tpl-sup" value="${s}" style="width:auto"> ${s}</label>`;
+  html += '</div>';
+  html += '<div style="font-size:11px;font-weight:600;margin-bottom:2px">支援連</div>';
+  html += '<div id="support-checks" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">';
+  for (const s of supports) {
+    html += `<label style="font-size:10px"><input type="checkbox" value="${s}" style="width:12px;height:12px"> ${s}</label>`;
   }
-  html += '<br><button class="btn btn-primary" onclick="saveTemplate()" style="margin-top:6px">儲存編制</button></div>';
-  el.innerHTML = html;
+  html += '</div>';
+  html += '<input id="template-name" type="text" placeholder="編制名稱" style="width:100%;padding:4px;background:var(--bg);border:1px solid var(--border-light);border-radius:3px;color:var(--text);font-size:12px;margin-bottom:4px">';
+  html += '<button class="btn btn-gold" style="width:100%" onclick="createTemplate()">建立編制</button>';
+  document.getElementById('tab-units').innerHTML = html;
 }
 
-async function saveTemplate() {
-  const name = document.getElementById('tpl-name').value.trim();
-  if (!name) { toast('請輸入模板名稱'); return; }
-  const battalions = Array.from(document.querySelectorAll('.tpl-bn:checked')).map(c => c.value);
-  const support = Array.from(document.querySelectorAll('.tpl-sup:checked')).map(c => c.value);
-  if (battalions.length === 0) { toast('至少選一個營級'); return; }
-  const r = await api('/api/game/hoi4/division-template', 'POST', {
-    country_id: myCid, template: { name: name, battalions: battalions, support: support }
-  });
+async function createTemplate() {
+  const name = document.getElementById('template-name').value.trim();
+  if (!name) { toast('請輸入編制名稱'); return; }
+  const battalions = [...document.querySelectorAll('#battalion-checks input:checked')].map(c => c.value);
+  const support = [...document.querySelectorAll('#support-checks input:checked')].map(c => c.value);
+  if (!battalions.length) { toast('至少選一個營級'); return; }
+  const r = await api('/api/game/hoi4/division-template', 'POST', { country_id: myCid, name, battalions, support });
   if (r.error) { toast(r.error); return; }
-  toast('編制已儲存');
+  toast('編制已建立');
   await refresh();
 }
 
-// ── Countries list ──
-function renderCountries() {
-  const el = document.getElementById('countries-list');
-  if (!S || !S.countries || Object.keys(S.countries).length === 0) {
-    el.innerHTML = '<div style="color:#949ba4;font-size:13px">還沒有國家。加入遊戲即可建立你的國家！</div>';
+// === LOGIN / JOIN ===
+function renderLoginOrJoin() {
+  document.getElementById('login-overlay').style.display = 'flex';
+  document.getElementById('main').style.display = 'none';
+  document.getElementById('topbar').style.display = 'none';
+  if (pickingStart) {
+    document.getElementById('login-content').innerHTML = `
+      <div style="font-weight:600;font-size:15px;margin-bottom:8px">🗺️ 選擇起始地區</div>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px">在地圖上點一個<b style="color:var(--gold)">亮色</b>的無主省份當起始地。</p>
+      ${pickedProv ? `<div style="background:var(--bg);border-radius:4px;padding:8px;margin-bottom:8px">已選擇：<b>${S.provinces[pickedProv].name}</b></div>` : '<div style="color:var(--text-muted);font-size:12px">還沒選擇...</div>'}
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-gold" onclick="confirmJoin()" ${pickedProv?'':'disabled'} style="flex:1">✅ 在此建國</button>
+        <button class="btn" onclick="cancelPickStart()" style="flex:1">取消</button>
+      </div>
+      <div id="login-msg"></div>
+    `;
+    document.getElementById('login-overlay').style.display = 'none';
+    document.getElementById('main').style.display = 'flex';
+    document.getElementById('topbar').style.display = 'none';
+    renderMap();
     return;
   }
-  el.innerHTML = Object.entries(S.countries).map(([cid, c]) => {
-    const isMe = cid === myCid;
-    const divs = c.divisions||[];
-    const avgStr = divs.length > 0 ? Math.floor(divs.reduce((s,d) => s+(d.strength||0),0)/divs.length*100) : 0;
-    const atWar = c.at_war_with && c.at_war_with.length > 0;
-    return `<div style="background:#1e1f22;border-radius:6px;padding:8px;${isMe?'border:1px solid #5865f2':''}">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="font-weight:600;font-size:13px;color:${c.color}">${c.name}</span>
-        ${isMe ? '<span class="tag" style="background:#5865f2;color:#fff">你</span>' : ''}
-        ${atWar ? '<span class="tag" style="background:#ed4245;color:#fff">⚔️</span>' : ''}
-      </div>
-      <div style="font-size:11px;color:#949ba4;margin-top:2px">
-        領土:${(c.provinces_owned||[]).length} · 師:${divs.length} · 戰力:${avgStr}% · ${atWar ? '戰爭中' : '和平'}
-      </div>
-    </div>`;
-  }).join('');
+  document.getElementById('login-content').innerHTML = `
+    <div style="font-weight:600;font-size:15px;margin-bottom:8px">🚩 加入遊戲</div>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px">從一個省份建國開始，靠擴張或戰爭慢慢長大。</p>
+    <input id="join-name" type="text" placeholder="你的國家名稱" style="margin-bottom:8px" onkeydown="if(event.key==='Enter')startPickLocation()">
+    <button class="btn btn-gold" onclick="startPickLocation()" style="margin-bottom:6px">🗺️ 選地建國</button>
+    <div id="login-msg"></div>
+  `;
 }
 
-// ── War panel ──
-function renderWars() {
-  const el = document.getElementById('war-list');
-  if (!S || !S.wars || Object.keys(S.wars).length === 0) {
-    el.innerHTML = '<div style="color:#949ba4;font-size:13px">目前沒有進行中的戰爭。</div>';
-    return;
-  }
-  el.innerHTML = Object.entries(S.wars).map(([wid, war]) => {
-    const atk = S.countries[war.attacker];
-    const def = S.countries[war.defender];
-    if (!atk || !def) return '';
-    const contested = (war.contested_provinces||[]).map(pid => S.provinces[pid] ? S.provinces[pid].name : pid).join('、') || '無交界';
-    return `<div style="background:#1e1f22;border-radius:6px;padding:8px;margin-bottom:4px">
-      <div>⚔️ <span style="color:${atk.color};font-weight:600">${atk.name}</span> → <span style="color:${def.color};font-weight:600">${def.name}</span></div>
-      <div style="font-size:11px;color:#949ba4">爭議省份: ${contested} · 開戰於 Day ${war.start_tick||0}</div>
-    </div>`;
-  }).join('');
+function startPickLocation() {
+  const name = document.getElementById('join-name').value.trim();
+  if (!name) { document.getElementById('login-msg').textContent = '請輸入國家名稱'; return; }
+  pendingName = name;
+  pickingStart = true;
+  pickedProv = null;
+  document.getElementById('login-overlay').style.display = 'none';
+  document.getElementById('main').style.display = 'flex';
+  renderMap();
+  toast('在地圖上點一個無主省份當起始地');
 }
 
-// ── Log ──
-function renderLog() {
-  const el = document.getElementById('log-list');
-  if (!S || !S.log) { el.innerHTML = ''; return; }
-  el.innerHTML = (S.log||[]).slice(-20).reverse().map(l => `<div>${l}</div>`).join('');
+function cancelPickStart() {
+  pickingStart = false;
+  pickedProv = null;
+  renderLoginOrJoin();
 }
 
-// ── Toast ──
-function toast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.style.display = 'block';
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => { t.style.display = 'none'; }, 3000);
+async function confirmJoin() {
+  if (!pickedProv) return;
+  const r = await api('/api/game/hoi4/join', 'POST', { user_id: me.user_id, name: pendingName, start_province: pickedProv });
+  if (r.error) { document.getElementById('login-msg').textContent = r.error; return; }
+  pickingStart = false;
+  pickedProv = null;
+  toast('建國成功！');
+  await refresh();
 }
 
-// ── Start ──
 init();
 </script>
 </body>
