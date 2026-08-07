@@ -28,6 +28,197 @@ _SUPPORT_TYPES = {
     "smoke":       {"name": "煙幕掩護", "emoji": "💨", "cost": 2, "desc": "施放煙幕掩護我方進攻或撤退"},
     "recon":       {"name": "空中偵查", "emoji": "🔭", "cost": 2, "desc": "偵察敵方陣地佈防與兵力部署"},
 }
+
+# ═════════════════════════════════════════════════════════════════
+# 特殊事件系統 — 52種固定事件（16天災 + 18陣營A + 18陣營B）
+# ═════════════════════════════════════════════════════════════════
+_SPECIAL_EVENTS = {
+    # ── 天災 (global, 16種) ──
+    "dis_storm": {"name": "暴雨", "category": "disaster", "faction": "global", "emoji": "🌧️", "desc": "連日暴雨導致壕溝積水，泥濘難行，補給運輸受阻", "effects": {"a_progress": -3, "b_progress": -3, "a_morale": -5, "b_morale": -5, "a_supplies": -5, "b_supplies": -5}},
+    "dis_quake": {"name": "地震", "category": "disaster", "faction": "global", "emoji": "🌋", "desc": "強烈地震摧毀雙方陣地工事，造成大量傷亡與恐慌", "effects": {"a_progress": -5, "b_progress": -5, "a_morale": -8, "b_morale": -8, "a_supplies": -8, "b_supplies": -8, "a_fort_damage": 1, "b_fort_damage": 1}},
+    "dis_blizzard": {"name": "暴風雪", "category": "disaster", "faction": "global", "emoji": "🌨️", "desc": "暴風雪席捲戰場，能見度為零，補給線中斷，凍傷頻傳", "effects": {"a_progress": -4, "b_progress": -4, "a_morale": -7, "b_morale": -7, "a_supplies": -6, "b_supplies": -6}},
+    "dis_heatwave": {"name": "熱浪", "category": "disaster", "faction": "global", "emoji": "🥵", "desc": "罕見熱浪襲擊前線，水源枯竭，中暑傷兵激增", "effects": {"a_supplies": -8, "b_supplies": -8, "a_morale": -4, "b_morale": -4}},
+    "dis_coldwave": {"name": "寒流", "category": "disaster", "faction": "global", "emoji": "🥶", "desc": "驟降氣溫導致凍瘡蔓延，武器機件卡死，戰力驟降", "effects": {"a_supplies": -6, "b_supplies": -6, "a_morale": -5, "b_morale": -5, "a_progress": -2, "b_progress": -2}},
+    "dis_flood": {"name": "洪水", "category": "disaster", "faction": "global", "emoji": "🌊", "desc": "河水暴漲淹沒壕溝與彈藥庫，雙方被迫撤退至高處", "effects": {"a_progress": -6, "b_progress": -6, "a_supplies": -7, "b_supplies": -7, "a_fort_damage": 1, "b_fort_damage": 1}},
+    "dis_hail": {"name": "冰雹", "category": "disaster", "faction": "global", "emoji": "🧊", "desc": "巨大冰雹砸落陣地，露天人員與裝備嚴重受損", "effects": {"a_morale": -4, "b_morale": -4, "a_supplies": -3, "b_supplies": -3}},
+    "dis_fog": {"name": "濃霧", "category": "disaster", "faction": "global", "emoji": "🌫️", "desc": "濃霧籠罩戰場，能見度不足十米，雙方無法有效進攻", "effects": {"a_progress": -4, "b_progress": -4}},
+    "dis_mudslide": {"name": "泥石流", "category": "disaster", "faction": "global", "emoji": "🏔️", "desc": "山體滑坡掩埋前沿陣地，工事與人員被埋", "effects": {"a_progress": -5, "b_progress": -5, "a_morale": -3, "b_morale": -3, "a_fort_damage": 2, "b_fort_damage": 2}},
+    "dis_typhus": {"name": "斑疹傷寒", "category": "disaster", "faction": "global", "emoji": "🦠", "desc": "蝨媒傳染病在壕溝中蔓延，大量士兵喪失戰鬥力", "effects": {"a_morale": -8, "b_morale": -8, "a_supplies": -4, "b_supplies": -4, "a_progress": -3, "b_progress": -3}},
+    "dis_drought": {"name": "乾旱", "category": "disaster", "faction": "global", "emoji": "🏜️", "desc": "長期乾旱導致飲水短缺，農作物歉收，軍糧供應吃緊", "effects": {"a_supplies": -10, "b_supplies": -10}},
+    "dis_typhoon": {"name": "颱風", "category": "disaster", "faction": "global", "emoji": "🌀", "desc": "颱風登陸摧毀港口與後勤設施，補給線全面癱瘓", "effects": {"a_supplies": -8, "b_supplies": -8, "a_morale": -6, "b_morale": -6, "a_progress": -3, "b_progress": -3}},
+    "dis_frost": {"name": "凍雨", "category": "disaster", "faction": "global", "emoji": "🌧️", "desc": "凍雨覆蓋鐵絲網與步槍，士兵手指凍僵無法扣扳機", "effects": {"a_supplies": -5, "b_supplies": -5, "a_morale": -6, "b_morale": -6}},
+    "dis_locust": {"name": "蝗災", "category": "disaster", "faction": "global", "emoji": "🦗", "desc": "蝗蟲群吞噬後方農田，糧食儲備銳減", "effects": {"a_supplies": -12, "b_supplies": -12, "a_morale": -3, "b_morale": -3}},
+    "dis_thunderstorm": {"name": "雷暴", "category": "disaster", "faction": "global", "emoji": "⛈️", "desc": "雷暴擊中通訊線路與彈藥庫，前線通訊中斷", "effects": {"a_morale": -5, "b_morale": -5, "a_supplies": -4, "b_supplies": -4}},
+    "dis_volcano": {"name": "火山噴發", "category": "disaster", "faction": "global", "emoji": "🌋", "desc": "遠處火山噴發，火山灰遮天蔽日，呼吸道疾病蔓延", "effects": {"a_progress": -4, "b_progress": -4, "a_morale": -6, "b_morale": -6, "a_supplies": -6, "b_supplies": -6}},
+    # ── 陣營A事件 (18種) ──
+    "a_monarch_visit": {"name": "元首親臨前線", "category": "event", "faction": "A", "emoji": "👑", "desc": "國家元首親赴前線視察，士氣大振，士兵鬥志昂揚", "effects": {"a_morale": 12, "a_progress": 2}},
+    "a_parliament_cut": {"name": "議會削減軍費", "category": "event", "faction": "A", "emoji": "📉", "desc": "國內議會通過軍費削減案，前線補給與彈藥供應驟減", "effects": {"a_supplies": -10, "a_supply_points": -3, "a_morale": -5}},
+    "a_revolution": {"name": "革命爆發", "category": "event", "faction": "A", "emoji": "✊", "desc": "後方爆發武裝革命，軍心動搖，部分部隊譁變", "effects": {"a_morale": -15, "a_progress": -6, "a_supplies": -5}},
+    "a_new_weapon": {"name": "新式武器列裝", "category": "event", "faction": "A", "emoji": "🔬", "desc": "新研發的武器裝備到位，突擊部隊戰力大增", "effects": {"a_progress": 8, "a_supplies": -3}},
+    "a_great_general": {"name": "名將臨陣指揮", "category": "event", "faction": "A", "emoji": "🎖️", "desc": "一位傑出將領抵達前線接管指揮，戰術效率顯著提升", "effects": {"a_progress": 6, "a_morale": 5}},
+    "a_mutiny": {"name": "後方兵變", "category": "event", "faction": "A", "emoji": "🤬", "desc": "後方駐軍發生兵變，拒絕開赴前線，士氣受創", "effects": {"a_morale": -10, "a_progress": -4}},
+    "a_supply_raid": {"name": "補給線遭襲", "category": "event", "faction": "A", "emoji": "🚂", "desc": "敵方游擊隊炸毀補給鐵路，前線物資告急", "effects": {"a_supplies": -12, "a_supply_points": -2}},
+    "a_anti_war": {"name": "反戰浪潮", "category": "event", "faction": "A", "emoji": "🕊️", "desc": "國內爆發大規模反戰示威，前線士氣受到波及", "effects": {"a_morale": -8, "a_progress": -2}},
+    "a_ally_aid": {"name": "盟友物資援助", "category": "event", "faction": "A", "emoji": "🤝", "desc": "盟國緊急運來大量軍需物資與彈藥", "effects": {"a_supplies": 10, "a_supply_points": 5, "a_morale": 3}},
+    "a_spy_busted": {"name": "間諜網破獲", "category": "event", "faction": "A", "emoji": "🕵️", "desc": "情報單位破獲敵方間諜網，但軍事機密已部分洩露", "effects": {"a_morale": -4, "a_progress": -3}},
+    "a_great_victory": {"name": "關鍵勝利", "category": "event", "faction": "A", "emoji": "🏆", "desc": "上一場戰役大捷的消息傳來，全軍士氣高漲", "effects": {"a_morale": 10, "a_progress": 4}},
+    "a_factory_strike": {"name": "軍工廠罷工", "category": "event", "faction": "A", "emoji": "🏭", "desc": "後方軍工廠工人罷工，砲彈產量驟降", "effects": {"a_supplies": -8, "a_supply_points": -2}},
+    "a_hero_kia": {"name": "戰爭英雄陣亡", "category": "event", "faction": "A", "emoji": "💀", "desc": "深受愛戴的戰鬥英雄在前線陣亡，軍中士氣暴跌", "effects": {"a_morale": -12, "a_progress": -2}},
+    "a_elite_reinforce": {"name": "精銳師抵達", "category": "event", "faction": "A", "emoji": "🪖", "desc": "從後方調來的精銳預備師抵達前線，戰力大增", "effects": {"a_progress": 7, "a_morale": 4}},
+    "a_famine": {"name": "糧食危機", "category": "event", "faction": "A", "emoji": "🍞", "desc": "後方糧食短缺蔓延至前線，士兵口糧減半", "effects": {"a_supplies": -10, "a_morale": -7}},
+    "a_diplomacy": {"name": "外交突破", "category": "event", "faction": "A", "emoji": "📜", "desc": "成功與中立國簽署貿易協定，獲得額外資源", "effects": {"a_supply_points": 6, "a_supplies": 5}},
+    "a_railway_strike": {"name": "鐵路罷工", "category": "event", "faction": "A", "emoji": "🚉", "desc": "鐵路工人罷工導致軍列停運，前線補給中斷", "effects": {"a_supplies": -9, "a_progress": -3}},
+    "a_recruitment": {"name": "民間募兵熱潮", "category": "event", "faction": "A", "emoji": "📢", "desc": "愛國宣傳激發民間參軍熱潮，新兵源源不絕", "effects": {"a_morale": 6, "a_progress": 3, "a_supplies": -3}},
+    # ── 陣營B事件 (18種) ──
+    "b_monarch_visit": {"name": "元首親臨前線", "category": "event", "faction": "B", "emoji": "👑", "desc": "國家元首親赴前線視察，士氣大振，士兵鬥志昂揚", "effects": {"b_morale": 12, "b_progress": 2}},
+    "b_parliament_cut": {"name": "議會削減軍費", "category": "event", "faction": "B", "emoji": "📉", "desc": "國內議會通過軍費削減案，前線補給與彈藥供應驟減", "effects": {"b_supplies": -10, "b_supply_points": -3, "b_morale": -5}},
+    "b_revolution": {"name": "革命爆發", "category": "event", "faction": "B", "emoji": "✊", "desc": "後方爆發武裝革命，軍心動搖，部分部隊譁變", "effects": {"b_morale": -15, "b_progress": -6, "b_supplies": -5}},
+    "b_new_weapon": {"name": "新式武器列裝", "category": "event", "faction": "B", "emoji": "🔬", "desc": "新研發的武器裝備到位，突擊部隊戰力大增", "effects": {"b_progress": 8, "b_supplies": -3}},
+    "b_great_general": {"name": "名將臨陣指揮", "category": "event", "faction": "B", "emoji": "🎖️", "desc": "一位傑出將領抵達前線接管指揮，戰術效率顯著提升", "effects": {"b_progress": 6, "b_morale": 5}},
+    "b_mutiny": {"name": "後方兵變", "category": "event", "faction": "B", "emoji": "🤬", "desc": "後方駐軍發生兵變，拒絕開赴前線，士氣受創", "effects": {"b_morale": -10, "b_progress": -4}},
+    "b_supply_raid": {"name": "補給線遭襲", "category": "event", "faction": "B", "emoji": "🚂", "desc": "敵方游擊隊炸毀補給鐵路，前線物資告急", "effects": {"b_supplies": -12, "b_supply_points": -2}},
+    "b_anti_war": {"name": "反戰浪潮", "category": "event", "faction": "B", "emoji": "🕊️", "desc": "國內爆發大規模反戰示威，前線士氣受到波及", "effects": {"b_morale": -8, "b_progress": -2}},
+    "b_ally_aid": {"name": "盟友物資援助", "category": "event", "faction": "B", "emoji": "🤝", "desc": "盟國緊急運來大量軍需物資與彈藥", "effects": {"b_supplies": 10, "b_supply_points": 5, "b_morale": 3}},
+    "b_spy_busted": {"name": "間諜網破獲", "category": "event", "faction": "B", "emoji": "🕵️", "desc": "情報單位破獲敵方間諜網，但軍事機密已部分洩露", "effects": {"b_morale": -4, "b_progress": -3}},
+    "b_great_victory": {"name": "關鍵勝利", "category": "event", "faction": "B", "emoji": "🏆", "desc": "上一場戰役大捷的消息傳來，全軍士氣高漲", "effects": {"b_morale": 10, "b_progress": 4}},
+    "b_factory_strike": {"name": "軍工廠罷工", "category": "event", "faction": "B", "emoji": "🏭", "desc": "後方軍工廠工人罷工，砲彈產量驟降", "effects": {"b_supplies": -8, "b_supply_points": -2}},
+    "b_hero_kia": {"name": "戰爭英雄陣亡", "category": "event", "faction": "B", "emoji": "💀", "desc": "深受愛戴的戰鬥英雄在前線陣亡，軍中士氣暴跌", "effects": {"b_morale": -12, "b_progress": -2}},
+    "b_elite_reinforce": {"name": "精銳師抵達", "category": "event", "faction": "B", "emoji": "🪖", "desc": "從後方調來的精銳預備師抵達前線，戰力大增", "effects": {"b_progress": 7, "b_morale": 4}},
+    "b_famine": {"name": "糧食危機", "category": "event", "faction": "B", "emoji": "🍞", "desc": "後方糧食短缺蔓延至前線，士兵口糧減半", "effects": {"b_supplies": -10, "b_morale": -7}},
+    "b_diplomacy": {"name": "外交突破", "category": "event", "faction": "B", "emoji": "📜", "desc": "成功與中立國簽署貿易協定，獲得額外資源", "effects": {"b_supply_points": 6, "b_supplies": 5}},
+    "b_railway_strike": {"name": "鐵路罷工", "category": "event", "faction": "B", "emoji": "🚉", "desc": "鐵路工人罷工導致軍列停運，前線補給中斷", "effects": {"b_supplies": -9, "b_progress": -3}},
+    "b_recruitment": {"name": "民間募兵熱潮", "category": "event", "faction": "B", "emoji": "📢", "desc": "愛國宣傳激發民間參軍熱潮，新兵源源不絕", "effects": {"b_morale": 6, "b_progress": 3, "b_supplies": -3}},
+}
+
+def _apply_special_event(event_id):
+    """套用特殊事件效果到遊戲狀態。回傳 (event_info, changes_text)。"""
+    ev = _SPECIAL_EVENTS.get(event_id)
+    if not ev:
+        return None, "❌ 未知的事件。"
+    s = _cyber_war_state
+    if not s.get("active"):
+        return ev, "❌ 戰局已結束。"
+    fac_a = s.get("factions", {}).get("A", {})
+    fac_b = s.get("factions", {}).get("B", {})
+    effects = ev.get("effects", {})
+    changes = []
+    _short_map = {"progress":"進度","morale":"士氣","supplies":"補給","supply_points":"補給點","fort_damage":"陣地損"}
+    def _apply(fkey, fac, prefix):
+        for eff_key, short_name in [("progress","進度"),("morale","士氣"),("supplies","補給"),("supply_points","補給點")]:
+            d = effects.get(f"{prefix}_{eff_key}", 0)
+            if d:
+                old = fac.get(eff_key, 100 if eff_key != "supply_points" else 0)
+                cap = 100 if eff_key != "supply_points" else 9999
+                fac[eff_key] = max(0, min(cap, old + d))
+                changes.append(f"  {fac.get('flag','')} {fac.get('name','')} {short_name}{'+' if d>0 else ''}{d}")
+        fort_dmg = effects.get(f"{prefix}_fort_damage", 0)
+        if fort_dmg:
+            fort = fac.get("fortifications", {"trench":0,"medical":0,"mg_nest":0,"field_gun":0,"mortar":0})
+            damaged = 0
+            for fk in list(fort.keys()):
+                if fort[fk] > 0 and damaged < fort_dmg:
+                    fort[fk] -= 1
+                    damaged += 1
+                    changes.append(f"  {fac.get('flag','')} {fac.get('name','')} 陣地{fk}受損-1級")
+            fac["fortifications"] = fort
+    if any(effects.get(f"a_{k}") for k in ["progress","morale","supplies","supply_points","fort_damage"]):
+        _apply("A", fac_a, "a")
+    if any(effects.get(f"b_{k}") for k in ["progress","morale","supplies","supply_points","fort_damage"]):
+        _apply("B", fac_b, "b")
+    # 記錄到事件歷史
+    s.setdefault("event_history", []).append({"event_id": event_id, "name": ev["name"], "emoji": ev["emoji"], "turn": s.get("turn", 0), "time": _cw_now_iso()})
+    if len(s.get("event_history", [])) > 20:
+        s["event_history"] = s["event_history"][-20:]
+    save_cyber_war()
+    return ev, "\n".join(changes) if changes else "（無數值影響）"
+
+# ── 特殊事件分類選擇面板 ──
+class _EventCategoryView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="天災(16)", style=discord.ButtonStyle.secondary, emoji="🌧️", custom_id="cw_evt_dis")
+    async def cat_disaster(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="🌧️ **天災事件** — 選擇要投放的天災：", view=_EventSelectView("disaster"))
+
+    @discord.ui.button(label="A方事件(18)", style=discord.ButtonStyle.danger, emoji="🔴", custom_id="cw_evt_a")
+    async def cat_a(self, interaction: discord.Interaction, button: discord.ui.Button):
+        fac_a = _cyber_war_state.get("factions", {}).get("A", {})
+        await interaction.response.edit_message(content=f"{fac_a.get('flag','🔴')} **{fac_a.get('name','A方')}方事件** — 選擇要投放的事件：", view=_EventSelectView("A"))
+
+    @discord.ui.button(label="B方事件(18)", style=discord.ButtonStyle.danger, emoji="🔵", custom_id="cw_evt_b")
+    async def cat_b(self, interaction: discord.Interaction, button: discord.ui.Button):
+        fac_b = _cyber_war_state.get("factions", {}).get("B", {})
+        await interaction.response.edit_message(content=f"{fac_b.get('flag','🔵')} **{fac_b.get('name','B方')}方事件** — 選擇要投放的事件：", view=_EventSelectView("B"))
+
+# ── 特殊事件選擇面板（下拉選單） ──
+class _EventSelectView(discord.ui.View):
+    def __init__(self, filter_key):
+        super().__init__(timeout=300)
+        self.filter_key = filter_key
+        self._select = discord.ui.Select(
+            placeholder="選擇事件...",
+            options=self._build_options(filter_key),
+            min_values=1, max_values=1,
+        )
+        self._select.callback = self._on_select
+        self.add_item(self._select)
+
+    def _build_options(self, filter_key):
+        options = []
+        for eid, ev in _SPECIAL_EVENTS.items():
+            if filter_key == "disaster" and ev["category"] != "disaster":
+                continue
+            if filter_key == "A" and ev.get("faction") != "A":
+                continue
+            if filter_key == "B" and ev.get("faction") != "B":
+                continue
+            effects_str = []
+            eff = ev.get("effects", {})
+            _sm = {"progress":"進度","morale":"士氣","supplies":"補給","supply_points":"補給點","fort_damage":"陣地損"}
+            for k, v in sorted(eff.items()):
+                if v == 0:
+                    continue
+                short = _sm.get(k.replace("a_","").replace("b_",""), k)
+                effects_str.append(f"{short}{'+' if v>0 else ''}{v}")
+            desc = ev["desc"][:80]
+            if effects_str:
+                desc += f" [{', '.join(effects_str[:5])}]"
+            label = f"{ev['emoji']} {ev['name']}"
+            options.append(discord.SelectOption(label=label[:100], value=eid, description=desc[:100]))
+        if not options:
+            options = [discord.SelectOption(label="（無可用事件）", value="_none")]
+        return options[:25]
+
+    async def _on_select(self, interaction: discord.Interaction):
+        event_id = self._select.values[0]
+        if event_id == "_none":
+            await interaction.response.edit_message(content="❌ 無可用事件。", view=None)
+            return
+        ev_info, changes = _apply_special_event(event_id)
+        if not ev_info:
+            await interaction.response.edit_message(content="❌ 事件套用失敗。", view=None)
+            return
+        if "❌" in changes:
+            await interaction.response.edit_message(content=changes, view=None)
+            return
+        # 刷新面板
+        try:
+            await refresh_war_panel()
+        except Exception:
+            pass
+        fac_a = _cyber_war_state.get("factions", {}).get("A", {})
+        fac_b = _cyber_war_state.get("factions", {}).get("B", {})
+        result_text = (
+            f"{'⚠️' if ev_info['category'] == 'disaster' else '📢'} **特殊事件：{ev_info['emoji']} {ev_info['name']}**\n"
+            f"{'━' * 30}\n"
+            f"📋 {ev_info['desc']}\n\n"
+            f"📊 **影響：**\n{changes}\n\n"
+            f"📈 當前戰況：\n"
+            f"  {fac_a.get('flag','')} {fac_a.get('name','')}：進度{fac_a.get('progress',0)}% 士氣{fac_a.get('morale',100)} 補給{fac_a.get('supplies',100)} 點數{fac_a.get('supply_points',0)}\n"
+            f"  {fac_b.get('flag','')} {fac_b.get('name','')}：進度{fac_b.get('progress',0)}% 士氣{fac_b.get('morale',100)} 補給{fac_b.get('supplies',100)} 點數{fac_b.get('supply_points',0)}"
+        )
+        await interaction.response.edit_message(content=result_text, view=None)
 PROGRESS_WIN_THRESHOLD = 100 # 進度達100%即勝利
 MORALE_DEFEAT_THRESHOLD = 0  # 士氣降至0即敗北
 
@@ -114,6 +305,7 @@ _cyber_war_state = {
     "total_deposits": 0,
     "settlement_done": False,
     "turn_summary": "",          # AI 產生的本回合戰報
+    "event_history": [],         # 特殊事件歷史 [{event_id, name, emoji, turn, time}]
 }
 
 _ROLE_NAMES = {"officer": "軍官", "squad_leader": "小隊長", "soldier": "士兵"}
@@ -567,6 +759,16 @@ def _build_war_embed():
         timestamp=discord.utils.utcnow(),
     )
 
+    # 特殊事件歷史
+    evt_history = s.get("event_history", [])
+    if evt_history:
+        recent_evts = evt_history[-5:]
+        evt_lines = []
+        for eh in recent_evts:
+            evt_lines.append(f"{eh.get('emoji','🎲')} {eh.get('name','?')}（第{eh.get('turn',0)}回合）")
+        evt_text = "\n".join(evt_lines)
+        embed.add_field(name="🎲 近期特殊事件", value=evt_text, inline=False)
+
     def _faction_field(key, label):
         f = s["factions"][key]
         defeated = " 💀 已敗" if f.get("defeated") else ""
@@ -986,11 +1188,12 @@ class CyberWarPanelView(discord.ui.View):
         view = _CWTestView()
         await interaction.response.send_message(
             "🧪 **WW1 測試面板**\n"
-            "• **快進一回合** — 為所有未行動玩家隨機生成行動，然後立即結算\n"
+            "• **快進一回合** — 僅依據已下達的指令結算（不隨機生成）\n"
             "• **調整進度差>30%** — 手動設定進度差距以觸發戰爭巨獸部署\n"
             "• **🧪 WW1 AI測試** — 測試AI裁判是否能成功調用，回報結果或錯誤\n"
             "• **查看巨獸狀態** — 查看雙方戰爭巨獸HP與指令\n"
-            "• **立刻部署巨獸** — 直接給弱勢方部署一台巨獸",
+            "• **立刻部署巨獸** — 直接給弱勢方部署一台巨獸\n"
+            "• **🎲 特殊事件** — 投放天災或陣營事件（52種）",
             view=view, ephemeral=True
         )
 
@@ -1400,6 +1603,25 @@ class _CWTestView(discord.ui.View):
                 await interaction.edit_original_response(content=f"❌ 部署失敗：{e}", view=None)
             except Exception:
                 pass
+
+    @discord.ui.button(label="特殊事件", style=discord.ButtonStyle.success, emoji="🎲", custom_id="cw_test_event")
+    async def event_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """投放特殊事件到全局或指定陣營。"""
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        if str(interaction.user.id) != str(BOT_OWNER_ID):
+            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "🎲 **特殊事件投放**\n"
+            "選擇事件類型，再從下拉選單中選擇具體事件：\n"
+            "• 🌧️ **天災** — 影響全局（16種）\n"
+            "• 🔴 **A方事件** — 影響A方（18種）\n"
+            "• 🔵 **B方事件** — 影響B方（18種）\n"
+            f"共 {len(_SPECIAL_EVENTS)} 種固定事件，陣營專屬事件數量平均",
+            view=_EventCategoryView(), ephemeral=True,
+        )
 
 # ── 戰爭巨獸 Modal ──
 class CyberWarBeastModal(discord.ui.Modal):
