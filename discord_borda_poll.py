@@ -7103,18 +7103,18 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
         elif "/v1/" not in chat_url:
             chat_url += "/v1/chat/completions"
 
+    # 改用「描述圖片」而非「當審查員」的框架——
+    # 舊版叫模型扮演「安全審查員」回覆 SAFE/BLOCKED，但很多視覺模型
+    # 不願意扮演這個角色，連無害圖片也拒答，導致 100% 誤擋。
+    # 修正版叫模型「描述你看到的圖片內容」，再從描述文字中偵測色情關鍵字。
+    # — 無害圖片：模型正常描述 → 描述中無色情關鍵字 → 放行
+    # — 色情圖片：模型要嘛描述中帶色情字眼（→擋），要嘛拒絕描述（→擋）
+    # — 不再需要模型「扮演審查員」，避免角色扮演導致的整體拒答問題
     vision_prompt = (
-        "You are an image safety reviewer. Review this generated image ONLY for sexual/pornographic "
-        "content or CSAM.\n"
-        "Reject ONLY if the image contains: sexual/explicit/pornographic content, suggestive sexual "
-        "content, or CSAM.\n"
-        "Do NOT reject for violence, gore, weapons, war/battle scenes, hate symbols, or political "
-        "imagery — those are allowed and out of scope for this review.\n"
-        "Be conservative only about sexual content — if unsure whether sexual content is present, block it. "
-        "For everything else (violence, weapons, etc.), always allow.\n"
-        "If the image is safe, reply exactly: SAFE\n"
-        "If the image is unsafe, reply: BLOCKED: <brief reason in Traditional Chinese>\n"
-        f"\nThe image was generated from this prompt: {prompt[:200]}"
+        "Briefly describe what you see in this image in 1-2 sentences. "
+        "Just describe the visual content factually — objects, people, actions, setting. "
+        "Do not judge or evaluate whether the content is appropriate.\n"
+        f"The image was generated from this prompt: {prompt[:200]}"
     )
 
     payload = {
@@ -7144,8 +7144,13 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
                     err_text = await resp.text()
                     _err_lower = err_text.lower()
                     # HTTP 400/403 + safety/policy/content 字眼 → API 自己判定圖片有問題
+                    # HTTP 400/403 + 任何安全/政策相關字眼 → API 自己判定圖片有問題 → 擋
+                    # （在「描述圖片」框架下，API 層面的安全拒絕幾乎一定是圖片內容問題，
+                    #  因為我們不是叫它審查，只是叫它描述）
                     if resp.status in (400, 403) and any(_w in _err_lower for _w in
-                            ("sexual", "nsfw", "explicit", "pornograph", "csam")):
+                            ("safety", "policy", "content_filter", "content policy",
+                             "inappropriate", "nsfw", "explicit", "sexual",
+                             "pornograph", "csam", "sensitive")):
                         _reason = f"視覺 API 拒絕分析圖片（HTTP {resp.status}，疑似不當內容）"
                         print(f"🎨 T2I 圖片複審：API 內容政策拒絕 (HTTP {resp.status}): {err_text[:150]}")
                         return {"allowed": False, "reason": _reason}
@@ -7161,48 +7166,45 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
                     reply_text = choices[0].get("message", {}).get("content", "").strip()
                 print(f"🎨 T2I 圖片複審結果: {reply_text[:200]}")
 
-                if reply_text.upper().startswith("SAFE"):
-                    # 明確判定安全 — 放行
-                    return {"allowed": True}
-
-                if reply_text.upper().startswith("BLOCKED"):
-                    reason = reply_text[len("BLOCKED"):].lstrip(": ").strip()
-                    if not reason:
-                        reason = "生成的圖片內容不符安全規範"
-                    return {"allowed": False, "reason": reason}
-
-                # ── 視覺模型拒答處理 ──
-                # 問題（2026-08-07 實測發現）：不少視覺模型收到「你是安全審查員，
-                # 判斷這張圖是否違規」這種 meta 任務框架時，會直接整體拒答
-                # （"I'm sorry, I can't provide a response/review for this
-                # prompt/image."），即使提示詞完全無害（"rick roll"、純數字、
-                # 人名）。這種拒答是模型本身不願意扮演「內容審查員」角色，
-                # 跟圖片實際內容無關——舊邏輯把任何帶有 "I CAN'T"/"I'M SORRY"
-                # 字眼的拒答都當成「疑似色情內容」擋掉，導致 100% 的圖都被誤擋。
-                #
-                # 修正：只有當拒答內容明確提到色情/性相關/CSAM 關鍵字時才視為
-                # 「模型自己的安全過濾觸發」而擋圖；其餘任何拒答（包含模型單純
-                # 不想扮演審查員角色、或不支援這種任務框架）一律 fail-OPEN 放行
-                # ——因為根據目前政策（只擋色情，不擋其他），我們無法從一句
-                # 「I can't assist with that」推斷圖片含有色情內容。
+                # ── 描述式審查：檢查模型回覆中是否包含色情關鍵字 ──
                 _reply_upper = reply_text.upper()
-                _sexual_refusal_markers = [
-                    "SEXUAL", "PORNOGRAPH", "NSFW", "EXPLICIT CONTENT",
-                    "NOT SAFE FOR WORK", "NUDITY", "CSAM", "CHILD",
-                    "MINOR", "UNDERAGE",
+                _sexual_keywords = [
+                    "NUDITY", "NUDE", "NAKED", "SEXUAL", "PORNOGRAPH",
+                    "NSFW", "EXPLICIT SEXUAL", "GENITAL", "BREAST",
+                    "INTERCOURSE", "EROTIC", "LEWD", "OBSCENE",
+                    "CSAM", "CHILD PORNOGRAPH", "UNDERAGE", "MINOR IN",
+                    "NOT SAFE FOR WORK",
                 ]
-                _is_sexual_refusal = any(_m in _reply_upper for _m in _sexual_refusal_markers)
+                # 偵測拒答模式（模型的安全過濾觸發）
+                _refusal_markers = [
+                    "I CAN'T", "I CANNOT", "I'M SORRY", "I AM SORRY",
+                    "I'M UNABLE", "I AM UNABLE", "UNABLE TO",
+                    "REFUSE", "I WON'T", "I WILL NOT", "AGAINST MY",
+                    "INAPPROPRIATE", "VIOLATES", "CONTENT POLICY",
+                    "NOT ABLE TO", "CANNOT ASSIST", "CAN'T ASSIST",
+                    "I'M NOT ABLE", "NOT APPROPRIATE",
+                ]
+                _is_refusal = any(_m in _reply_upper for _m in _refusal_markers)
+                _has_sexual_kw = any(_m in _reply_upper for _m in _sexual_keywords)
 
-                if _is_sexual_refusal:
-                    _reason = f"視覺模型拒絕分析（疑似色情/不當內容）：{reply_text[:80]}"
-                    print(f"🎨 T2I 圖片複審：模型拒答且提及色情相關字眼，判定為 BLOCKED: {_reason[:100]}")
+                # 情況1：描述中包含色情關鍵字 → 圖片有色情內容 → 擋
+                if _has_sexual_kw:
+                    _reason = f"圖片描述偵測到色情內容：{reply_text[:100]}"
+                    print(f"🎨 T2I 圖片複審：描述含色情關鍵字，BLOCKED: {_reason[:120]}")
                     return {"allowed": False, "reason": _reason}
 
-                # 空回覆、或拒答但沒提到色情相關字眼 → 視為「模型不願/無法完成這個
-                # 審查任務」而非「圖片有問題」，fail-open 放行，但留下日誌方便排查
-                # 視覺模型是否根本不適合做這個審查工作。
-                print(f"🎨 T2I 圖片複審：模型回覆非 SAFE/BLOCKED 且未提及色情字眼，"
-                      f"視為模型無法完成審查任務（非內容問題），fail-open 放行: {reply_text[:150]}")
+                # 情況2：模型拒絕描述圖片 → 圖片很可能觸發了模型的安全過濾 → 擋
+                # （新框架是「描述圖片」而非「審查圖片」，模型不會因為不想扮演
+                #  審查員而拒絕——如果連單純的描述都拒絕，通常是圖片本身有問題）
+                if _is_refusal or not reply_text:
+                    _reason = "視覺模型拒絕描述圖片（疑似不當內容觸發安全過濾）"
+                    if _is_refusal and reply_text:
+                        _reason = f"視覺模型拒絕描述：{reply_text[:80]}"
+                    print(f"🎨 T2I 圖片複審：模型拒答，fail-closed BLOCKED: {_reason[:100]}")
+                    return {"allowed": False, "reason": _reason}
+
+                # 情況3：模型正常描述了圖片，描述中無色情關鍵字 → 放行
+                print(f"🎨 T2I 圖片複審：描述正常，放行: {reply_text[:150]}")
                 return {"allowed": True}
     except asyncio.TimeoutError:
         print(f"🎨 T2I 圖片複審逾時（{timeout_s+15}s），放行（fail-open）")
