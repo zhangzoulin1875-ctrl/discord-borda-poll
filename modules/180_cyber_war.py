@@ -905,7 +905,7 @@ class CyberWarPanelView(discord.ui.View):
 # ── WW1測試 View ──
 class _CWTestView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)  # 永不超時，避免按鈕卡住
 
     @discord.ui.button(label="快進一回合", style=discord.ButtonStyle.primary, emoji="⏩", custom_id="cw_test_skip")
     async def skip_turn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1007,35 +1007,44 @@ class _CWTestView(discord.ui.View):
         if not s.get("active"):
             await interaction.edit_original_response(content="❌ 戰局已結束。", view=None)
             return
+        try:
+            fac_a = s["factions"]["A"]
+            fac_b = s["factions"]["B"]
+            # 設定 A=60%, B=20%（差距40%），確保觸發巨獸
+            fac_a["progress"] = 60
+            fac_b["progress"] = 20
+            # 立即檢查並部署巨獸——不需要等下一次（可能很慢的）AI回合結算
+            deployed_now = _check_war_beast_deploy()
+            save_cyber_war()
+            try:
+                await refresh_war_panel()
+            except Exception as e:
+                print(f"⚠️ 賽博一戰調整進度時刷新面板失敗：{e}")
 
-        fac_a = s["factions"]["A"]
-        fac_b = s["factions"]["B"]
-        # 設定 A=60%, B=20%（差距40%），確保觸發巨獸
-        fac_a["progress"] = 60
-        fac_b["progress"] = 20
-        # 立即檢查並部署巨獸——不需要等下一次（可能很慢的）AI回合結算
-        deployed_now = _check_war_beast_deploy()
-        save_cyber_war()
-        await refresh_war_panel()
-
-        # 檢查巨獸狀態
-        wb_b = fac_b.get("war_beast")
-        wb_b_destroyed = fac_b.get("war_beast_destroyed", False)
-        msg = (
-            "⚖️ 已調整進度：\n"
-            f"  {fac_a['flag']} {fac_a['name']}：60%\n"
-            f"  {fac_b['flag']} {fac_b['name']}：20%\n"
-            f"  差距：40%（>30%觸發條件）\n\n"
-        )
-        if wb_b and not wb_b.get("destroyed"):
-            beast_name = _WAR_BEASTS.get(wb_b.get("type", ""), {}).get("name", "?")
-            prefix = "🦾 已立即部署：" if deployed_now else "🦾 已有巨獸："
-            msg += f"{prefix}{fac_b['name']} — {beast_name}（HP:{wb_b.get('hp',0)}）"
-        elif wb_b_destroyed:
-            msg += f"💀 {fac_b['name']} 的巨獸已被摧毀，無法再次部署"
-        else:
-            msg += "⚠️ 未觸發部署（可能巨獸已存在或已被摧毀，該局限一台）"
-        await interaction.edit_original_response(content=msg, view=None)
+            # 檢查巨獸狀態
+            wb_b = fac_b.get("war_beast")
+            wb_b_destroyed = fac_b.get("war_beast_destroyed", False)
+            msg = (
+                "⚖️ 已調整進度：\n"
+                f"  {fac_a['flag']} {fac_a['name']}：60%\n"
+                f"  {fac_b['flag']} {fac_b['name']}：20%\n"
+                f"  差距：40%（>30%觸發條件）\n\n"
+            )
+            if wb_b and not wb_b.get("destroyed"):
+                beast_name = _WAR_BEASTS.get(wb_b.get("type", ""), {}).get("name", "?")
+                prefix = "🦾 已立即部署：" if deployed_now else "🦾 已有巨獸："
+                msg += f"{prefix}{fac_b['name']} — {beast_name}（HP:{wb_b.get('hp',0)}）"
+            elif wb_b_destroyed:
+                msg += f"💀 {fac_b['name']} 的巨獸已被摧毀，無法再次部署"
+            else:
+                msg += "⚠️ 未觸發部署（可能巨獸已存在或已被摧毀，該局限一台）"
+            await interaction.edit_original_response(content=msg, view=None)
+        except Exception as e:
+            print(f"⚠️ 賽博一戰調整進度差失敗：{e}")
+            try:
+                await interaction.edit_original_response(content=f"❌ 調整失敗：{e}", view=None)
+            except Exception:
+                pass
 
     @discord.ui.button(label="查看巨獸狀態", style=discord.ButtonStyle.secondary, emoji="🦾", custom_id="cw_test_beast")
     async def beast_status(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1073,59 +1082,68 @@ class _CWTestView(discord.ui.View):
         if s.get("winner"):
             await interaction.edit_original_response(content="❌ 戰局已分出勝負。", view=None)
             return
+        try:
+            fac_a = s["factions"]["A"]
+            fac_b = s["factions"]["B"]
+            a_prog = fac_a.get("progress", 0)
+            b_prog = fac_b.get("progress", 0)
 
-        fac_a = s["factions"]["A"]
-        fac_b = s["factions"]["B"]
-        a_prog = fac_a.get("progress", 0)
-        b_prog = fac_b.get("progress", 0)
+            # 判斷弱勢方
+            if a_prog < b_prog:
+                weaker = "A"
+            elif b_prog < a_prog:
+                weaker = "B"
+            else:
+                weaker = _cw_random.choice(["A", "B"])
 
-        # 判斷弱勢方
-        if a_prog < b_prog:
-            weaker = "A"
-        elif b_prog < a_prog:
-            weaker = "B"
-        else:
-            weaker = _cw_random.choice(["A", "B"])
+            wf = s["factions"][weaker]
+            wb = wf.get("war_beast")
+            wb_destroyed = wf.get("war_beast_destroyed", False)
 
-        wf = s["factions"][weaker]
-        wb = wf.get("war_beast")
-        wb_destroyed = wf.get("war_beast_destroyed", False)
+            if wb and not wb.get("destroyed"):
+                beast_name = _WAR_BEASTS.get(wb.get("type", ""), {}).get("name", "?")
+                await interaction.edit_original_response(
+                    content=f"⚠️ {wf['flag']} {wf['name']} 已有巨獸：{beast_name}（HP:{wb.get('hp',0)}），每方限一台。",
+                    view=None
+                )
+                return
+            if wb_destroyed:
+                await interaction.edit_original_response(
+                    content=f"💀 {wf['flag']} {wf['name']} 的巨獸已被摧毀，無法再次部署。",
+                    view=None
+                )
+                return
 
-        if wb and not wb.get("destroyed"):
-            beast_name = _WAR_BEASTS.get(wb.get("type", ""), {}).get("name", "?")
+            # 直接部署
+            beast_type = _cw_random.choice(list(_WAR_BEASTS.keys()))
+            wf["war_beast"] = {
+                "type": beast_type,
+                "hp": WAR_BEAST_HP,
+                "deployed_turn": s.get("turn", 1),
+                "destroyed": False,
+                "current_order": "",
+                "ordered_by": "",
+            }
+            beast_info = _WAR_BEASTS[beast_type]
+            save_cyber_war()
+            try:
+                await refresh_war_panel()
+            except Exception as e:
+                print(f"⚠️ 賽博一戰部署巨獸時刷新面板失敗：{e}")
+
             await interaction.edit_original_response(
-                content=f"⚠️ {wf['flag']} {wf['name']} 已有巨獸：{beast_name}（HP:{wb.get('hp',0)}），每方限一台。",
+                content=f"🦾 **已立刻部署戰爭巨獸！**\n"
+                        f"  弱勢方：{wf['flag']} {wf['name']}（進度{a_prog if weaker == 'A' else b_prog}% vs 對方{b_prog if weaker == 'A' else a_prog}%）\n"
+                        f"  巨獸：{beast_info['emoji']} {beast_info['name']}（HP:{WAR_BEAST_HP}）\n"
+                        f"  軍官可使用「戰爭巨獸」按鈕下達指令。",
                 view=None
             )
-            return
-        if wb_destroyed:
-            await interaction.edit_original_response(
-                content=f"💀 {wf['flag']} {wf['name']} 的巨獸已被摧毀，無法再次部署。",
-                view=None
-            )
-            return
-
-        # 直接部署
-        beast_type = _cw_random.choice(list(_WAR_BEASTS.keys()))
-        wf["war_beast"] = {
-            "type": beast_type,
-            "hp": WAR_BEAST_HP,
-            "deployed_turn": s.get("turn", 1),
-            "destroyed": False,
-            "current_order": "",
-            "ordered_by": "",
-        }
-        beast_info = _WAR_BEASTS[beast_type]
-        save_cyber_war()
-        await refresh_war_panel()
-
-        await interaction.edit_original_response(
-            content=f"🦾 **已立刻部署戰爭巨獸！**\n"
-                    f"  弱勢方：{wf['flag']} {wf['name']}（進度{a_prog if weaker == 'A' else b_prog}% vs 對方{b_prog if weaker == 'A' else a_prog}%）\n"
-                    f"  巨獸：{beast_info['emoji']} {beast_info['name']}（HP:{WAR_BEAST_HP}）\n"
-                    f"  軍官可使用「戰爭巨獸」按鈕下達指令。",
-            view=None
-        )
+        except Exception as e:
+            print(f"⚠️ 賽博一戰立刻部署巨獸失敗：{e}")
+            try:
+                await interaction.edit_original_response(content=f"❌ 部署失敗：{e}", view=None)
+            except Exception:
+                pass
 
 # ── 戰爭巨獸 Modal ──
 class CyberWarBeastModal(discord.ui.Modal):
