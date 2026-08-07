@@ -726,24 +726,29 @@ class _RoleSwitchView(discord.ui.View):
             emoji = _SPECIALTY_EMOJI.get(spec, "🎖️")
             options.append(discord.SelectOption(label=f"士兵 — {spec}", value=f"soldier:{spec}", emoji=emoji))
 
-        select = discord.ui.Select(
+        self._select = discord.ui.Select(
             placeholder="選擇想切換的身分...",
             options=options,
             min_values=1, max_values=1,
         )
-        select.callback = self._on_select
-        self.add_item(select)
+        self._select.callback = self._on_select
+        self.add_item(self._select)
         self._uid = uid
         self._fkey = fkey
 
     async def _on_select(self, interaction: discord.Interaction):
-        val = interaction.data["select_values"][0]
-        if ":" in val:
-            new_role, specialty = val.split(":", 1)
-        else:
-            new_role, specialty = val, ""
-        ok, msg = _switch_role(self._uid, new_role, specialty)
-        await interaction.response.edit_message(content=msg, view=None)
+        try:
+            val = self._select.values[0]
+            if ":" in val:
+                new_role, specialty = val.split(":", 1)
+            else:
+                new_role, specialty = val, ""
+            ok, msg = _switch_role(self._uid, new_role, specialty)
+            await interaction.response.edit_message(content=msg, view=None)
+        except Exception as e:
+            print(f"⚠️ 賽博一戰換身分失敗：{e}")
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(content=f"❌ 切換失敗：{e}", view=None)
 
 # ── 下注 Modal ──
 class CyberWarBetModal(discord.ui.Modal, title="💰 下注 / 追加 / 撤回"):
