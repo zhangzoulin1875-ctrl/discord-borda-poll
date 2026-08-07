@@ -6888,7 +6888,11 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
     Returns:
       {"allowed": True} — image is safe
       {"allowed": False, "reason": "..."} — image is blocked
-    Fail-open on any error (don't block image delivery if the review model is down).
+    Fail-open ONLY on network/infra errors (timeout, 500, connection issues).
+    Fail-CLOSED on refusal responses — if the vision model refuses to analyze
+    the image or returns an empty/ambiguous response, it likely triggered its
+    own NSFW safety filter, so we BLOCK the image. This is critical: NSFW images
+    cause vision models to refuse, which old code treated as "ambiguous→allow".
     """
     strictness = settings.get("t2i_filter_strictness", "medium").lower()
     if strictness != "strict":
@@ -6986,6 +6990,13 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
             async with sess.post(chat_url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
                     err_text = await resp.text()
+                    _err_lower = err_text.lower()
+                    # HTTP 400/403 + safety/policy/content 字眼 → API 自己判定圖片有問題
+                    if resp.status in (400, 403) and any(_w in _err_lower for _w in
+                            ("safety", "policy", "content_filter", "inappropriate", "nsfw", "explicit")):
+                        _reason = f"視覺 API 拒絕分析圖片（HTTP {resp.status}，疑似不當內容）"
+                        print(f"🎨 T2I 圖片複審：API 內容政策拒絕 (HTTP {resp.status}): {err_text[:150]}")
+                        return {"allowed": False, "reason": _reason}
                     print(f"🎨 T2I 圖片複審 API 失敗 (HTTP {resp.status}): {err_text[:200]}，放行（fail-open）")
                     return {"allowed": True}
                 try:
@@ -6996,17 +7007,47 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
                 choices = data.get("choices", [])
                 if choices:
                     reply_text = choices[0].get("message", {}).get("content", "").strip()
-                print(f"🎨 T2I 圖片複審結果: {reply_text[:100]}")
+                print(f"🎨 T2I 圖片複審結果: {reply_text[:200]}")
+
                 if reply_text.upper().startswith("SAFE"):
+                    # 明確判定安全 — 放行
                     return {"allowed": True}
-                elif reply_text.upper().startswith("BLOCKED"):
+
+                if reply_text.upper().startswith("BLOCKED"):
                     reason = reply_text[len("BLOCKED"):].lstrip(": ").strip()
                     if not reason:
                         reason = "生成的圖片內容不符安全規範"
                     return {"allowed": False, "reason": reason}
-                else:
-                    print(f"🎨 T2I 圖片複審回覆不明確，放行: {reply_text[:100]}")
-                    return {"allowed": True}
+
+                # ── 視覺模型拒答處理 ──
+                # 大多數視覺模型（GPT-4o、Gemini 等）收到 NSFW 圖片時，自己的
+                # 安全過濾會先觸發，回的不是 SAFE/BLOCKED 而是拒答訊息或空字串。
+                # 舊邏輯把這些當「不明確」放行 → 結果最該擋的圖反而最常被放行。
+                # 修正：fail-closed — 只要不是明確 SAFE，就攔截。
+
+                # 偵測常見拒答模式（視覺模型的安全拒答措辭）
+                _reply_upper = reply_text.upper()
+                _refusal_markers = [
+                    "I CAN'T", "I CANNOT", "I'M SORRY", "I AM SORRY",
+                    "I'M UNABLE", "I AM UNABLE", "NOT ABLE TO", "UNABLE TO",
+                    "REFUSE", "INAPPROPRIATE", "VIOLATES", "CONTENT POLICY",
+                    "SAFETY", "NOT SAFE FOR", "NSFW", "EXPLICIT",
+                    "I WON'T", "I WILL NOT", "AGAINST MY",
+                ]
+                _is_refusal = any(_m in _reply_upper for _m in _refusal_markers)
+
+                if not reply_text or _is_refusal:
+                    # 空回覆或拒答 → 視覺模型自己觸發了安全過濾 → 圖片有問題
+                    _reason = "生成的圖片被視覺模型判定為不當內容（模型拒絕分析）"
+                    if _is_refusal and reply_text:
+                        _reason = f"視覺模型拒絕分析（疑似不當內容）：{reply_text[:80]}"
+                    print(f"🎨 T2I 圖片複審：模型拒答/空回覆，判定為 BLOCKED: {_reason[:100]}")
+                    return {"allowed": False, "reason": _reason}
+
+                # 有回覆但不是 SAFE 也不是 BLOCKED 也不是拒答 → 仍 fail-closed
+                _reason = f"視覺模型回覆無法判定為安全：{reply_text[:80]}"
+                print(f"🎨 T2I 圖片複審：回覆不明確，fail-closed 攔截: {reply_text[:100]}")
+                return {"allowed": False, "reason": _reason}
     except asyncio.TimeoutError:
         print(f"🎨 T2I 圖片複審逾時（{timeout_s+15}s），放行（fail-open）")
         return {"allowed": True}
