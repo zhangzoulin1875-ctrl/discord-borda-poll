@@ -3486,7 +3486,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         print(f"⚠️ 非串流回應為空，嘗試串流模式...")
                     except Exception:
                         return status, body  # can't parse, let upstream handle
-                elif status == 400 and any(
+                elif (status == 400 or (status == 503 and "upstream status 400" in body.lower())) and any(
                     k in body and "unsupported parameter" in body.lower()
                     for k in ("reasoning_effort", "thinking", "enable_thinking")
                 ):
