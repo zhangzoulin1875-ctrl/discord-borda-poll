@@ -865,15 +865,21 @@ async def hoi4_page(request):
     return web.Response(text=_read_hoi4_html(), content_type="text/html")
 
 
+_ALLOWED_LOGIN_REDIRECTS = {"/dashboard", "/hoi4"}
+
 async def dashboard_login(request):
     if not OAUTH_CLIENT_ID or not OAUTH_REDIRECT_URI:
         return web.Response(text="OAuth not configured. Set OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI", status=500)
+    next_path = request.query.get("next", "/dashboard")
+    if next_path not in _ALLOWED_LOGIN_REDIRECTS:
+        next_path = "/dashboard"
     url = (
         f"https://discord.com/api/oauth2/authorize"
         f"?client_id={OAUTH_CLIENT_ID}"
         f"&redirect_uri={urllib.parse.quote(OAUTH_REDIRECT_URI)}"
         f"&response_type=code"
         f"&scope=identify%20guilds"
+        f"&state={urllib.parse.quote(next_path)}"
     )
     return web.HTTPFound(url)
 
@@ -908,7 +914,10 @@ async def dashboard_callback(request):
         "access_token": tk,
     }
     signed = _create_signed_cookie(user_data)
-    r = web.HTTPFound("/dashboard")
+    next_path = request.query.get("state", "/dashboard")
+    if next_path not in _ALLOWED_LOGIN_REDIRECTS:
+        next_path = "/dashboard"
+    r = web.HTTPFound(next_path)
     r.set_cookie("session", signed, httponly=True, samesite="Lax", max_age=86400 * 7)
     return r
 
@@ -1042,7 +1051,7 @@ async def api_me(request):
     av = f"https://cdn.discordapp.com/avatars/{user['user_id']}/{user['avatar']}.png" if user.get("avatar") else "https://cdn.discordapp.com/embed/avatars/0.png"
     guilds = await _fetch_guilds(user["access_token"])
     ag = [g for g in guilds if _is_guild_admin(g)]
-    return web.json_response({"username": user["username"], "avatar_url": av, "admin_guild_count": len(ag)})
+    return web.json_response({"user_id": user["user_id"], "username": user["username"], "avatar_url": av, "admin_guild_count": len(ag)})
 
 
 async def api_guilds(request):

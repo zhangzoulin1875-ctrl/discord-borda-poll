@@ -63,18 +63,59 @@ _DEFAULT_DIVISION_TEMPLATES = [
      "support": [], "stats": {"attack": 6,"defense": 4,"hp": 20,"org": 40,"speed": 2}, "cost": 80},
 ]
 
+_MAP_TEMPLATE_FILE = os.path.join(DATA_DIR, "hoi4_map_template.json")
+_map_template_cache = None
+
+def _load_map_template():
+    """讀取寫死的真實地圖模板（不規則多邊形省份 + 鄰接關係），每次開局重置所有權但保留地理形狀。
+    這個檔案是預先用 Voronoi 演算法產生的有機大陸地圖，不是格子地圖，也不需要 scipy/shapely 這種
+    重量級依賴跑在 Render 上——地圖資料已經算好存成靜態 JSON 隨程式碼一起部署。"""
+    global _map_template_cache
+    if _map_template_cache is not None:
+        return _map_template_cache
+    try:
+        with open(_MAP_TEMPLATE_FILE, "r", encoding="utf-8") as f:
+            _map_template_cache = json_module.loads(f.read())
+    except Exception as e:
+        print("HOI4 地圖模板載入失敗，改用備援格子地圖: {}".format(e))
+        _map_template_cache = None
+    return _map_template_cache
+
 def _generate_default_provinces():
+    tpl = _load_map_template()
+    if tpl:
+        provinces = {}
+        resource_types = ["steel","oil","rubber","tungsten","aluminum"]
+        for pid, p in tpl.items():
+            provinces[pid] = {
+                "id": pid, "name": p["name"], "owner": None,
+                "type": p["type"],
+                "victory_points": random.randint(1,5) if random.random() < 0.3 else 0,
+                "fortifications": 0, "infrastructure": 1, "resources": {},
+                "polygon": p["polygon"], "centroid": p["centroid"], "neighbors": list(p["neighbors"]),
+            }
+            if random.random() < 0.4:
+                res = random.choice(resource_types)
+                provinces[pid]["resources"][res] = random.randint(2,8)
+        return provinces
+    # 備援：地圖模板檔案讀取失敗時，退回原本的簡易格子地圖，確保遊戲仍可運作
     provinces = {}
     terrain_types = ["plains","mountains","forest","urban","plains","forest","plains","desert"]
     for i in range(20):
         pid = "p{:02d}".format(i)
         row, col = divmod(i, 5)
+        neighbors = []
+        for dr, dc in ((1,0),(-1,0),(0,1),(0,-1)):
+            nr, nc = row+dr, col+dc
+            if 0 <= nr < 4 and 0 <= nc < 5:
+                neighbors.append("p{:02d}".format(nr*5+nc))
         provinces[pid] = {
             "id": pid, "name": "省份{}".format(i+1), "owner": None,
             "type": terrain_types[i % len(terrain_types)],
             "victory_points": random.randint(1,5) if i % 3 == 0 else 0,
             "fortifications": 0, "infrastructure": 1, "resources": {},
-            "grid_x": col, "grid_y": row,
+            "polygon": [[col*100,row*80],[col*100+100,row*80],[col*100+100,row*80+80],[col*100,row*80+80]],
+            "centroid": [col*100+50, row*80+40], "neighbors": neighbors,
         }
     resource_types = ["steel","oil","rubber","tungsten","aluminum"]
     for pid in provinces:
@@ -193,28 +234,63 @@ def _ensure_game_started():
         hoi4_state["game_active"] = True
         _save_hoi4_state()
 
+def _flood_fill_territory(start_pid, size, owned_filter=None):
+    """從 start_pid 開始沿著 neighbors 圖做 BFS，取得一塊「連在一起」的省份（像真的國土一樣，
+    不是東一塊西一塊）。owned_filter 若給定，只在該集合內擴張（用於割地時只割某國領土）。"""
+    provinces = hoi4_state["provinces"]
+    visited = [start_pid]
+    frontier = [start_pid]
+    while len(visited) < size and frontier:
+        next_frontier = []
+        for pid in frontier:
+            for n in provinces.get(pid, {}).get("neighbors", []):
+                if n in visited:
+                    continue
+                if owned_filter is not None and n not in owned_filter:
+                    continue
+                if owned_filter is None and provinces.get(n, {}).get("owner") is not None:
+                    continue
+                visited.append(n)
+                next_frontier.append(n)
+                if len(visited) >= size:
+                    break
+            if len(visited) >= size:
+                break
+        frontier = next_frontier
+    return visited
+
 def _do_join_country(user_id, name):
     """加入遊戲的共用邏輯（Discord 指令 /hoi4 join 與網頁 API 都呼叫這裡）。
-    沒有人數上限、不用事先報名，隨時可加入。
+    沒有人數上限、不用事先報名，隨時可加入。土地用連通區域分配（像真的國家領土），不是隨機東一塊西一塊。
     回傳 (country_id, error_message)。"""
     uid = str(user_id)
     _ensure_game_started()
     for cid, c in hoi4_state.get("countries", {}).items():
         if c.get("owner") == uid:
             return None, "你已經在遊戲中（{}）。".format(c["name"])
-    free_pids = [pid for pid, p in hoi4_state.get("provinces", {}).items() if p.get("owner") is None]
-    if not free_pids:
+    provinces = hoi4_state["provinces"]
+    free_pids = [pid for pid, p in provinces.items() if p.get("owner") is None]
+    target_size = max(3, len(provinces) // 6)
+    my_pids = []
+    if free_pids:
+        start = random.choice(free_pids)
+        my_pids = _flood_fill_territory(start, min(target_size, len(free_pids)))
+    if not my_pids:
         # 地圖上沒有剩餘的無主省份了：不因此拒絕新玩家加入（沒有人數上限），
-        # 改成從目前領土最大的國家身上割一部分土地給新玩家。
+        # 改成從目前領土最大的國家身上，沿邊界連通地割一塊土地給新玩家。
         if hoi4_state.get("countries"):
             biggest_cid = max(hoi4_state["countries"], key=lambda k: len(hoi4_state["countries"][k].get("provinces_owned", [])))
             biggest = hoi4_state["countries"][biggest_cid]
-            take_n = max(1, len(biggest.get("provinces_owned", [])) // 2)
-            free_pids = list(biggest["provinces_owned"][-take_n:])
-            biggest["provinces_owned"] = biggest["provinces_owned"][:-take_n] or biggest["provinces_owned"]
-        if not free_pids:
+            owned = set(biggest.get("provinces_owned", []))
+            take_n = max(1, len(owned) // 2)
+            if owned:
+                # 從邊界（跟外部相鄰最多的省份）開始割，比較像戰爭割地
+                border_pid = max(owned, key=lambda pid: sum(1 for n in provinces.get(pid, {}).get("neighbors", []) if n not in owned))
+                my_pids = _flood_fill_territory(border_pid, take_n, owned_filter=owned)
+                for pid in my_pids:
+                    biggest["provinces_owned"].remove(pid)
+        if not my_pids:
             return None, "目前沒有可分配的省份，請稍後再試。"
-    my_pids = free_pids[:max(1, len(free_pids)//4)] if len(free_pids) > 4 else free_pids
     colors = ["#fee75c","#eb459e","#3ba55d","#7289da","#f47fff","#ed4245","#5865f2","#faa61a","#95a5a6","#e91e63"]
     n = len(hoi4_state["countries"]) + 1
     new_cid = "c{}".format(n)
@@ -227,6 +303,32 @@ def _do_join_country(user_id, name):
     hoi4_state.setdefault("log", []).append("[{}] {} 加入遊戲，獲得 {} 個省份。".format(_now_gmt8_str(), name, len(my_pids)))
     _save_hoi4_state()
     return new_cid, None
+
+def _do_declare_war(cid, target_id):
+    """宣戰共用邏輯：Discord /hoi4 war 與網頁點擊宣戰按鈕都呼叫這裡。
+    回傳 (contested_province_ids, error_message)。"""
+    c = hoi4_state.get("countries", {}).get(cid)
+    target_c = hoi4_state.get("countries", {}).get(target_id)
+    if not c or not target_c:
+        return None, "國家不存在"
+    if cid == target_id:
+        return None, "不能對自己宣戰"
+    if target_id in c.get("at_war_with", []):
+        return None, "已經在跟 {} 戰爭了。".format(target_c["name"])
+    my_pids = set(c.get("provinces_owned", []))
+    their_pids = set(target_c.get("provinces_owned", []))
+    contested = []
+    for pid in my_pids:
+        prov = hoi4_state["provinces"].get(pid)
+        if prov and any(n in their_pids for n in prov.get("neighbors", [])):
+            contested.append(pid)
+    war_id = "war_{}_{}".format(cid, target_id)
+    hoi4_state["wars"][war_id] = {"attacker": cid, "defender": target_id, "contested_provinces": contested, "start_tick": hoi4_state.get("tick", 0)}
+    c.setdefault("at_war_with", []).append(target_id)
+    target_c.setdefault("at_war_with", []).append(cid)
+    hoi4_state["log"].append("[{}] {} 向 {} 宣戰！".format(_now_gmt8_str(), c["name"], target_c["name"]))
+    _save_hoi4_state()
+    return contested, None
 
 # ════════════════════════════════════════════════════════════════════════════
 # Tick 結算
@@ -832,28 +934,11 @@ class HOI4Group(app_commands.Group):
         if target < 0 or target >= len(other_ids):
             await interaction.response.send_message("無效的目標編號（0~{}）。".format(len(other_ids)-1), ephemeral=True); return
         target_id = other_ids[target]
+        contested, err2 = _do_declare_war(cid, target_id)
+        if err2: await interaction.response.send_message(err2, ephemeral=True); return
         target_c = hoi4_state["countries"][target_id]
-        if target_id in c.get("at_war_with",[]):
-            await interaction.response.send_message("已經在跟 {} 戰爭了。".format(target_c["name"]), ephemeral=True); return
-        my_pids = set(c.get("provinces_owned",[]))
-        their_pids = set(target_c.get("provinces_owned",[]))
-        contested = []
-        for pid in my_pids:
-            prov = hoi4_state["provinces"].get(pid)
-            if prov:
-                px, py = prov["grid_x"], prov["grid_y"]
-                for tpid in their_pids:
-                    tprov = hoi4_state["provinces"].get(tpid)
-                    if tprov and abs(tprov["grid_x"]-px) + abs(tprov["grid_y"]-py) == 1:
-                        contested.append(pid); break
-        war_id = "war_{}_{}".format(cid, target_id)
-        hoi4_state["wars"][war_id] = {"attacker": cid, "defender": target_id, "contested_provinces": contested, "start_tick": hoi4_state.get("tick",0)}
-        c.setdefault("at_war_with",[]).append(target_id)
-        target_c.setdefault("at_war_with",[]).append(cid)
-        hoi4_state["log"].append("[Day {}] {} 向 {} 宣戰！".format(hoi4_state.get("tick",0), c["name"], target_c["name"]))
-        _save_hoi4_state()
         await refresh_hoi4_panel()
-        await interaction.response.send_message("{} 向 {} 宣戰！爭議省份：{}".format(c["name"], target_c["name"], ", ".join(contested) if contested else "無交界"))
+        await interaction.response.send_message("{} 向 {} 宣戰！爭議省份：{}".format(c["name"], target_c["name"], "、".join(hoi4_state["provinces"][p]["name"] for p in contested) if contested else "無交界"))
 
     @app_commands.command(name="status", description="查看你自己的國家詳情")
     async def hoi4_status(self, interaction: discord.Interaction):
@@ -890,10 +975,8 @@ class HOI4Group(app_commands.Group):
         tgt = hoi4_state["provinces"].get(province)
         if not tgt:
             await interaction.response.send_message("找不到省份 {}。".format(province), ephemeral=True); return
-        if cur:
-            dist = abs(cur["grid_x"]-tgt["grid_x"]) + abs(cur["grid_y"]-tgt["grid_y"])
-            if dist != 1:
-                await interaction.response.send_message("{} 不相鄰目前位置（距離 {}）。".format(province, dist), ephemeral=True); return
+        if cur and province not in cur.get("neighbors",[]):
+            await interaction.response.send_message("{} 不相鄰目前位置（{}）。".format(province, cur.get("name",cur.get("id"))), ephemeral=True); return
         if tgt["owner"] and tgt["owner"] != cid and tgt["owner"] not in c.get("at_war_with",[]):
             await interaction.response.send_message("{} 屬於非交戰國，不能移入。".format(province), ephemeral=True); return
         div["province"] = province
@@ -909,6 +992,23 @@ class HOI4Group(app_commands.Group):
 async def api_hoi4_state(request):
     try: return web.json_response(hoi4_state)
     except Exception as e: return web.json_response({"error": str(e)}, status=500)
+
+async def api_hoi4_declare_war(request):
+    """網頁端點擊宣戰：直接傳 country_id + target_id（都是從 state 拿到的，不用打字）。"""
+    try:
+        body = await request.json()
+        cid = body.get("country_id")
+        target_id = body.get("target_id")
+        contested, err = _do_declare_war(cid, target_id)
+        if err:
+            return web.json_response({"error": err}, status=400)
+        try:
+            await refresh_hoi4_panel()
+        except Exception:
+            pass
+        return web.json_response({"ok": True, "contested_provinces": contested})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_join(request):
     """網頁端加入遊戲：不用登入、不用事先報名，沒有人數上限，隨時可加入。"""
@@ -943,23 +1043,30 @@ async def api_hoi4_province(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_move_division(request):
+    """網頁端移防：用 division_id（穩定字串，如 c1_d3）點選部隊，不用記數字編號。
+    仍相容舊版 division_index（純數字位置）以防其他呼叫端還在用。"""
     try:
         body = await request.json()
         cid = body.get("country_id")
+        div_id = body.get("division_id")
         div_idx = body.get("division_index")
         target_province = body.get("province")
         c = hoi4_state.get("countries",{}).get(cid)
         if not c: return web.json_response({"error":"國家不存在"}, status=404)
         divs = c.get("divisions",[])
-        if div_idx is None or div_idx < 0 or div_idx >= len(divs):
-            return web.json_response({"error":"無效的部隊編號"}, status=400)
-        div = divs[div_idx]
+        div = None
+        if div_id:
+            div = next((d for d in divs if d.get("id") == div_id), None)
+            if not div: return web.json_response({"error":"找不到這支部隊"}, status=404)
+        elif div_idx is not None and 0 <= div_idx < len(divs):
+            div = divs[div_idx]
+        else:
+            return web.json_response({"error":"需要 division_id 或 division_index"}, status=400)
         cur = hoi4_state["provinces"].get(div["province"])
         tgt = hoi4_state["provinces"].get(target_province)
         if not tgt: return web.json_response({"error":"目標省份不存在"}, status=400)
-        if cur:
-            dist = abs(cur["grid_x"]-tgt["grid_x"]) + abs(cur["grid_y"]-tgt["grid_y"])
-            if dist != 1: return web.json_response({"error":"不相鄰（距離 {}）".format(dist)}, status=400)
+        if cur and target_province not in cur.get("neighbors",[]):
+            return web.json_response({"error":"「{}」不相鄰「{}」".format(tgt.get("name",target_province), cur.get("name",cur.get("id")))}, status=400)
         div["province"] = target_province
         div["org"] = max(0, div["org"] - 10)
         _save_hoi4_state()
@@ -1085,6 +1192,7 @@ _load_hoi4_state()
 HOI4_API_ROUTES = [
     ("/api/game/hoi4/state", "GET", api_hoi4_state),
     ("/api/game/hoi4/join", "POST", api_hoi4_join),
+    ("/api/game/hoi4/declare-war", "POST", api_hoi4_declare_war),
     ("/api/game/hoi4/provinces/{pid}", "PUT", api_hoi4_province),
     ("/api/game/hoi4/move-division", "POST", api_hoi4_move_division),
     ("/api/game/hoi4/division-template", "POST", api_hoi4_division_template),
