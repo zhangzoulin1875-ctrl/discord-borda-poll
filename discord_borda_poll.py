@@ -221,6 +221,7 @@ async def keep_alive_server():
     app.router.add_post("/api/test-all-functions", api_test_all_functions)
     # Dashboard routes
     app.router.add_get("/dashboard", dashboard_index)
+    app.router.add_get("/hoi4", hoi4_page)
     app.router.add_get("/login", dashboard_login)
     app.router.add_get("/callback", dashboard_callback)
     app.router.add_post("/logout", dashboard_logout)
@@ -747,6 +748,15 @@ def _read_dashboard_html():
         return "<h1>dashboard.html not found</h1>"
 
 
+def _read_hoi4_html():
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hoi4.html")
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>hoi4.html not found</h1>"
+
+
 async def _get_session_user(request):
     cookie = request.cookies.get("session")
     if not cookie:
@@ -849,6 +859,10 @@ async def api_set_siege_settings(request):
 
 async def dashboard_index(request):
     return web.Response(text=_read_dashboard_html(), content_type="text/html")
+
+
+async def hoi4_page(request):
+    return web.Response(text=_read_hoi4_html(), content_type="text/html")
 
 
 async def dashboard_login(request):

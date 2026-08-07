@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HOI4 文字版戰略遊戲</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background:#1e1f22; color:#e3e5e8; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-thumb { background:#4a4d53; border-radius:4px; }
+  .fade-in { animation: fadeIn .25s ease; }
+  @keyframes fadeIn { from{opacity:0} to{opacity:1} }
+</style>
+</head>
+<body class="min-h-screen">
+
+<nav class="bg-[#2b2d31] border-b border-[#1e1f22] px-6 py-4 flex items-center justify-between sticky top-0 z-10">
+  <div class="flex items-center gap-3">
+    <span class="text-xl font-bold">🎮 HOI4 文字版戰略遊戲</span>
+    <span class="text-xs text-gray-400">隨時可加入 · 每 30 分鐘一 tick</span>
+  </div>
+  <div id="nav-status" class="text-sm text-gray-400"></div>
+</nav>
+
+<div class="max-w-6xl mx-auto p-6 space-y-6 fade-in">
+
+  <!-- 加入遊戲 -->
+  <div id="join-panel" class="bg-[#2b2d31] rounded-xl p-5">
+    <h3 class="font-semibold mb-3">🚩 加入遊戲</h3>
+    <p class="text-xs text-gray-400 mb-3">不用報名、沒有人數上限 — 輸入你的 Discord 使用者 ID 和想要的國家名稱即可隨時加入。</p>
+    <div class="grid grid-cols-3 gap-3">
+      <input id="join-uid" type="text" class="bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="你的 Discord ID">
+      <input id="join-name" type="text" class="bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="國家名稱">
+      <button onclick="hoi4Join()" class="px-4 py-2 rounded-lg text-sm font-semibold bg-[#5865f2] hover:bg-[#4752c4] transition">加入遊戲</button>
+    </div>
+    <div id="join-result" class="mt-2 text-sm text-gray-300"></div>
+  </div>
+
+  <!-- 控制列 -->
+  <div class="grid grid-cols-3 gap-3">
+    <button onclick="hoi4Refresh()" class="px-3 py-3 rounded-lg text-sm font-semibold bg-[#5865f2] hover:bg-[#4752c4] transition">🔄 刷新</button>
+    <button onclick="hoi4ShowMap()" class="px-3 py-3 rounded-lg text-sm font-semibold bg-[#3ba55d] hover:bg-[#2d7d46] transition">🗺️ 地圖</button>
+    <button onclick="hoi4ShowDesigner()" class="px-3 py-3 rounded-lg text-sm font-semibold bg-[#fee75c] hover:bg-[#d4c043] text-black transition">🔧 師級編制</button>
+  </div>
+
+  <div id="hoi4-status-bar" class="grid grid-cols-4 gap-3 text-sm"></div>
+
+  <!-- 地圖 -->
+  <div id="hoi4-map-view" class="hidden bg-[#2b2d31] rounded-xl p-5">
+    <h4 class="text-sm font-semibold mb-2">戰略地圖（點省份查看/移防）</h4>
+    <svg id="hoi4-map-svg" viewBox="0 0 500 400" class="w-full bg-[#1e1f22] rounded-lg"></svg>
+    <div id="hoi4-province-info" class="mt-3 text-sm text-gray-300"></div>
+  </div>
+
+  <!-- 師級編制設計器 -->
+  <div id="hoi4-designer-view" class="hidden bg-[#2b2d31] rounded-xl p-5">
+    <h4 class="text-sm font-semibold mb-3">師級編制設計器</h4>
+    <div class="grid grid-cols-2 gap-4">
+      <div><label class="text-xs text-gray-400 block mb-1">模板名稱</label><input id="hoi4-tpl-name" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="步兵師"></div>
+      <div><label class="text-xs text-gray-400 block mb-1">國家 ID</label><input id="hoi4-tpl-country" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="c1"></div>
+    </div>
+    <div class="mt-3"><label class="text-xs text-gray-400 block mb-1">營級編制（逗號分隔：infantry,artillery,armor）</label><input id="hoi4-tpl-battalions" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="infantry,infantry,artillery"></div>
+    <div class="mt-3"><label class="text-xs text-gray-400 block mb-1">支援連（逗號分隔：engineer,recon）</label><input id="hoi4-tpl-support" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="engineer,recon"></div>
+    <button onclick="hoi4SaveTemplate()" class="mt-3 px-4 py-2 rounded-lg text-sm font-semibold bg-[#5865f2] hover:bg-[#4752c4] transition">💾 儲存模板</button>
+    <div id="hoi4-tpl-result" class="mt-2 text-sm text-gray-300"></div>
+  </div>
+
+  <!-- 國家列表 -->
+  <div class="bg-[#2b2d31] rounded-xl p-5">
+    <h4 class="text-sm font-semibold mb-3">🌍 國家狀態</h4>
+    <div id="hoi4-countries-list" class="space-y-3"></div>
+  </div>
+
+  <!-- 日誌 -->
+  <div class="bg-[#2b2d31] rounded-xl p-5">
+    <h4 class="text-sm font-semibold mb-2">📜 戰報日誌</h4>
+    <div id="hoi4-log" class="text-xs text-gray-400 max-h-48 overflow-y-auto space-y-1"></div>
+  </div>
+
+</div>
+
+<script>
+async function api(path, method, body) {
+  try {
+    const opts = { method: method || 'GET', headers: {'Content-Type':'application/json'} };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: data.error || ('HTTP ' + res.status) };
+    return data;
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+let hoi4State = null;
+let hoi4SelectedProvince = null;
+
+async function hoi4Join() {
+  const uid = document.getElementById('join-uid').value.trim();
+  const name = document.getElementById('join-name').value.trim();
+  if (!uid || !name) { document.getElementById('join-result').textContent = '請填寫 ID 和國家名稱'; return; }
+  const r = await api('/api/game/hoi4/join', 'POST', { user_id: uid, name: name });
+  if (r.error) { document.getElementById('join-result').textContent = '錯誤: ' + r.error; return; }
+  document.getElementById('join-result').textContent = '已加入！你的國家 ID: ' + r.country_id;
+  hoi4Refresh();
+}
+
+async function hoi4Refresh() {
+  const s = await api('/api/game/hoi4/state');
+  if (s.error) { document.getElementById('nav-status').textContent = '載入失敗: ' + s.error; return; }
+  hoi4State = s;
+  document.getElementById('nav-status').textContent = s.game_active ? ('Day ' + s.tick + ' 進行中') : '尚未開始（加入即自動開始）';
+  hoi4RenderStatusBar();
+  hoi4RenderCountries();
+  hoi4RenderLog();
+  if (!document.getElementById('hoi4-map-view').classList.contains('hidden')) hoi4RenderMap();
+}
+
+function hoi4RenderStatusBar() {
+  const bar = document.getElementById('hoi4-status-bar');
+  if (!hoi4State) { bar.innerHTML = ''; return; }
+  bar.innerHTML = '<div class="bg-[#2b2d31] rounded-lg p-3 text-center"><div class="text-gray-400 text-xs">Day</div><div class="text-lg font-bold">' + (hoi4State.tick||0) + '</div></div>' +
+    '<div class="bg-[#2b2d31] rounded-lg p-3 text-center"><div class="text-gray-400 text-xs">國家數</div><div class="text-lg font-bold">' + Object.keys(hoi4State.countries||{}).length + '</div></div>' +
+    '<div class="bg-[#2b2d31] rounded-lg p-3 text-center"><div class="text-gray-400 text-xs">省份數</div><div class="text-lg font-bold">' + Object.keys(hoi4State.provinces||{}).length + '</div></div>' +
+    '<div class="bg-[#2b2d31] rounded-lg p-3 text-center"><div class="text-gray-400 text-xs">戰爭</div><div class="text-lg font-bold">' + Object.keys(hoi4State.wars||{}).length + '</div></div>';
+}
+
+function hoi4RenderCountries() {
+  const container = document.getElementById('hoi4-countries-list');
+  if (!hoi4State || !hoi4State.countries || Object.keys(hoi4State.countries).length === 0) {
+    container.innerHTML = '<div class="text-gray-400 text-sm">還沒有國家，加入遊戲即可建立你的國家。</div>';
+    return;
+  }
+  let html = '';
+  for (const [cid, c] of Object.entries(hoi4State.countries)) {
+    const divs = c.divisions || [];
+    const avgStr = divs.length > 0 ? (divs.reduce((s,d) => s + d.strength, 0) / divs.length * 100).toFixed(0) : 0;
+    let focusHtml = '無';
+    if (c.current_focus) {
+      const f = (hoi4State.focus_tree || []).find(x => x.id === c.current_focus);
+      const pct = f ? Math.min(100, Math.floor(c.focus_progress / f.cost * 100)) : 0;
+      focusHtml = (f ? f.name : c.current_focus) + ' (' + pct + '%)';
+    }
+    const warHtml = c.at_war_with && c.at_war_with.length > 0 ? '戰爭中: ' + c.at_war_with.map(w => (hoi4State.countries[w]||{}).name || w).join(', ') : '和平';
+    html += '<div class="bg-[#1e1f22] rounded-lg p-3">' +
+      '<div class="flex justify-between items-center mb-2"><span class="font-semibold" style="color:' + (c.color||'#fff') + '">' + c.name + '（' + cid + '）</span><span class="text-xs text-gray-400">' + warHtml + '</span></div>' +
+      '<div class="grid grid-cols-4 gap-2 text-xs"><div>PP: ' + Math.floor(c.political_power||0) + '</div><div>穩定: ' + Math.floor((c.stability||0)*100) + '%</div><div>民工: ' + (c.civilian_factories||0) + '</div><div>軍工: ' + (c.military_factories||0) + '</div>' +
+      '<div>兵員: ' + (c.manpower||0) + '</div><div>師數: ' + divs.length + '</div><div>戰力: ' + avgStr + '%</div><div>領土: ' + (c.provinces_owned||[]).length + '</div></div>' +
+      '<div class="text-xs text-gray-400 mt-1">國策: ' + focusHtml + '</div>' +
+      '<div class="text-xs text-gray-400 mt-1">研究槽: ' + (c.research||[]).length + '/' + (c.research_slots||1) + '</div></div>';
+  }
+  container.innerHTML = html;
+}
+
+function hoi4RenderLog() {
+  const el = document.getElementById('hoi4-log');
+  if (!hoi4State || !hoi4State.log) { el.innerHTML = ''; return; }
+  el.innerHTML = hoi4State.log.slice(-15).reverse().map(l => '<div>' + l + '</div>').join('');
+}
+
+function hoi4ShowMap() {
+  document.getElementById('hoi4-designer-view').classList.add('hidden');
+  document.getElementById('hoi4-map-view').classList.toggle('hidden');
+  if (!document.getElementById('hoi4-map-view').classList.contains('hidden')) hoi4RenderMap();
+}
+
+function hoi4ShowDesigner() {
+  document.getElementById('hoi4-map-view').classList.add('hidden');
+  document.getElementById('hoi4-designer-view').classList.toggle('hidden');
+}
+
+function hoi4RenderMap() {
+  if (!hoi4State || !hoi4State.provinces) return;
+  const svg = document.getElementById('hoi4-map-svg');
+  const cellW = 100, cellH = 80;
+  let html = '';
+  for (const [pid, p] of Object.entries(hoi4State.provinces)) {
+    const x = p.grid_x * cellW, y = p.grid_y * cellH;
+    const owner = hoi4State.countries[p.owner];
+    const color = owner ? owner.color : '#3a3c43';
+    const terrainColors = { plains: '#86b04a', mountains: '#8a6d3b', forest: '#2d6a4f', urban: '#6c757d', desert: '#d4a05e' };
+    const bgColor = terrainColors[p.type] || '#3a3c43';
+    html += '<rect x="' + (x+2) + '" y="' + (y+2) + '" width="' + (cellW-4) + '" height="' + (cellH-4) + '" fill="' + bgColor + '" fill-opacity="0.3" stroke="' + color + '" stroke-width="3" rx="4" onclick="hoi4ClickProvince(\'' + pid + '\')" style="cursor:pointer"/>';
+    html += '<text x="' + (x+cellW/2) + '" y="' + (y+20) + '" text-anchor="middle" fill="#fff" font-size="10" font-weight="bold">' + pid + '</text>';
+    html += '<text x="' + (x+cellW/2) + '" y="' + (y+35) + '" text-anchor="middle" fill="#ccc" font-size="8">' + (p.type||'') + '</text>';
+    if (p.victory_points > 0) html += '<text x="' + (x+cellW-10) + '" y="' + (y+15) + '" text-anchor="end" fill="#ffd700" font-size="10">VP</text>';
+    if (owner) html += '<text x="' + (x+10) + '" y="' + (y+cellH-8) + '" fill="' + color + '" font-size="8">' + owner.name.substring(0,4) + '</text>';
+    if (p.fortifications > 0) html += '<text x="' + (x+cellW/2) + '" y="' + (y+cellH-8) + '" text-anchor="middle" fill="#ff6b6b" font-size="8">要塞 x' + p.fortifications + '</text>';
+  }
+  if (hoi4State.countries) {
+    for (const [cid, c] of Object.entries(hoi4State.countries)) {
+      for (const d of (c.divisions||[])) {
+        const p = hoi4State.provinces[d.province];
+        if (!p) continue;
+        const x = p.grid_x * cellW, y = p.grid_y * cellH;
+        const str = Math.floor(d.strength * 100);
+        html += '<circle cx="' + (x+cellW/2) + '" cy="' + (y+cellH/2+5) + '" r="8" fill="' + c.color + '" stroke="#fff" stroke-width="1" opacity="0.8"/>';
+        html += '<text x="' + (x+cellW/2) + '" y="' + (y+cellH/2+8) + '" text-anchor="middle" fill="#fff" font-size="7">' + str + '</text>';
+      }
+    }
+  }
+  svg.innerHTML = html;
+}
+
+function hoi4ClickProvince(pid) {
+  hoi4SelectedProvince = pid;
+  const p = hoi4State.provinces[pid];
+  const owner = hoi4State.countries[p.owner];
+  let info = '<b>' + pid + ' - ' + p.name + '</b><br>地形: ' + p.type + ' | VP: ' + p.victory_points + ' | 要塞: ' + p.fortifications + ' | 基建: ' + p.infrastructure;
+  if (owner) info += '<br>所有者: ' + owner.name;
+  if (p.resources && Object.keys(p.resources).length > 0) info += '<br>資源: ' + Object.entries(p.resources).map(([k,v]) => k+':'+v).join(', ');
+  let divs = [];
+  if (hoi4State.countries) {
+    for (const [cid, c] of Object.entries(hoi4State.countries)) {
+      for (const d of (c.divisions||[])) {
+        if (d.province === pid) divs.push({ country: c.name, color: c.color, div: d, cid: cid, idx: c.divisions.indexOf(d) });
+      }
+    }
+  }
+  if (divs.length > 0) {
+    info += '<br>駐軍: ' + divs.map(d => '<br>  ' + d.country + ' - 戰力' + Math.floor(d.div.strength*100) + '% 組織度' + d.div.org).join('');
+    info += '<br><button onclick="hoi4ShowMoveForm(\'' + pid + '\')" class="mt-1 px-2 py-1 text-xs rounded bg-[#5865f2]">移動部隊</button>';
+  }
+  document.getElementById('hoi4-province-info').innerHTML = info;
+}
+
+function hoi4ShowMoveForm(pid) {
+  const p = hoi4State.provinces[pid];
+  let neighbors = [];
+  for (const [npid, np] of Object.entries(hoi4State.provinces)) {
+    if (npid !== pid && Math.abs(np.grid_x - p.grid_x) + Math.abs(np.grid_y - p.grid_y) === 1) neighbors.push(npid);
+  }
+  let info = '<b>移動部隊 from ' + pid + '</b><br>相鄰: ' + neighbors.join(', ');
+  info += '<br>部隊: <select id="hoi4-move-div" class="bg-[#1e1f22] text-white rounded px-2 py-1 text-xs">';
+  if (hoi4State.countries) {
+    for (const [cid, c] of Object.entries(hoi4State.countries)) {
+      for (let i = 0; i < (c.divisions||[]).length; i++) {
+        const d = c.divisions[i];
+        if (d.province === pid) info += '<option value="' + cid + ':' + i + '">' + c.name + ' #' + i + ' (戰力' + Math.floor(d.strength*100) + '%)</option>';
+      }
+    }
+  }
+  info += '</select><br>目標: <select id="hoi4-move-target" class="bg-[#1e1f22] text-white rounded px-2 py-1 text-xs">';
+  for (const npid of neighbors) info += '<option value="' + npid + '">' + npid + '</option>';
+  info += '</select><br><button onclick="hoi4ExecuteMove()" class="mt-1 px-2 py-1 text-xs rounded bg-[#5865f2]">確認移動</button>';
+  document.getElementById('hoi4-province-info').innerHTML = info;
+}
+
+async function hoi4ExecuteMove() {
+  const divSel = document.getElementById('hoi4-move-div').value.split(':');
+  const cid = divSel[0], idx = parseInt(divSel[1]);
+  const target = document.getElementById('hoi4-move-target').value;
+  const r = await api('/api/game/hoi4/move-division', 'POST', { country_id: cid, division_index: idx, province: target });
+  if (r.error) { document.getElementById('hoi4-province-info').innerHTML = '錯誤: ' + r.error; return; }
+  document.getElementById('hoi4-province-info').innerHTML = '部隊已移動到 ' + target + ' (組織度 -10)';
+  hoi4Refresh();
+}
+
+async function hoi4SaveTemplate() {
+  const name = document.getElementById('hoi4-tpl-name').value;
+  const cid = document.getElementById('hoi4-tpl-country').value;
+  const battalions = document.getElementById('hoi4-tpl-battalions').value.split(',').map(s => s.trim()).filter(Boolean);
+  const support = document.getElementById('hoi4-tpl-support').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!name || !cid) { document.getElementById('hoi4-tpl-result').textContent = '請填寫名稱和國家 ID'; return; }
+  const r = await api('/api/game/hoi4/division-template', 'POST', { country_id: cid, template: { name, battalions, support } });
+  if (r.error) { document.getElementById('hoi4-tpl-result').textContent = '錯誤: ' + r.error; return; }
+  const stats = r.template.stats;
+  document.getElementById('hoi4-tpl-result').innerHTML = '模板已儲存! 攻:' + (stats.attack||0) + ' 防:' + (stats.defense||0) + ' HP:' + (stats.hp||0) + ' 組織度:' + (stats.org||0) + ' 花費:' + r.template.cost;
+}
+
+setInterval(() => { hoi4Refresh(); }, 10000);
+hoi4Refresh();
+</script>
+</body>
+</html>

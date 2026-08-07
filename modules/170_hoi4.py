@@ -186,6 +186,48 @@ def _init_game(players):
     }
     _save_hoi4_state()
 
+def _ensure_game_started():
+    """遊戲不需要事先報名——只要有人第一次加入，世界就自動開局。"""
+    if not hoi4_state.get("game_active"):
+        _init_game([])
+        hoi4_state["game_active"] = True
+        _save_hoi4_state()
+
+def _do_join_country(user_id, name):
+    """加入遊戲的共用邏輯（Discord 指令 /hoi4 join 與網頁 API 都呼叫這裡）。
+    沒有人數上限、不用事先報名，隨時可加入。
+    回傳 (country_id, error_message)。"""
+    uid = str(user_id)
+    _ensure_game_started()
+    for cid, c in hoi4_state.get("countries", {}).items():
+        if c.get("owner") == uid:
+            return None, "你已經在遊戲中（{}）。".format(c["name"])
+    free_pids = [pid for pid, p in hoi4_state.get("provinces", {}).items() if p.get("owner") is None]
+    if not free_pids:
+        # 地圖上沒有剩餘的無主省份了：不因此拒絕新玩家加入（沒有人數上限），
+        # 改成從目前領土最大的國家身上割一部分土地給新玩家。
+        if hoi4_state.get("countries"):
+            biggest_cid = max(hoi4_state["countries"], key=lambda k: len(hoi4_state["countries"][k].get("provinces_owned", [])))
+            biggest = hoi4_state["countries"][biggest_cid]
+            take_n = max(1, len(biggest.get("provinces_owned", [])) // 2)
+            free_pids = list(biggest["provinces_owned"][-take_n:])
+            biggest["provinces_owned"] = biggest["provinces_owned"][:-take_n] or biggest["provinces_owned"]
+        if not free_pids:
+            return None, "目前沒有可分配的省份，請稍後再試。"
+    my_pids = free_pids[:max(1, len(free_pids)//4)] if len(free_pids) > 4 else free_pids
+    colors = ["#fee75c","#eb459e","#3ba55d","#7289da","#f47fff","#ed4245","#5865f2","#faa61a","#95a5a6","#e91e63"]
+    n = len(hoi4_state["countries"]) + 1
+    new_cid = "c{}".format(n)
+    while new_cid in hoi4_state["countries"]:
+        n += 1
+        new_cid = "c{}".format(n)
+    hoi4_state["countries"][new_cid] = _create_country(name, uid, random.choice(colors), my_pids)
+    for pid in my_pids:
+        hoi4_state["provinces"][pid]["owner"] = new_cid
+    hoi4_state.setdefault("log", []).append("[{}] {} 加入遊戲，獲得 {} 個省份。".format(_now_gmt8_str(), name, len(my_pids)))
+    _save_hoi4_state()
+    return new_cid, None
+
 # ════════════════════════════════════════════════════════════════════════════
 # Tick 結算
 # ════════════════════════════════════════════════════════════════════════════
@@ -662,40 +704,25 @@ class HOI4Group(app_commands.Group):
     def __init__(self):
         super().__init__(name="hoi4", description="鋼鐵雄心4 文字版遊戲")
 
-    @app_commands.command(name="start", description="開始一局新遊戲（機器人擁有者限定）")
-    @app_commands.describe(player2="第二位玩家", player3="第三位玩家")
-    async def hoi4_start(self, interaction: discord.Interaction, player2: discord.Member = None, player3: discord.Member = None):
+    @app_commands.command(name="start", description="重置整個遊戲世界（機器人擁有者限定，清空後任何人都能重新加入）")
+    async def hoi4_start(self, interaction: discord.Interaction):
         if not is_owner(interaction):
             await interaction.response.send_message("此指令僅限機器人擁有者使用。", ephemeral=True); return
-        if hoi4_state.get("game_active"):
-            await interaction.response.send_message("遊戲已在進行中，請先用 /hoi4 end 結束。", ephemeral=True); return
-        players = [{"name": interaction.user.display_name + "的國家", "owner": interaction.user.id, "color": "#5865f2"}]
-        if player2: players.append({"name": player2.display_name + "的國家", "owner": player2.id, "color": "#ed4245"})
-        if player3: players.append({"name": player3.display_name + "的國家", "owner": player3.id, "color": "#57f287"})
-        _init_game(players)
-        await refresh_hoi4_panel()
-        await interaction.response.send_message("遊戲已開始！參戰國家：{}\n每 30 分鐘一個 tick。".format(", ".join(p["name"] for p in players)))
-
-    @app_commands.command(name="join", description="加入現有遊戲")
-    @app_commands.describe(name="你的國家名稱")
-    async def hoi4_join(self, interaction: discord.Interaction, name: str):
-        if not hoi4_state.get("game_active"):
-            await interaction.response.send_message("遊戲尚未開始。", ephemeral=True); return
-        uid = str(interaction.user.id)
-        for cid, c in hoi4_state.get("countries",{}).items():
-            if c.get("owner") == uid:
-                await interaction.response.send_message("你已經在遊戲中（{}）。".format(c["name"]), ephemeral=True); return
-        free_pids = [pid for pid, p in hoi4_state.get("provinces",{}).items() if p.get("owner") is None]
-        if not free_pids:
-            await interaction.response.send_message("沒有可分配的省份了。", ephemeral=True); return
-        my_pids = free_pids[:max(1, len(free_pids)//4)]
-        colors = ["#fee75c","#eb459e","#3ba55d","#7289da","#f47fff"]
-        new_cid = "c{}".format(len(hoi4_state["countries"])+1)
-        hoi4_state["countries"][new_cid] = _create_country(name, uid, random.choice(colors), my_pids)
-        for pid in my_pids: hoi4_state["provinces"][pid]["owner"] = new_cid
+        _init_game([])
+        hoi4_state["game_active"] = True
         _save_hoi4_state()
         await refresh_hoi4_panel()
-        await interaction.response.send_message("你已加入遊戲！國名：{}，獲得 {} 個省份。".format(name, len(my_pids)))
+        await interaction.response.send_message("遊戲世界已重置！不需要報名，任何人隨時可用 /hoi4 join 加入，沒有人數上限。每 30 分鐘一個 tick。")
+
+    @app_commands.command(name="join", description="隨時加入遊戲，不用事先報名，沒有人數上限")
+    @app_commands.describe(name="你的國家名稱")
+    async def hoi4_join(self, interaction: discord.Interaction, name: str):
+        new_cid, err = _do_join_country(interaction.user.id, name)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True); return
+        c = hoi4_state["countries"][new_cid]
+        await refresh_hoi4_panel()
+        await interaction.response.send_message("你已加入遊戲！國名：{}，獲得 {} 個省份。".format(name, len(c.get("provinces_owned",[]))))
 
     @app_commands.command(name="end", description="結束遊戲（機器人擁有者限定）")
     async def hoi4_end(self, interaction: discord.Interaction):
@@ -883,6 +910,25 @@ async def api_hoi4_state(request):
     try: return web.json_response(hoi4_state)
     except Exception as e: return web.json_response({"error": str(e)}, status=500)
 
+async def api_hoi4_join(request):
+    """網頁端加入遊戲：不用登入、不用事先報名，沒有人數上限，隨時可加入。"""
+    try:
+        body = await request.json()
+        user_id = str(body.get("user_id") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not user_id or not name:
+            return web.json_response({"error": "需要 user_id 和 name"}, status=400)
+        new_cid, err = _do_join_country(user_id, name)
+        if err:
+            return web.json_response({"error": err}, status=400)
+        try:
+            await refresh_hoi4_panel()
+        except Exception:
+            pass
+        return web.json_response({"ok": True, "country_id": new_cid, "country": hoi4_state["countries"][new_cid]})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
 async def api_hoi4_province(request):
     try:
         pid = request.match_info.get("pid")
@@ -1038,6 +1084,7 @@ _load_hoi4_state()
 
 HOI4_API_ROUTES = [
     ("/api/game/hoi4/state", "GET", api_hoi4_state),
+    ("/api/game/hoi4/join", "POST", api_hoi4_join),
     ("/api/game/hoi4/provinces/{pid}", "PUT", api_hoi4_province),
     ("/api/game/hoi4/move-division", "POST", api_hoi4_move_division),
     ("/api/game/hoi4/division-template", "POST", api_hoi4_division_template),
