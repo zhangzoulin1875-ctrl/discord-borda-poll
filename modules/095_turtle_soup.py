@@ -107,29 +107,39 @@ async def _generate_turtle_soup(difficulty: str) -> tuple:
     """呼叫 AI 生成海龜湯題目，回傳 (data_dict_or_None, error_reason)。
     error_reason: "circuit_open" | "timeout_or_parse" | None（成功時）。
 
-    修正：原本 timeout_total=30s 對「生成 800 tokens 完整 JSON（含100-300字
-    湯底）」這種大輸出來說太緊——deepseek 系列模型在共享/免費額度下常常
-    需要更長時間才能吐完整段中文長文字，30s 經常在非串流+串流備援都還沒
-    吐完就被切斷，導致 text="" → json.loads 拋錨 → 100% 顯示「生成失敗」。
-    現在放寬到 50s + 提高 max_tokens，並加一次自動重試，同時把失敗原因
-    往上傳，讓使用者看到的訊息更精確（是熔斷器封鎖還是單純逾時）。"""
+    修正史：
+    - v1：timeout_total 從 30s 放寬到 50s + 提高 max_tokens（大輸出常被切斷）。
+    - v2（本次）：舊版失敗後只是「重試同一個模型」——如果失敗原因是
+      該模型本身對這種長 JSON 輸出不穩（而非單純網路抖動），重試同一
+      模型大概率還是失敗，這正是使用者回報「已自動重試一次仍失敗」的
+      根因。現在改成每次重試「換下一個池降級鏈的模型」，真正利用
+      dashboard 設定的降級鏈，而不是原地重複同一個請求。"""
     prompt = TURTLE_SOUP_GEN_PROMPT.format(difficulty=difficulty)
 
     _ts_url, _ts_key, _ts_model = _resolve_role_endpoint("turtle_soup", chat_ai_settings)
-    settings = {
-        "api_url": _ts_url or chat_ai_settings["api_url"],
-        "api_key": _ts_key or chat_ai_settings["api_key"],
-        "model": _ts_model or chat_ai_settings.get("turtle_soup_model") or chat_ai_settings["model"],
-        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
-    }
-    if chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
-        settings["fallback_api_url"] = chat_ai_settings.get("fallback_api_url", "")
-        settings["fallback_api_key"] = chat_ai_settings.get("fallback_api_key", "")
-        settings["fallback_model"] = chat_ai_settings.get("fallback_model", "")
+    _candidates = [(
+        _ts_url or chat_ai_settings["api_url"],
+        _ts_key or chat_ai_settings["api_key"],
+        _ts_model or chat_ai_settings["model"],
+    )]
+    for _c_url, _c_key, _c_model in _resolve_chain("main", chat_ai_settings):
+        if (_c_url, _c_key, _c_model) not in _candidates:
+            _candidates.append((_c_url, _c_key, _c_model))
+    _candidates = _candidates[:3]  # 主模型 + 最多 2 個降級鏈備選，避免拖太久
 
     messages = [{"role": "user", "content": prompt}]
+    _last_reason = "timeout_or_parse"
 
-    for attempt in range(2):  # 最多重試一次
+    for attempt, (_c_url, _c_key, _c_model) in enumerate(_candidates):
+        settings = {
+            "api_url": _c_url,
+            "api_key": _c_key,
+            "model": _c_model,
+        }
+        # 只有第一次嘗試（主模型）才啟用備援 API 直切；換到降級鏈備選模型時
+        # 不再需要，因為本身就已經是在換模型了
+        if attempt == 0 and chat_ai_settings.get("fallback_enabled") and not _ai_circuit_breaker["tripped"]:
+            settings["fallback_enabled"] = True
         text = ""
         try:
             result = await call_chat_api(
@@ -138,7 +148,7 @@ async def _generate_turtle_soup(difficulty: str) -> tuple:
                 timeout_total=50,
                 timeout_read=40,
                 is_background=True,
-                fallback_mode="full",
+                fallback_mode="full" if attempt == 0 else "disabled",
                 fallback_user_id="turtle_soup",
                 category="entertainment",
             )
@@ -150,11 +160,9 @@ async def _generate_turtle_soup(difficulty: str) -> tuple:
                 lines = text.split("\n")
                 text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
             if not text:
-                print(f"⚠️ Turtle soup generation attempt {attempt+1}: empty content, error={result.get('error')}")
-                if attempt == 0:
-                    await asyncio.sleep(2)
-                    continue
-                return None, "timeout_or_parse"
+                print(f"⚠️ Turtle soup generation attempt {attempt+1}/{len(_candidates)} ({_c_model}): empty content, error={result.get('error')}")
+                _last_reason = "timeout_or_parse"
+                continue
             data = json_module.loads(text)
             if "surface" in data and "truth" in data:
                 key_q = int(data.get("key_questions", 6))
@@ -167,7 +175,7 @@ async def _generate_turtle_soup(difficulty: str) -> tuple:
                     "max_questions": max_q,
                     "key_questions": key_q,
                 }, None
-            print(f"⚠️ Turtle soup generation attempt {attempt+1}: missing surface/truth in parsed JSON: {text[:300]}")
+            print(f"⚠️ Turtle soup generation attempt {attempt+1}/{len(_candidates)} ({_c_model}): missing surface/truth in parsed JSON: {text[:300]}")
         except Exception as e:
             print(f"⚠️ Turtle soup generation attempt {attempt+1} failed: {e} | raw_text={text[:300]}")
         if attempt == 0:
