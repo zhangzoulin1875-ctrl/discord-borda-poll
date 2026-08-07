@@ -497,6 +497,21 @@ function toast(msg) {
 // === INIT ===
 let mapData = null;  // province polygons (large, loaded once)
 
+// Get province info merged from game state + map polygon data
+function getProv(pid) {
+  const sp = (S && S.provinces) ? S.provinces[pid] : null;
+  const mp = mapData ? mapData[pid] : null;
+  if (!sp && !mp) return null;
+  const merged = Object.assign({}, mp || {}, sp || {});
+  // Ensure polygon/centroid come from mapData, ownership from state
+  if (mp) { merged.polygon = mp.polygon; merged.centroid = mp.centroid; }
+  if (sp) { merged.owner = sp.owner; }
+  merged.neighbors = (sp && sp.neighbors) || (mp && mp.neighbors) || [];
+  merged.name = (sp && sp.name) || (mp && mp.name) || pid;
+  merged.type = (sp && sp.type) || (mp && mp.type) || 'plains';
+  return merged;
+}
+
 async function init() {
   const meResp = await api('/api/me');
   if (meResp.error || !meResp.user_id) { showLogin(); return; }
@@ -733,12 +748,12 @@ function renderMap() {
 }
 
 function isAdjacent(from, to) {
-  const p = S.provinces[from];
+  const p = getProv(from);
   return p && (p.neighbors||[]).includes(to);
 }
 
 function showTooltip(e, pid) {
-  const p = S.provinces[pid];
+  const p = getProv(pid);
   if (!p) return;
   const owner = S.countries[p.owner];
   const ownerName = owner ? owner.name : '無主';
@@ -755,7 +770,7 @@ function hideTooltip() { document.getElementById('tooltip').style.display = 'non
 
 function onProvinceClick(pid) {
   closeDrawers();
-  const prov = S.provinces[pid];
+  const prov = getProv(pid);
   if (!prov) return;
   if (pickingStart) {
     if (prov.owner) { toast('已有主人，選別處'); return; }
@@ -780,18 +795,18 @@ function onProvinceClick(pid) {
 }
 
 function renderProvinceDetail(pid) {
-  const p = S.provinces[pid];
+  const p = getProv(pid);
   if (!p) { document.getElementById('bottom-panel').innerHTML = ''; return; }
   const owner = S.countries[p.owner];
   const ownerName = owner ? `<span style="color:${owner.color};font-weight:600">${owner.name}</span>` : '<span style="color:var(--text-muted)">無主</span>';
   const res = Object.entries(p.resources||{}).map(([k,v]) => `${k}:${v}`).join(' · ') || '無';
   let html = `<div style="font-weight:700;font-size:14px">${p.name}</div>`;
   html += `<div style="font-size:12px;color:var(--text-muted)">${TERRAIN_ZH[p.type]||p.type} · ${ownerName} · 基建:${p.infrastructure} · 工事:${p.fortifications||0} · 資源:${res}${p.victory_points>0?` · VP:${p.victory_points}`:''}</div>`;
-  const neighbors = (p.neighbors||[]).slice(0,8).map(n => S.provinces[n]?.name||n).join('、');
+  const neighbors = (p.neighbors||[]).slice(0,8).map(n => { const np = getProv(n); return np ? np.name : n; }).join('、');
   if (neighbors) html += `<div style="font-size:11px;color:var(--text-dim);margin-top:2px">鄰接: ${neighbors}${(p.neighbors||[]).length>8?'...':''}</div>`;
   
   // Expand button
-  if (myCid && !p.owner) {
+  if (myCid && !((S.provinces||{})[pid]||{}).owner) {
     const c = S.countries[myCid];
     const owned = new Set(c.provinces_owned||[]);
     if ((p.neighbors||[]).some(n => owned.has(n))) {
@@ -799,10 +814,11 @@ function renderProvinceDetail(pid) {
     }
   }
   // Declare war button
-  if (myCid && p.owner && p.owner !== myCid) {
+  if (myCid && ((S.provinces||{})[pid]||{}).owner && ((S.provinces||{})[pid]||{}).owner !== myCid) {
     const c = S.countries[myCid];
     if (!(c.at_war_with||[]).includes(p.owner)) {
-      html += `<div class="btn-row"><button class="btn btn-red" onclick="doDeclareWar('${p.owner}')">⚔️ 宣戰</button></div>`;
+      const _ownerId = ((S.provinces||{})[pid]||{}).owner;
+      html += `<div class="btn-row"><button class="btn btn-red" onclick="doDeclareWar('${_ownerId}')">⚔️ 宣戰</button></div>`;
     }
   }
   document.getElementById('bottom-panel').innerHTML = html;
@@ -992,7 +1008,7 @@ function renderUnits() {
   const divs = c.divisions||[];
   if (!divs.length) { html += '<div style="color:var(--text-muted)">尚無部隊。先在「生產」分頁生產師團。</div>'; }
   for (const d of divs) {
-    const prov = S.provinces[d.province];
+    const prov = getProv(d.province);
     const strColor = (d.strength||0) > 0.7 ? 'var(--green)' : (d.strength||0) > 0.3 ? 'var(--gold)' : 'var(--red)';
     html += `<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05)">
       <div style="font-weight:600">${d.template_name||'師團'}</div>
@@ -1041,7 +1057,7 @@ function renderLoginOrJoin() {
     document.getElementById('login-content').innerHTML = `
       <div style="font-weight:600;font-size:15px;margin-bottom:8px">🗺️ 選擇起始地區</div>
       <p style="color:var(--text-muted);font-size:13px;margin-bottom:10px">在地圖上點一個<b style="color:var(--gold)">亮色</b>的無主省份當起始地。</p>
-      ${pickedProv ? `<div style="background:var(--bg);border-radius:4px;padding:8px;margin-bottom:8px">已選擇：<b>${S.provinces[pickedProv].name}</b></div>` : '<div style="color:var(--text-muted);font-size:12px">還沒選擇...</div>'}
+      ${pickedProv ? `<div style="background:var(--bg);border-radius:4px;padding:8px;margin-bottom:8px">已選擇：<b>${getProv(pickedProv).name}</b></div>` : '<div style="color:var(--text-muted);font-size:12px">還沒選擇...</div>'}
       <div style="display:flex;gap:8px">
         <button class="btn btn-gold" onclick="confirmJoin()" ${pickedProv?'':'disabled'} style="flex:1">✅ 在此建國</button>
         <button class="btn" onclick="cancelPickStart()" style="flex:1">取消</button>
