@@ -161,6 +161,12 @@ def load_cyber_war():
                     _cyber_war_settings[k] = v
             if "state" in data:
                 _cyber_war_state.update(data["state"])
+            # 向後相容：確保舊存檔的 faction 有 fortifications + supply_points 欄位
+            for fkey, fac in _cyber_war_state.get("factions", {}).items():
+                if "fortifications" not in fac:
+                    fac["fortifications"] = {"trench": 0, "medical": 0, "mg_nest": 0, "field_gun": 0, "mortar": 0}
+                if "supply_points" not in fac:
+                    fac["supply_points"] = 0
             print(f"⚔️ 賽博一戰資料已載入（active={_cyber_war_state.get('active')}）")
     except Exception as e:
         print(f"⚠️ 載入賽博一戰資料失敗：{e}")
