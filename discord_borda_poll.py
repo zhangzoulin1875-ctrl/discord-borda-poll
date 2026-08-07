@@ -9095,6 +9095,65 @@ async def api_test_all_functions(request):
     )
     results.append(await _test_vision(fallback_url, fallback_key, fallback_vis_m, "🔄 備援視覺識圖"))
 
+    # 12. 文生圖模型 — t2i_model, label "🎨 文生圖" (skip if not enabled/configured)
+    if chat_ai_settings.get("t2i_enabled"):
+        t2i_url = chat_ai_settings.get("t2i_api_url", "").strip()
+        t2i_key = chat_ai_settings.get("t2i_api_key", "").strip()
+        t2i_model = chat_ai_settings.get("t2i_model", "").strip()
+        if not t2i_model:
+            results.append({"label": "🎨 文生圖", "type": "image", "status": "skipped", "model": "", "error": "文生圖模型未設定，跳過"})
+        elif not t2i_url or not t2i_key:
+            results.append({"label": "🎨 文生圖", "type": "image", "status": "error", "model": t2i_model, "error": "文生圖 API URL 或 Key 未設定"})
+        else:
+            # Test T2I with a simple prompt
+            url = t2i_url
+            if not url.endswith("/images/generations"):
+                if url.endswith("/v1"):
+                    url += "/images/generations"
+                else:
+                    url = url.rstrip("/") + "/v1/images/generations"
+            t2i_payload = {
+                "model": t2i_model,
+                "prompt": "a simple red circle on white background",
+                "n": 1,
+                "size": chat_ai_settings.get("t2i_size", "1024x1024"),
+            }
+            if "dall-e" in t2i_model.lower():
+                t2i_payload["quality"] = chat_ai_settings.get("t2i_quality", "standard")
+                t2i_payload["response_format"] = "url"
+            t2i_headers = {"Authorization": f"Bearer {t2i_key}", "Content-Type": "application/json"}
+            t2_t0 = _time.monotonic()
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120, sock_read=100)) as t2_sess:
+                    async with t2_sess.post(url, json=t2i_payload, headers=t2i_headers) as t2_resp:
+                        t2_elapsed = int((_time.monotonic() - t2_t0) * 1000)
+                        if t2_resp.status != 200:
+                            t2_err = await t2_resp.text()
+                            results.append({"label": "🎨 文生圖", "type": "image", "status": "error",
+                                            "http_status": t2_resp.status, "latency_ms": t2_elapsed,
+                                            "model": t2i_model, "error": f"HTTP {t2_resp.status}: {t2_err[:200]}"})
+                        else:
+                            t2_data = await t2_resp.json()
+                            t2_items = t2_data.get("data") or t2_data.get("images") or t2_data.get("output") or []
+                            if t2_items and (t2_items[0].get("url") or t2_items[0].get("b64_json")):
+                                results.append({"label": "🎨 文生圖", "type": "image", "status": "ok",
+                                                "latency_ms": t2_elapsed, "model": t2i_model,
+                                                "response_snippet": "圖片生成成功"})
+                            else:
+                                results.append({"label": "🎨 文生圖", "type": "image", "status": "error",
+                                                "latency_ms": t2_elapsed, "model": t2i_model,
+                                                "error": f"回應格式無法識別: {str(t2_data)[:200]}"})
+            except asyncio.TimeoutError:
+                results.append({"label": "🎨 文生圖", "type": "image", "status": "timeout",
+                                "latency_ms": int((_time.monotonic() - t2_t0) * 1000),
+                                "model": t2i_model, "error": "請求逾時（120 秒）"})
+            except Exception as e:
+                results.append({"label": "🎨 文生圖", "type": "image", "status": "error",
+                                "latency_ms": int((_time.monotonic() - t2_t0) * 1000),
+                                "model": t2i_model, "error": str(e)[:300]})
+    else:
+        results.append({"label": "🎨 文生圖", "type": "image", "status": "skipped", "model": "", "error": "文生圖功能未啟用，跳過"})
+
     # Summary
     total = len(results)
     ok_cnt = sum(1 for r in results if r.get("status") == "ok")
