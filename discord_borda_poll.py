@@ -6925,17 +6925,20 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
     #   loose  — 只擋明確違規（露骨色情/暴力/CSAM/非法）
     #   medium — 預設，加上暗示性內容、仇恨符號、深度偽造等
     #   strict — medium 基礎上，生成後再用視覺模型複審圖片本身
+    # 政策：只擋色情/性相關內容與 CSAM，不擋暴力/血腥/戰爭場景等——
+    # 因為攻城戰、戰爭主題等遊戲功能常需要生成持刀持槍、戰鬥場景的圖片，
+    # 這些屬於正常創作內容，不應被當成違規。
     strictness_rules = {
-        "loose": "Reject ONLY if the prompt explicitly contains: sexual/explicit content, "
-                 "graphic gore/violence, CSAM, illegal activities, or non-consensual deepfakes. "
-                 "Allow suggestive, artistic nudity references, and borderline content.",
-        "medium": "Reject if the prompt contains: sexual/explicit content, gore/violence, "
-                  "hate speech, illegal activities, CSAM, non-consensual deepfakes, "
-                  "suggestive/implicit sexual content, hate symbols, or other NSFW/harmful content.",
-        "strict": "Reject if the prompt contains ANY of: sexual/explicit/suggestive content, "
-                  "gore/violence (even stylized), hate speech, illegal activities, CSAM, "
-                  "non-consensual deepfakes, hate symbols, controversial political imagery, "
-                  "or other potentially harmful content. Be conservative — when in doubt, block.",
+        "loose": "Reject ONLY if the prompt explicitly contains hardcore sexual/pornographic content "
+                 "or CSAM. Allow suggestive content, artistic nudity, violence, gore, weapons, war/battle "
+                 "scenes, and other non-sexual mature content.",
+        "medium": "Reject if the prompt contains: sexual/explicit/pornographic content, suggestive/implicit "
+                  "sexual content, or CSAM. Do NOT reject for violence, gore, weapons, war/battle scenes, "
+                  "or other non-sexual content — those are allowed.",
+        "strict": "Reject if the prompt contains: sexual/explicit/pornographic/suggestive content, or CSAM. "
+                  "Be conservative on sexual content — when in doubt about sexual content, block. "
+                  "Do NOT reject for violence, gore, weapons, war/battle scenes, hate symbols, or political "
+                  "imagery — those are allowed and out of scope for this filter.",
     }
     review_rules = strictness_rules.get(strictness, strictness_rules["medium"])
 
@@ -7101,10 +7104,14 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
             chat_url += "/v1/chat/completions"
 
     vision_prompt = (
-        "You are an image safety reviewer. Review this generated image for content policy violations.\n"
-        "Reject if the image contains: sexual/explicit content, gore/violence, hate speech, "
-        "illegal activities, CSAM, non-consensual deepfakes, or other NSFW/harmful content.\n"
-        "Be conservative — if you are unsure whether the image is safe, block it.\n"
+        "You are an image safety reviewer. Review this generated image ONLY for sexual/pornographic "
+        "content or CSAM.\n"
+        "Reject ONLY if the image contains: sexual/explicit/pornographic content, suggestive sexual "
+        "content, or CSAM.\n"
+        "Do NOT reject for violence, gore, weapons, war/battle scenes, hate symbols, or political "
+        "imagery — those are allowed and out of scope for this review.\n"
+        "Be conservative only about sexual content — if unsure whether sexual content is present, block it. "
+        "For everything else (violence, weapons, etc.), always allow.\n"
         "If the image is safe, reply exactly: SAFE\n"
         "If the image is unsafe, reply: BLOCKED: <brief reason in Traditional Chinese>\n"
         f"\nThe image was generated from this prompt: {prompt[:200]}"
@@ -7138,7 +7145,7 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
                     _err_lower = err_text.lower()
                     # HTTP 400/403 + safety/policy/content 字眼 → API 自己判定圖片有問題
                     if resp.status in (400, 403) and any(_w in _err_lower for _w in
-                            ("safety", "policy", "content_filter", "inappropriate", "nsfw", "explicit")):
+                            ("sexual", "nsfw", "explicit", "pornograph", "csam")):
                         _reason = f"視覺 API 拒絕分析圖片（HTTP {resp.status}，疑似不當內容）"
                         print(f"🎨 T2I 圖片複審：API 內容政策拒絕 (HTTP {resp.status}): {err_text[:150]}")
                         return {"allowed": False, "reason": _reason}

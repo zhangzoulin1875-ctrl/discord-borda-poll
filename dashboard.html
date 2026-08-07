@@ -634,10 +634,11 @@
         <div>
           <label class="block text-sm text-gray-400 mb-1">審查嚴格度</label>
           <select id="ai-t2i-filter-strictness" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-red-500 text-sm">
-            <option value="loose">寬鬆 — 只擋明確違規</option>
-            <option value="medium" selected>中等 — 擋暗示性/敏感內容（預設）</option>
-            <option value="strict">嚴格 — 生成後再用視覺模型複審圖片</option>
+            <option value="loose">寬鬆 — 只擋明確色情/CSAM，其餘（含暴力）皆放行</option>
+            <option value="medium" selected>中等 — 擋色情/暗示性內容（預設，暴力/戰爭場景放行）</option>
+            <option value="strict">嚴格 — 同中等 + 生成後用視覺模型複審圖片（只審色情，不審暴力）</option>
           </select>
+          <p class="text-xs text-gray-500 mt-1">⚠️ 過濾器只針對色情/性相關內容與 CSAM，暴力/血腥/戰爭/武器等內容一律放行（攻城戰等遊戲場景不會被誤擋）。</p>
         </div>
         <div>
           <label class="block text-sm text-gray-400 mb-1">回覆最大 Token 數</label>
