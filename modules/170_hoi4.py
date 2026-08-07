@@ -70,11 +70,29 @@ _DEFAULT_DIVISION_TEMPLATES = [
      "support": [], "stats": {"attack": 6,"defense": 4,"hp": 20,"org": 40,"speed": 2}, "cost": 80},
 ]
 
+# ── HOI4 總開關 ──────────────────────────────────────────────────────────
+# 設環境變數 HOI4_ENABLED=false 即可完全關閉鋼鐵風暴遊戲系統：
+#   - 不載入地圖模板/索引（省 22MB+5MB 記憶體）
+#   - 不啟動背景 tick 迴圈
+#   - 所有 /api/game/hoi4/* API 回 503
+#   - /hoi4 頁面顯示「已關閉」
+#   - Discord 指令群組不註冊
+#   - 釋放所有已載入的 cache
+# 不設或設 true 維持原行為。
+HOI4_ENABLED = os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off")
+
+def _hoi4_disabled_response():
+    return web.json_response({"error": "鋼鐵風暴遊戲已關閉（HOI4_ENABLED=false）", "disabled": True}, status=503)
+
 _MAP_TEMPLATE_FILE = os.path.join(DATA_DIR, "hoi4_map_template.json")
 _MAP_INDEX_FILE = os.path.join(DATA_DIR, "hoi4_map_index.json")
 _map_index_cache = None
 
 def _load_map_index():
+    if not HOI4_ENABLED:
+        global _map_index_cache
+        _map_index_cache = None  # 釋放
+        return None
     """讀取「輕量地圖索引」——跟 hoi4_map_template.json 內容一樣，但完全不含 polygon 座標。
     這是2026-08-07記憶體OOM修復新增的：原本遊戲邏輯（開局產生省份、驗證鄰接）也是呼叫會載入
     含polygon的完整地圖模板，但polygon是4001省份×多邊形嵌套list結構，用json.loads()解析成
@@ -114,6 +132,8 @@ def _load_map_index():
     return _map_index_cache
 
 def _generate_default_provinces():
+    if not HOI4_ENABLED:
+        return {}
     tpl = _load_map_index()
     if tpl:
         provinces = {}
@@ -713,6 +733,9 @@ async def refresh_hoi4_panel():
         print("HOI4 面板刷新失敗: {}".format(e))
 
 async def hoi4_panel_loop():
+    if not HOI4_ENABLED:
+        print("🚫 HOI4 已停用，面板迴圈不啟動")
+        return
     await bot.wait_until_ready()
     await asyncio.sleep(5)
     _load_hoi4_state()
@@ -1081,6 +1104,8 @@ class StormGroup(app_commands.Group):
 # ════════════════════════════════════════════════════════════════════════════
 
 async def api_hoi4_state(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     """遊戲狀態 API — 不含省份多邊形資料（太大），前端用 /api/game/hoi4/map 獨立載入地圖形狀。"""
     try:
         # Build lightweight response without polygon data (saves ~22MB)
@@ -1105,6 +1130,10 @@ async def api_hoi4_state(request):
 _hoi4_map_raw_bytes = None  # 原始檔案 bytes，完全不經過 json.loads() 解析
 
 async def api_hoi4_map(request):
+    if not HOI4_ENABLED:
+        global _hoi4_map_raw_bytes
+        _hoi4_map_raw_bytes = None  # 釋放 22MB
+        return _hoi4_disabled_response()
     """地圖多邊形 API —— 直接把 data/hoi4_map_template.json 的原始 bytes 讀出來當 response body
     回傳，中間完全不經過 json.loads()/json.dumps()。
 
@@ -1132,6 +1161,8 @@ async def api_hoi4_map(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_mapdebug(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     """診斷地圖模板載入問題：回報檔案是否存在、大小、讀取/解析錯誤細節。
     2026-08-07修正：不再對22MB完整模板做json.loads()完整解析（那正是造成OOM的元凶之一），
     改用輕量正則計數province數量，只在小索引檔上做真正的json.loads()驗證。"""
@@ -1166,6 +1197,8 @@ async def api_hoi4_mapdebug(request):
     return web.json_response(info)
 
 async def api_hoi4_reset(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     """強制重置遊戲（機器人擁有者限定）：清空舊存檔，讓下次加入時用最新地圖模板重新開局。
     用途：地圖模板(data/hoi4_map_template.json)更新後，已經開局的舊存檔不會自動套用新地圖，
     需要手動重置才能生效。"""
@@ -1196,6 +1229,8 @@ async def api_hoi4_reset(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_declare_war(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     """網頁端點擊宣戰：直接傳 country_id + target_id（都是從 state 拿到的，不用打字）。"""
     try:
         body = await request.json()
@@ -1213,6 +1248,8 @@ async def api_hoi4_declare_war(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_join(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     """網頁端加入遊戲：不用登入(user_id用Discord OAuth帶入)、不用事先報名，沒有人數上限，隨時可加入。
     start_province：使用者在地圖上點選的起始省份 id（可選，沒給就隨機分配一個）。"""
     try:
@@ -1234,6 +1271,8 @@ async def api_hoi4_join(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_expand(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     """網頁端點擊「和平擴張」：把相鄰的無主省份納入版圖（花政治點數、有冷卻時間）。"""
     try:
         body = await request.json()
@@ -1251,6 +1290,8 @@ async def api_hoi4_expand(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_province(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     try:
         pid = request.match_info.get("pid")
         body = await request.json()
@@ -1264,6 +1305,8 @@ async def api_hoi4_province(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_move_division(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     """網頁端移防：用 division_id（穩定字串，如 c1_d3）點選部隊，不用記數字編號。
     仍相容舊版 division_index（純數字位置）以防其他呼叫端還在用。"""
     try:
@@ -1297,6 +1340,8 @@ async def api_hoi4_move_division(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_division_template(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     try:
         body = await request.json()
         cid = body.get("country_id")
@@ -1335,6 +1380,8 @@ async def api_hoi4_division_template(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_set_focus(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     try:
         body = await request.json()
         cid = body.get("country_id")
@@ -1353,6 +1400,8 @@ async def api_hoi4_set_focus(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_research(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     try:
         body = await request.json()
         cid = body.get("country_id")
@@ -1370,6 +1419,8 @@ async def api_hoi4_research(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_build(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     try:
         body = await request.json()
         cid = body.get("country_id")
@@ -1388,6 +1439,8 @@ async def api_hoi4_build(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_hoi4_produce(request):
+    if not HOI4_ENABLED:
+        return _hoi4_disabled_response()
     try:
         body = await request.json()
         cid = body.get("country_id")
@@ -1408,7 +1461,11 @@ async def api_hoi4_produce(request):
 # 註冊到主程式
 # ════════════════════════════════════════════════════════════════════════════
 
-_load_hoi4_state()
+if HOI4_ENABLED:
+    _load_hoi4_state()
+else:
+    print("🚫 HOI4 已停用（HOI4_ENABLED=false），跳過遊戲狀態載入")
+    hoi4_state["game_active"] = False
 
 HOI4_API_ROUTES = [
     ("/api/game/hoi4/state", "GET", api_hoi4_state),
@@ -1427,11 +1484,13 @@ HOI4_API_ROUTES = [
     ("/api/game/hoi4/produce", "POST", api_hoi4_produce),
 ]
 
-try: bot.tree.add_command(HOI4Group())
-except Exception as e: print("HOI4 指令群組註冊失敗: {}".format(e))
-
-try: bot.add_view(HOI4PanelView())
-except Exception as e: print("HOI4 面板 View 註冊失敗: {}".format(e))
+if HOI4_ENABLED:
+    try: bot.tree.add_command(StormGroup())
+    except Exception as e: print("HOI4/Storm 指令群組註冊失敗: {}".format(e))
+    try: bot.add_view(HOI4PanelView())
+    except Exception as e: print("HOI4 面板 View 註冊失敗: {}".format(e))
+else:
+    print("🚫 HOI4 已停用，跳過 Discord 指令/面板註冊")
 
 # hoi4_panel_loop 由 setup_hook() 在 discord_borda_poll.py 中啟動
 # （與 economy_panel_loop、siege_loop 同模式）

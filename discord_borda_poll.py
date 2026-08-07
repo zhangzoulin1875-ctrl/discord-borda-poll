@@ -252,18 +252,21 @@ async def keep_alive_server():
     app.router.add_post("/api/guilds/{gid}/global-scan/finish", api_global_scan_finish)
     app.router.add_get("/api/siege-settings", api_get_siege_settings)
     app.router.add_put("/api/siege-settings", api_set_siege_settings)
-    # HOI4 game API routes (registered by module 170)
-    try:
-        for _path, _method, _handler in HOI4_API_ROUTES:
-            if _method == "GET":
-                app.router.add_get(_path, _handler)
-            elif _method == "PUT":
-                app.router.add_put(_path, _handler)
-            elif _method == "POST":
-                app.router.add_post(_path, _handler)
-        print("🎮 HOI4 API routes registered")
-    except Exception as e:
-        print(f"⚠️ HOI4 API route registration failed: {e}")
+    # HOI4 game API routes (registered by module 170, skip when HOI4_ENABLED=false)
+    if os.getenv("HOI4_ENABLED", "true").lower() in ("false", "0", "no", "off"):
+        print("🚫 HOI4 已停用，API 路由不註冊")
+    else:
+        try:
+            for _path, _method, _handler in HOI4_API_ROUTES:
+                if _method == "GET":
+                    app.router.add_get(_path, _handler)
+                elif _method == "PUT":
+                    app.router.add_put(_path, _handler)
+                elif _method == "POST":
+                    app.router.add_post(_path, _handler)
+            print("🎮 HOI4 API routes registered")
+        except Exception as e:
+            print(f"⚠️ HOI4 API route registration failed: {e}")
     print(f"📊 Dashboard routes registered")
 
     runner = web.AppRunner(app)
@@ -908,6 +911,8 @@ async def dashboard_index(request):
 
 
 async def hoi4_page(request):
+    if os.getenv("HOI4_ENABLED", "true").lower() in ("false", "0", "no", "off"):
+        return web.Response(text="<h1>鋼鐵風暴已關閉</h1><p>管理員已停用此功能。</p>", content_type="text/html")
     return web.Response(text=_read_hoi4_html(), content_type="text/html")
 
 
@@ -11149,7 +11154,11 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), StormGroup()]:
+    _hoi4_on = os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off")
+    _all_groups = [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup()]
+    if _hoi4_on:
+        _all_groups.append(StormGroup())
+    for grp in _all_groups:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -11259,7 +11268,10 @@ async def setup_hook():
     asyncio.ensure_future(community_chronicle_loop())
     asyncio.ensure_future(token_log_loop())
     asyncio.ensure_future(economy_panel_loop())  # 經濟系統看板
-    asyncio.ensure_future(hoi4_panel_loop())  # 鋼鐵風暴 戰略遊戲面板  # 經濟系統看板：重啟自動清理廢棄面板+即時更新
+    if os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off"):
+        asyncio.ensure_future(hoi4_panel_loop())  # 鋼鐵風暴 戰略遊戲面板（可由 HOI4_ENABLED=false 關閉）
+    else:
+        print("🚫 HOI4 已停用，面板迴圈不啟動")
     asyncio.ensure_future(stock_market_loop())  # AI 股票市場：每2小時一回合
     asyncio.ensure_future(horse_racing_loop())  # 賽馬賭博系統：每30分鐘一局
     # Load community awareness + chronicle data
@@ -14301,7 +14313,8 @@ bot.add_view(EconomyPanelButtonsView())  # 經濟看板下方的股票/公司管
 bot.add_view(HorseBettingView("persistent"))  # 賽馬下注按鈕持久化（重啟後復原用）
 bot.add_view(_WerewolfResumeView())  # 狼人殺重啟恢復按鈕持久化
 bot.add_view(SiegePanelView())  # 攻城戰按鈕持久化
-bot.add_view(HOI4PanelView())  # HOI4 戰略指揮部面板按鈕持久化
+if os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off"):
+    bot.add_view(HOI4PanelView())  # HOI4 戰略指揮部面板按鈕持久化
 
 bot.setup_hook = setup_hook
 
