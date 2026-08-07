@@ -1725,6 +1725,8 @@ chat_ai_settings = {
     "t2i_filter_model": "",             # 過濾模型名稱（留空=用該池的預設模型）
     "t2i_filter_timeout": 15,           # 過濾 API 逾時（秒）
     "t2i_filter_max_tokens": 100,       # 過濾回覆最大 token 數
+    "t2i_filter_strictness": "medium",  # 審查嚴格度：loose/medium/strict
+    "t2i_filter_vision_model": "",     # 嚴格模式用於圖片複審的視覺模型（留空=用主視覺模型）
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -6773,6 +6775,24 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
     filter_model = settings.get("t2i_filter_model", "").strip()
     timeout_s = int(settings.get("t2i_filter_timeout", 15))
     max_tokens = int(settings.get("t2i_filter_max_tokens", 100))
+    strictness = settings.get("t2i_filter_strictness", "medium").lower()
+    # 審查嚴格度影響 system prompt 的措辭：
+    #   loose  — 只擋明確違規（露骨色情/暴力/CSAM/非法）
+    #   medium — 預設，加上暗示性內容、仇恨符號、深度偽造等
+    #   strict — medium 基礎上，生成後再用視覺模型複審圖片本身
+    strictness_rules = {
+        "loose": "Reject ONLY if the prompt explicitly contains: sexual/explicit content, "
+                 "graphic gore/violence, CSAM, illegal activities, or non-consensual deepfakes. "
+                 "Allow suggestive, artistic nudity references, and borderline content.",
+        "medium": "Reject if the prompt contains: sexual/explicit content, gore/violence, "
+                  "hate speech, illegal activities, CSAM, non-consensual deepfakes, "
+                  "suggestive/implicit sexual content, hate symbols, or other NSFW/harmful content.",
+        "strict": "Reject if the prompt contains ANY of: sexual/explicit/suggestive content, "
+                  "gore/violence (even stylized), hate speech, illegal activities, CSAM, "
+                  "non-consensual deepfakes, hate symbols, controversial political imagery, "
+                  "or other potentially harmful content. Be conservative — when in doubt, block.",
+    }
+    review_rules = strictness_rules.get(strictness, strictness_rules["medium"])
 
     pool = settings.get("ai_pool", [])
     pool_entry = next((e for e in pool if e.get("id") == pool_id), None)
@@ -6802,11 +6822,8 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
             chat_url += "/v1/chat/completions"
 
     review_prompt = (
-        "You are an image prompt safety reviewer. "
-        "Review the following image generation prompt for content policy violations.\n"
-        "Reject if it contains: sexual/explicit content, gore/violence, "
-        "hate speech, illegal activities, CSAM, non-consensual deepfakes, "
-        "or other NSFW/harmful content.\n"
+        f"You are an image prompt safety reviewer (strictness level: {strictness}). "
+        f"{review_rules}\n"
         "If the prompt is safe, reply exactly: SAFE\n"
         "If the prompt is unsafe, reply: BLOCKED: <brief reason in Traditional Chinese>\n"
         f"\nPrompt to review: {prompt[:500]}"
@@ -6862,6 +6879,141 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
         return {"allowed": True}
 
 
+async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dict:
+    """Post-generation image review using a vision model. Only called in 'strict' mode.
+    Sends the generated image to a vision-capable model and asks it to judge
+    whether the image itself contains NSFW/harmful content (regardless of what
+    the prompt said — the image API might have ignored the text filter).
+
+    Returns:
+      {"allowed": True} — image is safe
+      {"allowed": False, "reason": "..."} — image is blocked
+    Fail-open on any error (don't block image delivery if the review model is down).
+    """
+    strictness = settings.get("t2i_filter_strictness", "medium").lower()
+    if strictness != "strict":
+        return {"allowed": True}
+    if not settings.get("t2i_filter_enabled"):
+        return {"allowed": True}
+
+    # Resolve which vision model to use for image review:
+    # 1. t2i_filter_vision_model (explicit setting) → 2. vision_model (main) → 3. skip
+    vision_model = settings.get("t2i_filter_vision_model", "").strip()
+    api_url = ""
+    api_key = ""
+
+    if vision_model:
+        # Use the filter pool's endpoint if available (same pool as text filter)
+        pool_id = settings.get("t2i_filter_pool_id", "").strip()
+        pool_entry = next((e for e in settings.get("ai_pool", []) if e.get("id") == pool_id), None)
+        if pool_entry:
+            api_url = pool_entry.get("api_url", "").strip()
+            api_key = pool_entry.get("api_key", "").strip()
+    else:
+        # Fall back to the main vision model configuration
+        _vis_url, _vis_key, _vis_model = _resolve_role_endpoint("vision", settings)
+        vision_model = _vis_model or settings.get("vision_model", "").strip()
+        api_url = _vis_url or settings.get("api_url", "").strip()
+        api_key = _vis_key or settings.get("api_key", "").strip()
+
+    if not vision_model:
+        print("🎨 T2I 嚴格模式：未設定視覺模型，跳過圖片複審（fail-open）")
+        return {"allowed": True}
+    if not api_url:
+        print("🎨 T2I 嚴格模式：視覺 API URL 為空，跳過圖片複審（fail-open）")
+        return {"allowed": True}
+
+    # Read the generated image file and convert to base64 data URL
+    try:
+        import base64 as _b64
+        with open(image_path, "rb") as f:
+            img_bytes = f.read()
+        b64_str = _b64.b64encode(img_bytes).decode("utf-8")
+        # Detect mime type from file header
+        mime = "image/png"
+        if img_bytes[:4] == b"\x89PNG":
+            mime = "image/png"
+        elif img_bytes[:2] == b"\xff\xd8":
+            mime = "image/jpeg"
+        elif img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+            mime = "image/webp"
+        data_url = f"data:{mime};base64,{b64_str}"
+    except Exception as e:
+        print(f"🎨 T2I 嚴格模式：讀取圖片失敗: {e}，跳過複審（fail-open）")
+        return {"allowed": True}
+
+    # Normalize chat completions URL
+    chat_url = api_url.rstrip("/")
+    if not chat_url.endswith("/chat/completions"):
+        if chat_url.endswith("/v1"):
+            chat_url += "/chat/completions"
+        elif "/v1/" not in chat_url:
+            chat_url += "/v1/chat/completions"
+
+    vision_prompt = (
+        "You are an image safety reviewer. Review this generated image for content policy violations.\n"
+        "Reject if the image contains: sexual/explicit content, gore/violence, hate speech, "
+        "illegal activities, CSAM, non-consensual deepfakes, or other NSFW/harmful content.\n"
+        "Be conservative — if you are unsure whether the image is safe, block it.\n"
+        "If the image is safe, reply exactly: SAFE\n"
+        "If the image is unsafe, reply: BLOCKED: <brief reason in Traditional Chinese>\n"
+        f"\nThe image was generated from this prompt: {prompt[:200]}"
+    )
+
+    payload = {
+        "model": vision_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": vision_prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        "max_tokens": int(settings.get("t2i_filter_max_tokens", 100)),
+        "temperature": 0,
+    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    timeout_s = int(settings.get("t2i_filter_timeout", 15))
+    try:
+        timeout = aiohttp.ClientTimeout(total=timeout_s + 15, connect=10, sock_read=timeout_s + 10)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(chat_url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    err_text = await resp.text()
+                    print(f"🎨 T2I 圖片複審 API 失敗 (HTTP {resp.status}): {err_text[:200]}，放行（fail-open）")
+                    return {"allowed": True}
+                try:
+                    data = await resp.json()
+                except Exception:
+                    return {"allowed": True}
+                reply_text = ""
+                choices = data.get("choices", [])
+                if choices:
+                    reply_text = choices[0].get("message", {}).get("content", "").strip()
+                print(f"🎨 T2I 圖片複審結果: {reply_text[:100]}")
+                if reply_text.upper().startswith("SAFE"):
+                    return {"allowed": True}
+                elif reply_text.upper().startswith("BLOCKED"):
+                    reason = reply_text[len("BLOCKED"):].lstrip(": ").strip()
+                    if not reason:
+                        reason = "生成的圖片內容不符安全規範"
+                    return {"allowed": False, "reason": reason}
+                else:
+                    print(f"🎨 T2I 圖片複審回覆不明確，放行: {reply_text[:100]}")
+                    return {"allowed": True}
+    except asyncio.TimeoutError:
+        print(f"🎨 T2I 圖片複審逾時（{timeout_s+15}s），放行（fail-open）")
+        return {"allowed": True}
+    except Exception as e:
+        print(f"🎨 T2I 圖片複審例外: {type(e).__name__}: {e}，放行（fail-open）")
+        return {"allowed": True}
+
+
 async def _generate_image(prompt: str, settings: dict) -> dict:
     """Generate an image. Tries premium channel first (if enabled + quota remaining),
     falls back to default channel on any failure.
@@ -6900,6 +7052,19 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
             _t2i_premium_consume(settings)
             premium_result["channel"] = "premium"
             print(f"🎨 T2I 高級通道成功（今日已用 {settings.get('t2i_premium_daily_count', 0)}/{settings.get('t2i_premium_daily_limit', 30)}）")
+            # ── 嚴格模式：生成後用視覺模型複審圖片 ──
+            if settings.get("t2i_filter_enabled") and settings.get("t2i_filter_strictness", "medium").lower() == "strict":
+                _img_p = premium_result.get("image_path")
+                if _img_p:
+                    _img_review = await _t2i_filter_image(_img_p, prompt, settings)
+                    if not _img_review.get("allowed"):
+                        _reason = _img_review.get("reason", "圖片內容不符安全規範")
+                        print(f"🎨 T2I 嚴格模式圖片複審攔截: {_reason[:100]}")
+                        try:
+                            os.remove(_img_p)
+                        except Exception:
+                            pass
+                        return {"success": False, "error": f"🚫 生成的圖片未通過安全複審：{_reason}", "filtered": True}
             return premium_result
         else:
             premium_error = premium_result.get("error", "未知錯誤")
@@ -6909,6 +7074,19 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
     result = await _generate_image_core(prompt, settings)
     if result.get("success"):
         result["channel"] = "default"
+        # ── 嚴格模式：生成後用視覺模型複審圖片 ──
+        if settings.get("t2i_filter_enabled") and settings.get("t2i_filter_strictness", "medium").lower() == "strict":
+            _img_p = result.get("image_path")
+            if _img_p:
+                _img_review = await _t2i_filter_image(_img_p, prompt, settings)
+                if not _img_review.get("allowed"):
+                    _reason = _img_review.get("reason", "圖片內容不符安全規範")
+                    print(f"🎨 T2I 嚴格模式圖片複審攔截: {_reason[:100]}")
+                    try:
+                        os.remove(_img_p)
+                    except Exception:
+                        pass
+                    return {"success": False, "error": f"🚫 生成的圖片未通過安全複審：{_reason}", "filtered": True}
     # 把高級通道失敗/跳過的原因也帶上，這樣 ai-log 才能顯示「高級通道當時為什麼沒用到」，
     # 不然使用者永遠只看得到最終成功用了預設通道，猜不出高級通道到底發生了什麼事。
     if premium_error:
@@ -8881,6 +9059,8 @@ async def api_get_chat_ai_settings(request):
         "t2i_filter_model": chat_ai_settings.get("t2i_filter_model", ""),
         "t2i_filter_timeout": chat_ai_settings.get("t2i_filter_timeout", 15),
         "t2i_filter_max_tokens": chat_ai_settings.get("t2i_filter_max_tokens", 100),
+        "t2i_filter_strictness": chat_ai_settings.get("t2i_filter_strictness", "medium"),
+        "t2i_filter_vision_model": chat_ai_settings.get("t2i_filter_vision_model", ""),
     })
 
 
@@ -9122,6 +9302,12 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["t2i_filter_timeout"] = int(body["t2i_filter_timeout"])
     if "t2i_filter_max_tokens" in body:
         chat_ai_settings["t2i_filter_max_tokens"] = int(body["t2i_filter_max_tokens"])
+    if "t2i_filter_strictness" in body:
+        _strict = body["t2i_filter_strictness"].lower()
+        if _strict in ("loose", "medium", "strict"):
+            chat_ai_settings["t2i_filter_strictness"] = _strict
+    if "t2i_filter_vision_model" in body:
+        chat_ai_settings["t2i_filter_vision_model"] = body["t2i_filter_vision_model"]
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
