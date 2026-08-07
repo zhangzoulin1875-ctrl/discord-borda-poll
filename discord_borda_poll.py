@@ -9025,68 +9025,115 @@ async def _drive_upload(filename: str, content: str, return_detail: bool = False
         return _ret(False, detail)
 
 
-async def _drive_list_files() -> list:
+async def _drive_list_files(_retry_count: int = 4) -> list:
     """List all files currently in the configured Google Drive folder.
-    Returns a list of {"id": ..., "name": ...} dicts, or [] on any failure."""
-    token = await _get_drive_access_token()
-    if not token:
-        return []
+    Returns a list of {"id": ..., "name": ...} dicts, or [] on any failure.
+
+    重要：這是 load_from_drive() 的第一步，一旦失敗整個載入流程會直接 return，
+    連 chat_ai_settings.json 的下載重試都不會被觸發（設定全部變成硬編碼預設值，
+    也就是「重啟後設定被清空」的真正根因之一）。開機瞬間網路/DNS/Google API
+    偶發抖動很常見，所以這裡要有自己的重試+退避，不能靠呼叫端補救。"""
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            query = "trashed=false"
-            if folder_id:
-                query += f" and '{folder_id}' in parents"
-            list_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)&pageSize=200"
-            async with session.get(list_url, headers=headers) as resp:
-                text = await resp.text()
-                if resp.status != 200:
-                    print(f"⚠️ Drive 列出檔案失敗（{resp.status}）：{text[:400]}")
-                    return []
-                data = json_module.loads(text)
-                return data.get("files", [])
-    except Exception as e:
-        print(f"⚠️ Drive list files failed: {e}")
-        return []
+    for _attempt in range(_retry_count):
+        token = await _get_drive_access_token()
+        if not token:
+            if _attempt < _retry_count - 1:
+                _wait = 2 * (2 ** _attempt)  # 2s, 4s, 8s, 16s
+                print(f"⚠️ Drive 列出檔案：取得 token 失敗，{_wait}s 後重試（第 {_attempt+1}/{_retry_count} 次）")
+                await asyncio.sleep(_wait)
+                continue
+            print("⚠️ Drive 列出檔案：多次重試後仍無法取得 token，放棄")
+            return []
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                query = "trashed=false"
+                if folder_id:
+                    query += f" and '{folder_id}' in parents"
+                list_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)&pageSize=200"
+                async with session.get(list_url, headers=headers) as resp:
+                    text = await resp.text()
+                    if resp.status != 200:
+                        print(f"⚠️ Drive 列出檔案失敗（{resp.status}）：{text[:400]}")
+                        if _attempt < _retry_count - 1:
+                            _wait = 2 * (2 ** _attempt)
+                            print(f"⚠️ Drive 列出檔案：{_wait}s 後重試（第 {_attempt+1}/{_retry_count} 次）")
+                            await asyncio.sleep(_wait)
+                            continue
+                        return []
+                    data = json_module.loads(text)
+                    return data.get("files", [])
+        except Exception as e:
+            print(f"⚠️ Drive list files failed: {e}")
+            if _attempt < _retry_count - 1:
+                _wait = 2 * (2 ** _attempt)
+                print(f"⚠️ Drive 列出檔案：例外後 {_wait}s 重試（第 {_attempt+1}/{_retry_count} 次）")
+                await asyncio.sleep(_wait)
+                continue
+            return []
+    return []
 
 
-async def _drive_download(filename: str) -> str:
-    """Download a file from Google Drive. Returns content or None."""
-    token = await _get_drive_access_token()
-    if not token:
-        return None
-
+async def _drive_download(filename: str, _retry_count: int = 3) -> str:
+    """Download a file from Google Drive. Returns content or None.
+    Retries transient failures (network blips, token issues, non-200 status)
+    with exponential backoff — every JSON file matters at boot, not just
+    chat_ai_settings.json, so this retry lives here instead of only being
+    special-cased by the caller."""
     folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
-    headers = {"Authorization": f"Bearer {token}"}
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            query = f"name='{filename}' and trashed=false"
-            if folder_id:
-                query += f" and '{folder_id}' in parents"
-            search_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
-            async with session.get(search_url, headers=headers) as resp:
-                search_text = await resp.text()
-                if resp.status != 200:
-                    print(f"⚠️ Drive 搜尋 {filename} 失敗（{resp.status}）：{search_text[:400]}")
+    for _attempt in range(_retry_count):
+        token = await _get_drive_access_token()
+        if not token:
+            if _attempt < _retry_count - 1:
+                _wait = 2 * (2 ** _attempt)
+                print(f"⚠️ Drive 下載 {filename}：取得 token 失敗，{_wait}s 後重試（第 {_attempt+1}/{_retry_count} 次）")
+                await asyncio.sleep(_wait)
+                continue
+            return None
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                query = f"name='{filename}' and trashed=false"
+                if folder_id:
+                    query += f" and '{folder_id}' in parents"
+                search_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
+                async with session.get(search_url, headers=headers) as resp:
+                    search_text = await resp.text()
+                    if resp.status != 200:
+                        print(f"⚠️ Drive 搜尋 {filename} 失敗（{resp.status}）：{search_text[:400]}")
+                        if _attempt < _retry_count - 1:
+                            _wait = 2 * (2 ** _attempt)
+                            await asyncio.sleep(_wait)
+                            continue
+                        return None
+                    data = json_module.loads(search_text)
+                files = data.get("files", [])
+                if not files:
+                    # 檔案在 Drive 上真的不存在（不是暫時性錯誤）——不用重試
                     return None
-                data = json_module.loads(search_text)
-            files = data.get("files", [])
-            if not files:
-                return None
 
-            file_id = files[0]["id"]
-            download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-            async with session.get(download_url, headers=headers) as resp:
-                if resp.status != 200:
-                    err = await resp.text()
-                    print(f"⚠️ Drive 下載 {filename} 失敗（{resp.status}）：{err[:400]}")
-                    return None
-                return await resp.text()
-    except Exception as e:
-        print(f"⚠️ Drive download failed ({filename}): {e}")
-        return None
+                file_id = files[0]["id"]
+                download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+                async with session.get(download_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        err = await resp.text()
+                        print(f"⚠️ Drive 下載 {filename} 失敗（{resp.status}）：{err[:400]}")
+                        if _attempt < _retry_count - 1:
+                            _wait = 2 * (2 ** _attempt)
+                            print(f"⚠️ Drive 下載 {filename}：{_wait}s 後重試（第 {_attempt+1}/{_retry_count} 次）")
+                            await asyncio.sleep(_wait)
+                            continue
+                        return None
+                    return await resp.text()
+        except Exception as e:
+            print(f"⚠️ Drive download failed ({filename}): {e}")
+            if _attempt < _retry_count - 1:
+                _wait = 2 * (2 ** _attempt)
+                print(f"⚠️ Drive 下載 {filename}：例外後 {_wait}s 重試（第 {_attempt+1}/{_retry_count} 次）")
+                await asyncio.sleep(_wait)
+                continue
+            return None
+    return None
 
 
 _drive_file_hashes = {}  # filename -> last-uploaded content hash (for skip-unchanged)
@@ -9184,21 +9231,22 @@ async def load_from_drive():
     fail_count = 0
     for f in json_files:
         filename = f["name"]
-        content = await _drive_download(filename)
-        # chat_ai_settings.json is the single point of failure for the ENTIRE
-        # bot (API key, model, model_fallback_chain, log_channel_id, all
-        # feature toggles) — a transient network hiccup on cold boot losing
-        # this file resets everything to hardcoded defaults for the whole run.
-        # Retry a few times with a short backoff before giving up, since Render
-        # containers often have flaky networking in the first few seconds.
-        if not content and filename == "chat_ai_settings.json":
-            for _retry in range(3):
-                await asyncio.sleep(2)
-                print(f"🔄 重試下載 {filename}（第 {_retry+1}/3 次）...")
-                content = await _drive_download(filename)
-                if content:
-                    print(f"✅ 重試成功，取得 {filename}")
-                    break
+        # _drive_download() 內部本身已有 3 次重試+指數退避（2/4/8s），涵蓋所有
+        # 檔案的暫時性網路抖動。chat_ai_settings.json 是全機器人設定的單點故障
+        # （API key/model/log_channel_id/所有功能開關都在裡面）——多加幾次
+        # 額外重試+更長退避，因為這個檔案值得多等一下也不要冒著清空設定的風險。
+        _dl_retries = 5 if filename == "chat_ai_settings.json" else 1
+        content = None
+        for _extra in range(_dl_retries):
+            content = await _drive_download(filename)
+            if content:
+                if _extra > 0:
+                    print(f"✅ {filename} 額外重試成功（第 {_extra+1} 輪）")
+                break
+            if _extra < _dl_retries - 1:
+                _wait = 5 * (_extra + 1)  # 5s, 10s, 15s, 20s
+                print(f"⚠️ {filename} 下載仍失敗，{_wait}s 後進行額外重試（第 {_extra+2}/{_dl_retries} 輪）...")
+                await asyncio.sleep(_wait)
         if content:
             try:
                 filepath = os.path.join(data_dir, filename)
