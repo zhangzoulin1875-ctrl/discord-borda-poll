@@ -6895,6 +6895,7 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
         return {"allowed": True}
     if not settings.get("t2i_filter_enabled"):
         return {"allowed": True}
+    print(f"🎨 T2I 嚴格模式：開始圖片複審（image_path={image_path[:60]}...）")
 
     # Resolve which vision model to use for image review:
     # 1. t2i_filter_vision_model (explicit setting) → 2. vision_model (main) → 3. skip
@@ -7055,6 +7056,22 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
             # ── 嚴格模式：生成後用視覺模型複審圖片 ──
             if settings.get("t2i_filter_enabled") and settings.get("t2i_filter_strictness", "medium").lower() == "strict":
                 _img_p = premium_result.get("image_path")
+                _img_url = premium_result.get("image_url")
+                # 如果只有 URL 沒有檔案，先下載成檔案供視覺模型審查
+                if not _img_p and _img_url:
+                    try:
+                        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as _dl:
+                            async with _dl.get(_img_url) as _dl_r:
+                                if _dl_r.status == 200:
+                                    _ib = await _dl_r.read()
+                                    _ct = _dl_r.headers.get("Content-Type", "image/png")
+                                    _ex = "jpg" if ("jpeg" in _ct or "jpg" in _ct) else ("webp" if "webp" in _ct else "png")
+                                    _img_p = os.path.join(DATA_DIR, f"t2i_review_{int(_time.time()*1000)}.{_ex}")
+                                    with open(_img_p, "wb") as _f:
+                                        _f.write(_ib)
+                                    premium_result["image_path"] = _img_p
+                    except Exception as _e:
+                        print(f"🎨 T2I 嚴格模式：下載圖片失敗，跳過複審: {_e}")
                 if _img_p:
                     _img_review = await _t2i_filter_image(_img_p, prompt, settings)
                     if not _img_review.get("allowed"):
@@ -7077,6 +7094,22 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
         # ── 嚴格模式：生成後用視覺模型複審圖片 ──
         if settings.get("t2i_filter_enabled") and settings.get("t2i_filter_strictness", "medium").lower() == "strict":
             _img_p = result.get("image_path")
+            _img_url = result.get("image_url")
+            # 如果只有 URL 沒有檔案，先下載成檔案供視覺模型審查
+            if not _img_p and _img_url:
+                try:
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as _dl:
+                        async with _dl.get(_img_url) as _dl_r:
+                            if _dl_r.status == 200:
+                                _ib = await _dl_r.read()
+                                _ct = _dl_r.headers.get("Content-Type", "image/png")
+                                _ex = "jpg" if ("jpeg" in _ct or "jpg" in _ct) else ("webp" if "webp" in _ct else "png")
+                                _img_p = os.path.join(DATA_DIR, f"t2i_review_{int(_time.time()*1000)}.{_ex}")
+                                with open(_img_p, "wb") as _f:
+                                    _f.write(_ib)
+                                result["image_path"] = _img_p
+                except Exception as _e:
+                    print(f"🎨 T2I 嚴格模式：下載圖片失敗，跳過複審: {_e}")
             if _img_p:
                 _img_review = await _t2i_filter_image(_img_p, prompt, settings)
                 if not _img_review.get("allowed"):
@@ -7525,6 +7558,26 @@ async def _generate_image_core(prompt: str, settings: dict) -> dict:
                         f.write(image_bytes)
 
                 result = {"success": True, "model": model}
+                # 如果 API 回傳 URL 而非 b64，先下載成檔案——這樣嚴格模式的
+                # 視覺複審才能讀取圖片檔。b64 的路徑已經存檔了，不需要再下載。
+                if image_url and not image_path:
+                    try:
+                        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as _dl_sess:
+                            async with _dl_sess.get(image_url) as _dl_resp:
+                                if _dl_resp.status == 200:
+                                    _img_bytes = await _dl_resp.read()
+                                    _ct = _dl_resp.headers.get("Content-Type", "image/png")
+                                    _ext = "png"
+                                    if "jpeg" in _ct or "jpg" in _ct:
+                                        _ext = "jpg"
+                                    elif "webp" in _ct:
+                                        _ext = "webp"
+                                    image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.{_ext}")
+                                    with open(image_path, "wb") as _f:
+                                        _f.write(_img_bytes)
+                                    print(f"🎨 T2I 已下載圖片到本機（供嚴格複審用）: {image_path}")
+                    except Exception as _dl_err:
+                        print(f"🎨 T2I 下載圖片失敗（嚴格複審將無法執行）: {_dl_err}")
                 if image_url:
                     result["image_url"] = image_url
                 if image_path:
