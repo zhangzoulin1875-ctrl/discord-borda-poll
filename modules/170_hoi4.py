@@ -12,7 +12,14 @@ GUILD_ID = 1425065927027720286
 HOI4_PANEL_TITLE_MARKER = "⚔️ 鋼鐵風暴 指揮部"
 TICK_INTERVAL_SECONDS = 1800          # 30 分鐘 = 遊戲內 1 天
 PANEL_REFRESH_SECONDS = 60            # 面板刷新間隔
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+# This module is exec'd into discord_borda_poll.py's global namespace,
+# so __file__ here is actually discord_borda_poll.py's path (not this file's).
+# discord_borda_poll.py already defines DATA_DIR correctly (relative to its own
+# __file__ → /opt/render/project/src/data). Just reuse it.
+try:
+    DATA_DIR  # already defined by discord_borda_poll.py
+except NameError:
+    DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 HOI4_STATE_FILE = os.path.join(DATA_DIR, "hoi4_state.json")
 HOI4_PANEL_FILE = os.path.join(DATA_DIR, "hoi4_panel.json")
 
