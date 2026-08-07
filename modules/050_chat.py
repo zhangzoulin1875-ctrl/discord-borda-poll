@@ -917,3 +917,92 @@ async def draw_command(interaction: discord.Interaction, prompt: str):
             await interaction.edit_original_response(content=f"❌ 文生圖失敗：{result.get('error', '未知錯誤')}")
 
 bot.tree.add_command(draw_command)
+
+# ──────────────────────────────────────────────
+# Drive 版本歷史復原指令 — 機器人擁有者限定
+# 用途：如果設定檔（最常見是 chat_ai_settings.json）不明原因被清空/覆蓋成
+# 預設值並已同步回 Drive，光靠重啟救不回來，因為 Drive 上的「最新版本」
+# 本身就是壞的。這兩個指令直接查詢/復原 Google Drive 的檔案修訂歷史。
+# ──────────────────────────────────────────────
+
+@app_commands.command(name="drive_revisions", description="查看某個設定檔在 Google Drive 上的版本歷史（機器人擁有者限定）")
+@app_commands.describe(filename="檔名，預設 chat_ai_settings.json")
+async def drive_revisions_command(interaction: discord.Interaction, filename: str = "chat_ai_settings.json"):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    revisions = await _drive_list_revisions(filename)
+    if not revisions:
+        await interaction.followup.send(f"❌ 找不到 `{filename}` 的版本歷史（可能檔案不存在，或 Drive 沒保留這麼舊的版本）。", ephemeral=True)
+        return
+    lines = [f"📜 `{filename}` 共有 {len(revisions)} 個版本（最新在最上面）：\n"]
+    for i, rev in enumerate(revisions[:20]):
+        mtime = rev.get("modifiedTime", "")
+        try:
+            dt = datetime.fromisoformat(mtime.replace("Z", "+00:00")).astimezone(GMT8)
+            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            time_str = mtime
+        size_kb = int(rev.get("size", 0)) / 1024
+        lines.append(f"`[{i}]` {time_str}（GMT+8）— {size_kb:.1f} KB")
+    lines.append(f"\n用 `/chat drive_restore filename:{filename} index:數字` 復原指定版本（index 是上面 `[數字]`）。")
+    embed = discord.Embed(title="🕐 Drive 版本歷史", description="\n".join(lines), color=discord.Color.blue())
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+bot.tree.add_command(drive_revisions_command)
+
+
+@app_commands.command(name="drive_restore", description="從 Google Drive 版本歷史復原設定檔（機器人擁有者限定）")
+@app_commands.describe(filename="檔名，預設 chat_ai_settings.json", index="從 /chat drive_revisions 查到的版本編號")
+async def drive_restore_command(interaction: discord.Interaction, index: int, filename: str = "chat_ai_settings.json"):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    revisions = await _drive_list_revisions(filename)
+    if not revisions or index < 0 or index >= len(revisions):
+        await interaction.followup.send(f"❌ 版本編號無效，請先用 `/chat drive_revisions filename:{filename}` 查看有效範圍。", ephemeral=True)
+        return
+    rev = revisions[index]
+    content = await _drive_download_revision(filename, rev["id"])
+    if not content:
+        await interaction.followup.send(f"❌ 下載該版本內容失敗，請查看 Render logs。", ephemeral=True)
+        return
+    try:
+        parsed = json_module.loads(content)
+    except Exception as e:
+        await interaction.followup.send(f"❌ 該版本內容不是合法 JSON：{e}", ephemeral=True)
+        return
+
+    # 寫回本地檔案 + 立即重新上傳到 Drive（讓這個舊版本變成新的「目前版本」）
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    filepath = os.path.join(data_dir, filename)
+    with open(filepath, "w", encoding="utf-8") as fh:
+        fh.write(content)
+
+    summary_lines = [f"✅ 已將 `{filename}` 復原到版本 `[{index}]`（{rev.get('modifiedTime', '')}）並重新上傳到 Drive。"]
+
+    if filename == "chat_ai_settings.json":
+        # 這是全機器人設定的單點故障檔——直接更新記憶體內的 chat_ai_settings，
+        # 不需要重啟機器人就能立刻生效，並確保這個版本被視為「目前版本」上傳回 Drive。
+        chat_ai_settings.update(parsed)
+        save_chat_ai_settings()
+        pool = chat_ai_settings.get("ai_pool", [])
+        summary_lines.append(f"\n**復原後的關鍵設定：**")
+        summary_lines.append(f"AI 聊天：{'✅ 開啟' if chat_ai_settings.get('enabled') else '❌ 關閉'}")
+        summary_lines.append(f"總 AI 池：{len(pool)} 個端點")
+        for p in pool:
+            _models = p.get("models", p.get("model", ""))
+            summary_lines.append(f"  - {p.get('name', '（未命名）')}：{_models}")
+        summary_lines.append(f"紀錄頻道：{chat_ai_settings.get('log_channel_id') or '未設定'}")
+        summary_lines.append(f"\n設定已立即生效，不需要重啟機器人。請到 Dashboard 確認是否是你要的版本。")
+    else:
+        await _immediate_drive_upload(filename)
+        summary_lines.append(f"\n⚠️ 這個檔案不是 chat_ai_settings.json，記憶體內的對應資料不會自動更新——需要**重啟機器人**讓它重新從 Drive 載入這個復原後的版本。")
+
+    embed = discord.Embed(title="🔄 Drive 版本復原完成", description="\n".join(summary_lines), color=discord.Color.green())
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+bot.tree.add_command(drive_restore_command)

@@ -9136,6 +9136,89 @@ async def _drive_download(filename: str, _retry_count: int = 3) -> str:
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Drive 版本歷史復原工具 — 給 /chat drive_revisions 與 /chat drive_restore 用。
+# 用途：如果某個資料檔（最典型是 chat_ai_settings.json）不知何故被清空/覆蓋成
+# 預設值並已同步回 Drive，靠「重啟重新載入」是救不回來的——因為 Drive 上現在
+# 的「最新版本」本身就是壞的。Google Drive 對每個檔案都會保留修訂歷史
+# （revisions），所以可以直接把清空前的舊版本內容抓回來、當成新的目前版本
+# 重新存回去，不需要使用者手動重新輸入所有設定。
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _drive_get_file_id(filename: str) -> str | None:
+    """依檔名在設定的資料夾內找檔案 ID，找不到回傳 None。"""
+    token = await _get_drive_access_token()
+    if not token:
+        return None
+    folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            query = f"name='{filename}' and trashed=false"
+            if folder_id:
+                query += f" and '{folder_id}' in parents"
+            search_url = f"https://www.googleapis.com/drive/v3/files?q={urllib.parse.quote(query)}&fields=files(id,name)"
+            async with session.get(search_url, headers=headers) as resp:
+                if resp.status != 200:
+                    return None
+                data = json_module.loads(await resp.text())
+                files = data.get("files", [])
+                return files[0]["id"] if files else None
+    except Exception as e:
+        print(f"⚠️ _drive_get_file_id({filename}) 失敗: {e}")
+        return None
+
+
+async def _drive_list_revisions(filename: str) -> list:
+    """列出某檔案的所有修訂版本，新到舊排序。每筆含 id/modifiedTime/size。"""
+    file_id = await _drive_get_file_id(filename)
+    if not file_id:
+        return []
+    token = await _get_drive_access_token()
+    if not token:
+        return []
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = (f"https://www.googleapis.com/drive/v3/files/{file_id}/revisions"
+                   f"?fields=revisions(id,modifiedTime,size)&pageSize=1000")
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    err = await resp.text()
+                    print(f"⚠️ 列出 {filename} 版本歷史失敗（{resp.status}）：{err[:300]}")
+                    return []
+                data = json_module.loads(await resp.text())
+                revisions = data.get("revisions", [])
+                revisions.sort(key=lambda r: r.get("modifiedTime", ""), reverse=True)
+                return revisions
+    except Exception as e:
+        print(f"⚠️ 列出 {filename} 版本歷史例外: {e}")
+        return []
+
+
+async def _drive_download_revision(filename: str, revision_id: str) -> str | None:
+    """下載某檔案指定版本的內容。"""
+    file_id = await _drive_get_file_id(filename)
+    if not file_id:
+        return None
+    token = await _get_drive_access_token()
+    if not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://www.googleapis.com/drive/v3/files/{file_id}/revisions/{revision_id}?alt=media"
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    err = await resp.text()
+                    print(f"⚠️ 下載 {filename} 版本 {revision_id} 失敗（{resp.status}）：{err[:300]}")
+                    return None
+                return await resp.text()
+    except Exception as e:
+        print(f"⚠️ 下載 {filename} 版本 {revision_id} 例外: {e}")
+        return None
+
+
 _drive_file_hashes = {}  # filename -> last-uploaded content hash (for skip-unchanged)
 
 async def sync_to_drive():
