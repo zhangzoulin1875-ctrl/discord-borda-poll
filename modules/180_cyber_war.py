@@ -195,14 +195,16 @@ class _EventSelectView(discord.ui.View):
         if event_id == "_none":
             await interaction.response.edit_message(content="❌ 無可用事件。", view=None)
             return
+        # 先 defer 回應（3秒內），避免 Discord 互動超時
+        await interaction.response.defer()
+        # 重活：寫盤 + 刷新面板
         ev_info, changes = _apply_special_event(event_id)
         if not ev_info:
-            await interaction.response.edit_message(content="❌ 事件套用失敗。", view=None)
+            await interaction.edit_original_response(content="❌ 事件套用失敗。", view=None)
             return
         if "❌" in changes:
-            await interaction.response.edit_message(content=changes, view=None)
+            await interaction.edit_original_response(content=changes, view=None)
             return
-        # 刷新面板
         try:
             await refresh_war_panel()
         except Exception:
@@ -218,7 +220,7 @@ class _EventSelectView(discord.ui.View):
             f"  {fac_a.get('flag','')} {fac_a.get('name','')}：進度{fac_a.get('progress',0)}% 士氣{fac_a.get('morale',100)} 補給{fac_a.get('supplies',100)} 點數{fac_a.get('supply_points',0)}\n"
             f"  {fac_b.get('flag','')} {fac_b.get('name','')}：進度{fac_b.get('progress',0)}% 士氣{fac_b.get('morale',100)} 補給{fac_b.get('supplies',100)} 點數{fac_b.get('supply_points',0)}"
         )
-        await interaction.response.edit_message(content=result_text, view=None)
+        await interaction.edit_original_response(content=result_text, view=None)
 PROGRESS_WIN_THRESHOLD = 100 # 進度達100%即勝利
 MORALE_DEFEAT_THRESHOLD = 0  # 士氣降至0即敗北
 
