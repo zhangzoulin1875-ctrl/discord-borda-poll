@@ -2836,6 +2836,7 @@ def load_chat_ai_settings():
                 print("🔄 偵測到 system_prompt 仍是舊版預設值，已自動升級為新版（含「不確定」使用邊界規則）")
             chat_ai_settings.update(loaded)
             print("✅ 載入 AI 聊天設定")
+            _auto_migrate_to_pool()
     except Exception as e:
         print(f"⚠️ Failed to load chat AI settings: {e}")
 

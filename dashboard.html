@@ -110,9 +110,50 @@
         </div>
         <label class="toggle"><input type="checkbox" id="ai-enabled"><span class="toggle-slider"></span></label>
       </div>
-      <!-- API Config -->
+      <!-- 總 AI 池 -->
       <div class="bg-[#2b2d31] rounded-xl p-5">
-        <h3 class="font-semibold mb-3">API 設定</h3>
+        <h3 class="font-semibold mb-1">🌐 總 AI 池</h3>
+        <p class="text-xs text-gray-400 mb-4">新增多個 API 端點（URL + Key + 可用模型），下方的「模型分配」會從這裡挑選。所有 API 設定集中管理。</p>
+        <div id="ai-pool-list" class="space-y-3 mb-3"></div>
+        <button onclick="addPoolEntry()" class="w-full bg-[#5865f2]/20 hover:bg-[#5865f2]/30 text-[#5865f2] px-3 py-2 rounded-lg text-sm font-medium border border-[#5865f2]/30">+ 新增 API 端點</button>
+      </div>
+
+      <!-- 模型分配 -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">🎯 模型分配</h3>
+        <p class="text-xs text-gray-400 mb-4">從總 AI 池挑選各角色要用的 API + 模型。留空 = 使用主模型/主 API。降級鏈在主模型失敗時依序嘗試（每個可用不同 API 端點）。</p>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">⚙️ 主模型（預設 API+模型）</label>
+            <select id="role-main" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm"></select>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">🔄 備援模型（最後防線）</label>
+            <select id="role-backup" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm"></select>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">💬 聊天模型</label>
+            <select id="role-chat" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm"></select>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">🛡️ 行政模型</label>
+            <select id="role-admin" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm"></select>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">🎮 娛樂模型</label>
+            <select id="role-entertainment" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm"></select>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-2">⛓️ 降級鏈（主模型失敗時依序嘗試，每個可用不同 API）</label>
+            <div id="fallback-chain-list" class="space-y-2 mb-2"></div>
+            <button onclick="addFallbackChainEntry()" class="text-sm text-[#5865f2] hover:underline">+ 新增降級鏈項目</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- API Config (手動/進階) -->
+      <div class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-3">API 設定 <span class="text-xs text-gray-500 font-normal">（進階手動，上方模型分配優先）</span></h3>
         <label class="block text-sm text-gray-400 mb-1">API 端點 URL</label>
         <input id="ai-api-url" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="https://api.openai.com/v1/chat/completions">
         <label class="block text-sm text-gray-400 mb-1">API Key</label>
@@ -1012,6 +1053,13 @@ async function showChatAIPanel() {
   document.getElementById('ai-chat-model').value = s.chat_model || '';
   document.getElementById('ai-admin-model').value = s.admin_model || '';
   document.getElementById('ai-entertainment-model').value = s.entertainment_model || '';
+  // ── 總 AI 池載入 ──
+  aiPoolData = (s.ai_pool || []).map(e => ({...e}));
+  renderPoolList();
+  renderAllRoleSelects(s);
+  // 載入降級鏈
+  fallbackChainData = (s.fallback_chain_entries || []).map(e => ({api_url: e.api_url, api_key: '', model: e.model, _masked_key: e.api_key_masked || ''}));
+  renderFallbackChain();
   document.getElementById('ai-quiz-model').value = s.quiz_model || '';
   document.getElementById('ai-turtle-soup-model').value = s.turtle_soup_model || '';
   document.getElementById('ai-werewolf-model').value = s.werewolf_model || '';
@@ -1048,6 +1096,136 @@ async function showChatAIPanel() {
   document.getElementById('ai-mod-severe-enabled').checked = s.ai_mod_severe_enabled || false;
   document.getElementById('ai-mod-exempt-roles').value = (s.ai_mod_exempt_roles || []).join(',');
   document.getElementById('ai-mod-severe-rules').value = s.ai_mod_severe_rules || '';
+}
+
+// ── 總 AI 池管理 ──
+let aiPoolData = [];
+let fallbackChainData = [];
+
+function renderPoolList() {
+  const container = document.getElementById('ai-pool-list');
+  if (!aiPoolData.length) {
+    container.innerHTML = '<p class="text-xs text-gray-500 text-center py-2">尚未新增任何 API 端點。點擊下方按鈕新增。</p>';
+    return;
+  }
+  container.innerHTML = aiPoolData.map((entry, idx) => `
+    <div class="bg-[#1e1f22] rounded-lg p-3 space-y-2 border border-[#3a3c41]">
+      <div class="flex gap-2 items-center">
+        <input class="flex-1 bg-[#2b2d31] text-white rounded px-2 py-1.5 text-sm outline-none focus:ring-1 ring-[#5865f2]"
+               placeholder="名稱（如：OpenAI、DeepSeek）"
+               value="${entry.name || ''}"
+               onchange="aiPoolData[${idx}].name = this.value">
+        <button onclick="removePoolEntry(${idx})" class="text-red-400 hover:text-red-300 text-sm px-2 py-1">✕ 刪除</button>
+      </div>
+      <input class="w-full bg-[#2b2d31] text-white rounded px-2 py-1.5 text-sm outline-none focus:ring-1 ring-[#5865f2]"
+             placeholder="API URL（如：https://api.openai.com/v1/chat/completions）"
+             value="${entry.api_url || ''}"
+             onchange="aiPoolData[${idx}].api_url = this.value">
+      <input class="w-full bg-[#2b2d31] text-white rounded px-2 py-1.5 text-sm outline-none focus:ring-1 ring-[#5865f2]"
+             type="password" placeholder="API Key${entry.api_key_masked ? '（已設定：' + entry.api_key_masked + '，輸入新值可覆蓋）' : ''}"
+             value=""
+             onchange="aiPoolData[${idx}].api_key = this.value">
+      <input class="w-full bg-[#2b2d31] text-white rounded px-2 py-1.5 text-sm outline-none focus:ring-1 ring-[#5865f2]"
+             placeholder="可用模型（逗號分隔，如：gpt-4o-mini,gpt-4o,deepseek-chat）"
+             value="${entry.models || ''}"
+             onchange="aiPoolData[${idx}].models = this.value">
+    </div>
+  `).join('');
+}
+
+function addPoolEntry() {
+  aiPoolData.push({id: 'p' + Date.now() + Math.random().toString(36).slice(2,6), name: '', api_url: '', api_key: '', models: ''});
+  renderPoolList();
+  renderAllRoleSelects();
+}
+
+function removePoolEntry(idx) {
+  aiPoolData.splice(idx, 1);
+  renderPoolList();
+  renderAllRoleSelects();
+}
+
+function buildRoleOptions(selectedVal) {
+  let opts = '<option value="">-- 不指定（使用主模型/主 API） --</option>';
+  aiPoolData.forEach(entry => {
+    const models = (entry.models || '').split(',').map(m => m.trim()).filter(m => m);
+    models.forEach(m => {
+      const val = entry.id + '||' + m;
+      const label = (entry.name || entry.api_url || '未命名') + ' / ' + m;
+      opts += `<option value="${val}" ${val === selectedVal ? 'selected' : ''}>${label}</option>`;
+    });
+  });
+  return opts;
+}
+
+function renderAllRoleSelects(s) {
+  const settings = s || {};
+  // Find current selections from legacy fields
+  function findPoolVal(apiUrl, model) {
+    if (!model) return '';
+    const entry = aiPoolData.find(e => e.api_url === apiUrl);
+    if (entry) return entry.id + '||' + model;
+    return '';
+  }
+  // Main model
+  document.getElementById('role-main').innerHTML = buildRoleOptions(findPoolVal(settings.api_url, settings.model));
+  // Backup model
+  document.getElementById('role-backup').innerHTML = buildRoleOptions(findPoolVal(settings.fallback_api_url, settings.fallback_model));
+  // Chat model
+  document.getElementById('role-chat').innerHTML = buildRoleOptions(findPoolVal(settings.chat_api_url, settings.chat_model));
+  // Admin model
+  document.getElementById('role-admin').innerHTML = buildRoleOptions(findPoolVal(settings.admin_api_url, settings.admin_model));
+  // Entertainment model
+  document.getElementById('role-entertainment').innerHTML = buildRoleOptions(findPoolVal(settings.entertainment_api_url, settings.entertainment_model));
+}
+
+// ── 降級鏈管理 ──
+function renderFallbackChain() {
+  const container = document.getElementById('fallback-chain-list');
+  if (!fallbackChainData.length) {
+    container.innerHTML = '<p class="text-xs text-gray-500">尚未新增降級鏈項目。主模型失敗時會直接跳到備援模型。</p>';
+    return;
+  }
+  container.innerHTML = fallbackChainData.map((f, idx) => {
+    let opts = '<option value="">-- 選擇 API+模型 --</option>';
+    aiPoolData.forEach(entry => {
+      const models = (entry.models || '').split(',').map(m => m.trim()).filter(m => m);
+      models.forEach(m => {
+        const val = entry.id + '||' + m;
+        const label = (entry.name || entry.api_url || '未命名') + ' / ' + m;
+        const sel = (f.pool_id === entry.id && f.model === m) ? 'selected' : '';
+        opts += `<option value="${val}" ${sel}>${label}</option>`;
+      });
+    });
+    return `
+      <div class="flex gap-2 items-center">
+        <span class="text-xs text-gray-500 w-6">${idx + 1}.</span>
+        <select class="flex-1 bg-[#1e1f22] text-white rounded px-2 py-1.5 text-sm outline-none focus:ring-1 ring-[#5865f2]"
+                onchange="updateFallbackChainEntry(${idx}, this.value)">
+          ${opts}
+        </select>
+        <button onclick="removeFallbackChainEntry(${idx})" class="text-red-400 text-sm px-2">✕</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function addFallbackChainEntry() {
+  fallbackChainData.push({pool_id: '', model: ''});
+  renderFallbackChain();
+}
+
+function updateFallbackChainEntry(idx, val) {
+  if (!val) { fallbackChainData[idx] = {pool_id: '', model: ''}; }
+  else {
+    const [poolId, model] = val.split('||');
+    fallbackChainData[idx] = {pool_id: poolId, model};
+  }
+}
+
+function removeFallbackChainEntry(idx) {
+  fallbackChainData.splice(idx, 1);
+  renderFallbackChain();
 }
 
 async function saveChatAISettings() {
@@ -1096,9 +1274,68 @@ async function saveChatAISettings() {
     circuit_cooldown_msg: document.getElementById('ai-circuit-cooldown-msg').value.trim(),
   };
   // 分類模型
-  data.chat_model = document.getElementById('ai-chat-model').value.trim();
-  data.admin_model = document.getElementById('ai-admin-model').value.trim();
-  data.entertainment_model = document.getElementById('ai-entertainment-model').value.trim();
+  // ── 總 AI 池儲存 ──
+  data.ai_pool = aiPoolData.map(e => ({
+    id: e.id || ('p' + Date.now() + Math.random().toString(36).slice(2,6)),
+    name: e.name || '',
+    api_url: e.api_url || '',
+    api_key: e.api_key || '',  // 只傳新輸入的 key，空字串 = 保留原值
+    models: e.models || ''
+  }));
+  // 解析模型分配 dropdowns → 端點+模型
+  function parseRoleSelect(selectId) {
+    const val = document.getElementById(selectId).value;
+    if (!val) return null;
+    const [poolId, model] = val.split('||');
+    const entry = aiPoolData.find(e => e.id === poolId);
+    if (!entry || !model) return null;
+    return {api_url: entry.api_url, api_key: entry.api_key || '', model};
+  }
+  // 主模型
+  const mainSel = parseRoleSelect('role-main');
+  if (mainSel) {
+    data.api_url = mainSel.api_url;
+    if (mainSel.api_key) data.api_key = mainSel.api_key;
+    data.model = mainSel.model;
+  }
+  // 備援模型
+  const backupSel = parseRoleSelect('role-backup');
+  if (backupSel) {
+    data.fallback_api_url = backupSel.api_url;
+    if (backupSel.api_key) data.fallback_api_key = backupSel.api_key;
+    data.fallback_model = backupSel.model;
+  }
+  // 聊天模型（含 API 端點）
+  const chatSel = parseRoleSelect('role-chat');
+  if (chatSel) {
+    data.chat_model = chatSel.model;
+    data.chat_api_url = chatSel.api_url;
+    if (chatSel.api_key) data.chat_api_key = chatSel.api_key;
+  }
+  // 行政模型（含 API 端點）
+  const adminSel = parseRoleSelect('role-admin');
+  if (adminSel) {
+    data.admin_model = adminSel.model;
+    data.admin_api_url = adminSel.api_url;
+    if (adminSel.api_key) data.admin_api_key = adminSel.api_key;
+  }
+  // 娛樂模型（含 API 端點）
+  const entSel = parseRoleSelect('role-entertainment');
+  if (entSel) {
+    data.entertainment_model = entSel.model;
+    data.entertainment_api_url = entSel.api_url;
+    if (entSel.api_key) data.entertainment_api_key = entSel.api_key;
+  }
+  // 降級鏈
+  data.fallback_chain_entries = fallbackChainData.map(f => {
+    const entry = aiPoolData.find(e => e.id === f.pool_id);
+    if (!entry) return null;
+    return {api_url: entry.api_url, api_key: entry.api_key || '', model: f.model};
+  }).filter(Boolean);
+  // 分類模型（手動欄位，如果模型分配 dropdown 沒選才用手動）
+  data.chat_model = data.chat_model || document.getElementById('ai-chat-model').value.trim();
+  data.admin_model = data.admin_model || document.getElementById('ai-admin-model').value.trim();
+  data.entertainment_model = data.entertainment_model || document.getElementById('ai-entertainment-model').value.trim();
   // 娛樂功能模型
   data.quiz_model = document.getElementById('ai-quiz-model').value.trim();
   data.turtle_soup_model = document.getElementById('ai-turtle-soup-model').value.trim();
