@@ -4187,7 +4187,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         break
     # ── Fallback API ──
     # ── 池式降級鏈：每項可有不同 API 端點 ──
-    if msg is not None and not msg.get("content") and not msg.get("tool_calls") and _pool_chain:
+    if msg is not None and not msg.get("content") and not msg.get("tool_calls") and _pool_chain and not settings.get("_skip_pool_chain", False):
         _pool_err = msg.get("error", "") if msg else ""
         _is_pool_err = any(c in (_pool_err or "") for c in ["503", "502", "500", "504", "401", "403", "timeout", "Timeout", "逾時", "Connection"])
         if _is_pool_err:
@@ -4202,6 +4202,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                     "api_key": _pc_key,
                     "model": _pc_model,
                     "fallback_enabled": False,  # 池降級鏈內不再觸發備援，避免無限遞迴
+                    "_skip_pool_chain": True,   # 遞迴呼叫不再進入池降級鏈，避免無限遞迴
                 }
                 _pc_budget = int(_remaining())
                 if _pc_budget < 3:
@@ -4290,6 +4291,7 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
                         "api_key": _fb_key,
                         "model": _fb_model or settings.get("model", "gpt-4o-mini"),
                         "fallback_enabled": False,  # prevent infinite recursion
+                        "_skip_pool_chain": True,   # 備援API遞迴也不進入池降級鏈
                     }
                     # Bug fix: this used to be `max(5, int(_remaining()))` —
                     # since `_remaining()` never drops below its 0.5 floor,
