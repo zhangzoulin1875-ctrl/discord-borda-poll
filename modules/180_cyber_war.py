@@ -857,6 +857,170 @@ class CyberWarPanelView(discord.ui.View):
         )
         await interaction.response.send_message(rules_text, ephemeral=True)
 
+    @discord.ui.button(label="WW1測試", style=discord.ButtonStyle.secondary, emoji="🧪", custom_id="cw_test_btn")
+    async def test_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != str(BOT_OWNER_ID):
+            await interaction.response.send_message("❌ 此按鈕僅限機器人擁有者使用。", ephemeral=True)
+            return
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+
+        view = _CWTestView()
+        await interaction.response.send_message(
+            "🧪 **WW1 測試面板**\n"
+            "• **快進一回合** — 為所有未行動玩家隨機生成行動，然後立即結算\n"
+            "• **調整進度差>30%** — 手動設定進度差距以觸發戰爭巨獸部署",
+            view=view, ephemeral=True
+        )
+
+# ── WW1測試 View ──
+class _CWTestView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="快進一回合", style=discord.ButtonStyle.primary, emoji="⏩", custom_id="cw_test_skip")
+    async def skip_turn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        s = _cyber_war_state
+        if not s.get("active"):
+            await interaction.edit_original_response(content="❌ 戰局已結束。", view=None)
+            return
+
+        turn = s.get("turn", 1)
+        turn_str = str(turn)
+
+        # 為所有未行動的玩家隨機生成一戰風格行動
+        _ww1_random_actions = [
+            "率領小隊向敵方壕溝發起衝鋒，利用手榴彈壓制敵軍火力點",
+            "在防線前沿挖掘新壕溝，加固鐵絲網與沙袋陣地",
+            "操作馬克沁機槍壓制敵方衝鋒步兵，掩護友軍撤退",
+            "趁夜色潛入無人區偵察敵軍佈防，繪製敵方陣地草圖",
+            "組織突擊小隊攜帶火焰噴射器清理敵方地道",
+            "在後方野戰醫院救治傷員，穩定重傷士兵狀況",
+            "冒著砲火將彈藥與口糧送到前沿陣地，補給即將耗盡的小隊",
+            "呼叫砲兵對敵方集結點進行覆蓋射擊，隨後發起步兵衝鋒",
+            "利用毒氣面罩防護，在芥子毒氣掩護下推進至敵方第二道防線",
+            "架設野戰電話線路，確保前線與指揮部的通訊暢通",
+            "派出偵察兵滲透敵後，搜集敵軍補給線與砲兵陣地位置",
+            "組織工兵爆破敵方地下坑道，阻止敵軍挖掘接近我方陣地",
+            "在戰壕轉角設置狙擊點，精準射殺敵方軍官與機槍手",
+            "率領騎兵繞到敵方側翼，襲擊其運輸車隊",
+            "操作迫擊炮轟擊敵方機槍巢，為步兵衝鋒開闢通道",
+        ]
+
+        for fkey in ("A", "B"):
+            fac = s["factions"][fkey]
+            actions = s.setdefault("actions", {}).setdefault(turn_str, {}).setdefault(fkey, {})
+            orders = s.get("orders", {}).get(turn_str, {}).get(fkey, {})
+
+            # 軍官：如果沒指令，隨機生成
+            for officer in fac.get("officers", []):
+                if officer["id"] not in actions and not orders.get(officer["id"]):
+                    orders[officer["id"]] = _cw_random.choice(_ww1_random_actions)
+            # 小隊長：如果沒指令，隨機生成
+            for sl in fac.get("squad_leaders", []):
+                if sl["id"] not in actions and not orders.get(sl["id"]):
+                    orders[sl["id"]] = _cw_random.choice(_ww1_random_actions)
+            # 士兵：如果沒行動，隨機生成
+            for soldier in fac.get("soldiers", []):
+                if soldier["id"] not in actions:
+                    spec = soldier.get("specialty", "")
+                    if spec == "突擊兵":
+                        pool = [a for a in _ww1_random_actions if "衝鋒" in a or "突擊" in a or "火焰" in a]
+                    elif spec == "醫療兵":
+                        pool = [a for a in _ww1_random_actions if "救治" in a or "醫" in a]
+                    elif spec == "支援兵":
+                        pool = [a for a in _ww1_random_actions if "補給" in a or "彈藥" in a or "口糧" in a]
+                    elif spec == "偵查兵":
+                        pool = [a for a in _ww1_random_actions if "偵察" in a or "偵查" in a or "滲透" in a or "偵" in a]
+                    else:
+                        pool = _ww1_random_actions
+                    actions[soldier["id"]] = _cw_random.choice(pool if pool else _ww1_random_actions)
+
+            # 確保 orders 存回
+            s.setdefault("orders", {}).setdefault(turn_str, {})[fkey] = orders
+
+        save_cyber_war()
+        await interaction.edit_original_response(
+            content=f"⏩ 已為所有玩家隨機生成行動，正在執行第{turn}回合AI結算...",
+            view=None
+        )
+
+        # 執行回合結算
+        await _process_turn_end()
+
+        # 顯示結果
+        summary = s.get("turn_summary", "")
+        fac_a = s["factions"]["A"]
+        fac_b = s["factions"]["B"]
+        result_text = (
+            f"✅ **第{turn}回合結算完成**\n\n"
+            f"📊 {fac_a['flag']} {fac_a['name']}：推進{fac_a.get('progress',0)}% | 士氣{fac_a.get('morale',100)} | 補給{fac_a.get('supplies',100)}\n"
+            f"📊 {fac_b['flag']} {fac_b['name']}：推進{fac_b.get('progress',0)}% | 士氣{fac_b.get('morale',100)} | 補給{fac_b.get('supplies',100)}\n\n"
+            f"📰 戰報：{summary[:500]}"
+        )
+        if s.get("winner"):
+            result_text += f"\n\n🏆 戰局結束！勝方：{s['factions'][s['winner']]['name']}"
+        await interaction.edit_original_response(content=result_text, view=None)
+
+    @discord.ui.button(label="調整進度差>30%", style=discord.ButtonStyle.danger, emoji="⚖️", custom_id="cw_test_gap")
+    async def force_gap(self, interaction: discord.Interaction, button: discord.ui.Button):
+        s = _cyber_war_state
+        if not s.get("active"):
+            await interaction.response.edit_message(content="❌ 戰局已結束。", view=None)
+            return
+
+        fac_a = s["factions"]["A"]
+        fac_b = s["factions"]["B"]
+        # 設定 A=60%, B=20%（差距40%），確保觸發巨獸
+        fac_a["progress"] = 60
+        fac_b["progress"] = 20
+        save_cyber_war()
+        await refresh_war_panel()
+
+        # 檢查巨獸是否已部署
+        wb_b = fac_b.get("war_beast")
+        wb_b_destroyed = fac_b.get("war_beast_destroyed", False)
+        msg = (
+            "⚖️ 已調整進度：\n"
+            f"  {fac_a['flag']} {fac_a['name']}：60%\n"
+            f"  {fac_b['flag']} {fac_b['name']}：20%\n"
+            f"  差距：40%（>30%觸發條件）\n\n"
+        )
+        if wb_b and not wb_b.get("destroyed"):
+            beast_name = _WAR_BEASTS.get(wb_b.get("type", ""), {}).get("name", "?")
+            msg += f"🦾 {fac_b['name']} 已有巨獸：{beast_name}（HP:{wb_b.get('hp',0)}）"
+        elif wb_b_destroyed:
+            msg += f"💀 {fac_b['name']} 的巨獸已被摧毀，無法再次部署"
+        else:
+            msg += "⏳ 巨獸將在下回合結算時自動部署給弱勢方（B方）"
+        await interaction.response.edit_message(content=msg, view=None)
+
+    @discord.ui.button(label="查看巨獸狀態", style=discord.ButtonStyle.secondary, emoji="🦾", custom_id="cw_test_beast")
+    async def beast_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        s = _cyber_war_state
+        lines = ["🦾 **戰爭巨獸狀態**\n"]
+        for fkey in ("A", "B"):
+            fac = s["factions"][fkey]
+            wb = fac.get("war_beast")
+            if wb and not wb.get("destroyed"):
+                beast_info = _WAR_BEASTS.get(wb.get("type", ""), {})
+                lines.append(
+                    f"{fac['flag']} {fac['name']}：{beast_info.get('emoji','')} {beast_info.get('name','?')} "
+                    f"| HP: {wb.get('hp',0)}/{WAR_BEAST_HP} "
+                    f"| 部署回合: {wb.get('deployed_turn','?')}"
+                )
+                if wb.get("current_order"):
+                    lines.append(f"  當前指令：{wb['current_order'][:100]}")
+                else:
+                    lines.append("  當前指令：無（閒置中）")
+            elif fac.get("war_beast_destroyed", False):
+                lines.append(f"{fac['flag']} {fac['name']}：💀 巨獸已被摧毀")
+            else:
+                lines.append(f"{fac['flag']} {fac['name']}：尚未部署巨獸")
+        await interaction.response.edit_message(content="\n".join(lines), view=None)
+
 # ── 戰爭巨獸 Modal ──
 class CyberWarBeastModal(discord.ui.Modal):
     def __init__(self, uid, fkey, turn, header):
