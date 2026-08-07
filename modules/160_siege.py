@@ -48,6 +48,11 @@ def save_siege_data():
             "settings": _siege_settings,
             "state": _siege_state,
         }, indent=2)
+        # 立即上傳到 Drive，避免「剛存檔→容器重啟→週期同步還沒跑→Drive 上還是舊資料」的競態
+        try:
+            asyncio.ensure_future(_immediate_drive_upload("siege_data.json"))
+        except Exception:
+            pass  # 沒有 event loop 時靜默跳過（load_siege_data 在 startup 呼叫 save 的情況）
     except Exception as e:
         print(f"⚠️ 攻城戰資料存檔失敗：{e}")
 
@@ -548,11 +553,27 @@ async def _siege_send_result_embed(broken: bool, rewards: list, last_attacker: d
 # ── 排程循環 ──
 async def siege_loop():
     """攻城戰主循環：
+    - 重啟時自動重建面板（清除廢棄面板、發送新的）
     - 每秒檢查是否到 10:00（開城）或 22:00（結算）
     - 60秒刷新一次面板（顯示即時血量/排行）
     """
     await bot.wait_until_ready()
-    await asyncio.sleep(10)  # 等待其他初始化完成
+    await asyncio.sleep(8)  # 等待其他初始化完成
+
+    # 重啟時重建面板（如果有進行中的攻城戰）
+    if _siege_state.get("active") and _siege_settings.get("channel_id"):
+        try:
+            await _siege_setup_panel()
+            print("⚔️ 攻城戰面板已重建")
+        except Exception as e:
+            print(f"⚠️ 攻城戰面板重建失敗：{e}")
+    elif _siege_settings.get("channel_id"):
+        # 沒有進行中的攻城戰也發一個「等待開城」面板
+        try:
+            await _siege_setup_panel()
+            print("⚔️ 攻城戰面板已重建（待機狀態）")
+        except Exception as e:
+            print(f"⚠️ 攻城戰面板重建失敗：{e}")
 
     last_check_minute = -1
     while True:
