@@ -1720,6 +1720,11 @@ chat_ai_settings = {
     "t2i_premium_daily_limit": 30,      # 高級通道每日總額度（全伺服器共用）
     "t2i_premium_daily_count": 0,      # 高級通道今日已用次數
     "t2i_premium_daily_date": "",       # 高級通道額度計算日期（自動重置）
+    "t2i_filter_enabled": False,       # 是否啟用生圖提示詞過濾
+    "t2i_filter_pool_id": "",           # 過濾模型使用的 API 池 ID（從 Dashboard 下拉選）
+    "t2i_filter_model": "",             # 過濾模型名稱（留空=用該池的預設模型）
+    "t2i_filter_timeout": 15,           # 過濾 API 逾時（秒）
+    "t2i_filter_max_tokens": 100,       # 過濾回覆最大 token 數
 }
 
 CHAT_AI_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "chat_ai_settings.json")
@@ -6749,6 +6754,114 @@ def _detect_t2i_request(text: str, settings: dict) -> str | None:
 
     return None
 
+async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
+    """Send the image prompt to a filtering model for safety review BEFORE
+    sending it to the image generator. Returns:
+      {"allowed": True} — safe to generate
+      {"allowed": False, "reason": "..."} — blocked, tell user why
+
+    Uses the model configured via t2i_filter_pool_id (from the AI pool) +
+    t2i_filter_model. If the filter is enabled but the model isn't configured
+    or the filter API fails, we fail-OPEN (allow) so the bot doesn't block
+    all image generation when the filter model has issues — but we print
+    a warning so it's visible.
+    """
+    if not settings.get("t2i_filter_enabled"):
+        return {"allowed": True}
+
+    pool_id = settings.get("t2i_filter_pool_id", "").strip()
+    filter_model = settings.get("t2i_filter_model", "").strip()
+    timeout_s = int(settings.get("t2i_filter_timeout", 15))
+    max_tokens = int(settings.get("t2i_filter_max_tokens", 100))
+
+    pool = settings.get("ai_pool", [])
+    pool_entry = next((e for e in pool if e.get("id") == pool_id), None)
+    if not pool_entry:
+        print(f"🎨 T2I 過濾：已啟用但找不到池 ID '{pool_id}'，放行（fail-open）")
+        return {"allowed": True}
+
+    api_url = pool_entry.get("api_url", "").strip()
+    api_key = pool_entry.get("api_key", "").strip()
+    if not api_url:
+        print("🎨 T2I 過濾：池端點 URL 為空，放行（fail-open）")
+        return {"allowed": True}
+
+    if not filter_model:
+        # Use the pool entry's default model if not explicitly set
+        filter_model = pool_entry.get("model", "").strip()
+    if not filter_model:
+        print("🎨 T2I 過濾：模型名稱為空，放行（fail-open）")
+        return {"allowed": True}
+
+    # Normalize chat completions URL
+    chat_url = api_url.rstrip("/")
+    if not chat_url.endswith("/chat/completions"):
+        if chat_url.endswith("/v1"):
+            chat_url += "/chat/completions"
+        elif "/v1/" not in chat_url:
+            chat_url += "/v1/chat/completions"
+
+    review_prompt = (
+        "You are an image prompt safety reviewer. "
+        "Review the following image generation prompt for content policy violations.\n"
+        "Reject if it contains: sexual/explicit content, gore/violence, "
+        "hate speech, illegal activities, CSAM, non-consensual deepfakes, "
+        "or other NSFW/harmful content.\n"
+        "If the prompt is safe, reply exactly: SAFE\n"
+        "If the prompt is unsafe, reply: BLOCKED: <brief reason in Traditional Chinese>\n"
+        f"\nPrompt to review: {prompt[:500]}"
+    )
+
+    payload = {
+        "model": filter_model,
+        "messages": [
+            {"role": "system", "content": "You are a content safety filter. Respond with SAFE or BLOCKED: <reason>."},
+            {"role": "user", "content": review_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=timeout_s, connect=10, sock_read=timeout_s - 2)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.post(chat_url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    err_text = await resp.text()
+                    print(f"🎨 T2I 過濾 API 失敗 (HTTP {resp.status}): {err_text[:200]}，放行（fail-open）")
+                    return {"allowed": True}
+                try:
+                    data = await resp.json()
+                except Exception:
+                    return {"allowed": True}
+                reply_text = ""
+                choices = data.get("choices", [])
+                if choices:
+                    reply_text = choices[0].get("message", {}).get("content", "").strip()
+                print(f"🎨 T2I 過濾結果: {reply_text[:100]}")
+                if reply_text.upper().startswith("SAFE"):
+                    return {"allowed": True}
+                elif reply_text.upper().startswith("BLOCKED"):
+                    reason = reply_text[len("BLOCKED"):].lstrip(": ").strip()
+                    if not reason:
+                        reason = "提示詞內容不符安全規範"
+                    return {"allowed": False, "reason": reason}
+                else:
+                    # Ambiguous response — be conservative and allow (the image API
+                    # itself usually has its own safety filter as a backstop)
+                    print(f"🎨 T2I 過濾回覆不明確，放行: {reply_text[:100]}")
+                    return {"allowed": True}
+    except asyncio.TimeoutError:
+        print(f"🎨 T2I 過濾逾時（{timeout_s}s），放行（fail-open）")
+        return {"allowed": True}
+    except Exception as e:
+        print(f"🎨 T2I 過濾例外: {type(e).__name__}: {e}，放行（fail-open）")
+        return {"allowed": True}
+
+
 async def _generate_image(prompt: str, settings: dict) -> dict:
     """Generate an image. Tries premium channel first (if enabled + quota remaining),
     falls back to default channel on any failure.
@@ -6756,6 +6869,13 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
     Returns {"success": True, "image_url"/"image_path": ..., "channel": "premium"/"default"}
     or {"success": False, "error": ...}
     """
+    # ── 提示詞安全過濾（在生圖之前先審查） ──
+    filter_result = await _t2i_filter_prompt(prompt, settings)
+    if not filter_result.get("allowed"):
+        reason = filter_result.get("reason", "提示詞內容不符安全規範")
+        print(f"🎨 T2I 提示詞被過濾攔截: {reason[:100]}")
+        return {"success": False, "error": f"🚫 提示詞被安全過濾攔截：{reason}", "filtered": True}
+
     # ── 高級生圖通道（優先嘗試，失敗自動降級） ──
     premium_error = None
     premium_skip_reason = None
@@ -7153,13 +7273,27 @@ async def _send_t2i_log(guild, user, prompt: str, result: dict, elapsed_ms: int 
         return
 
     success = result.get("success", False)
+    filtered = result.get("filtered", False)
     channel_used = result.get("channel", "?")
     channel_label = {"premium": "✨ 高級通道", "default": "🎨 預設通道"}.get(channel_used, channel_used or "?")
     model_used = result.get("model") or "?"
 
+    if filtered:
+        _embed_color = discord.Color.red()
+        _title = "🚫 文生圖提示詞過濾攔截"
+    elif success and channel_used == "premium":
+        _embed_color = discord.Color.gold()
+        _title = "🎨 文生圖紀錄"
+    elif success:
+        _embed_color = discord.Color.blue()
+        _title = "🎨 文生圖紀錄"
+    else:
+        _embed_color = discord.Color.red()
+        _title = "🎨 文生圖紀錄"
+
     embed = discord.Embed(
-        title="🎨 文生圖紀錄",
-        color=(discord.Color.gold() if channel_used == "premium" else discord.Color.blue()) if success else discord.Color.red(),
+        title=_title,
+        color=_embed_color,
         timestamp=discord.utils.utcnow(),
     )
     embed.add_field(name="👤 使用者", value=(user.display_name if user else "?"), inline=True)
@@ -7202,7 +7336,13 @@ async def _send_t2i_result(message, prompt: str, result: dict, settings: dict, i
 
     if not result.get("success"):
         error_msg = result.get("error", "未知錯誤")
-        if is_command:
+        if result.get("filtered"):
+            # 提示詞被安全過濾攔截——用不同的語氣，讓使用者知道這是內容審查不是技術故障
+            if is_command:
+                await message.reply(f"🚫 提示詞被安全過濾攔截：{error_msg.replace('🚫 提示詞被安全過濾攔截：', '')}", mention_author=False)
+            else:
+                await message.reply(f"🚫 這個提示詞沒辦法生圖喔：{error_msg.replace('🚫 提示詞被安全過濾攔截：', '')}", mention_author=False)
+        elif is_command:
             await message.reply(f"❌ 文生圖失敗：{error_msg}", mention_author=False)
         else:
             await message.reply(f"🎨 生圖失敗了：{error_msg}", mention_author=False)
@@ -8856,6 +8996,17 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["t2i_premium_quality"] = body["t2i_premium_quality"]
     if "t2i_premium_daily_limit" in body:
         chat_ai_settings["t2i_premium_daily_limit"] = int(body["t2i_premium_daily_limit"])
+    # ── 生圖提示詞過濾 ──
+    if "t2i_filter_enabled" in body:
+        chat_ai_settings["t2i_filter_enabled"] = bool(body["t2i_filter_enabled"])
+    if "t2i_filter_pool_id" in body:
+        chat_ai_settings["t2i_filter_pool_id"] = body["t2i_filter_pool_id"]
+    if "t2i_filter_model" in body:
+        chat_ai_settings["t2i_filter_model"] = body["t2i_filter_model"]
+    if "t2i_filter_timeout" in body:
+        chat_ai_settings["t2i_filter_timeout"] = int(body["t2i_filter_timeout"])
+    if "t2i_filter_max_tokens" in body:
+        chat_ai_settings["t2i_filter_max_tokens"] = int(body["t2i_filter_max_tokens"])
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -9525,6 +9676,32 @@ async def api_test_all_functions(request):
                                 "error": t2_result.get("error", "未知錯誤")})
     else:
         results.append({"label": "🎨 文生圖", "type": "image", "status": "skipped", "model": "", "error": "文生圖功能未啟用，跳過"})
+
+    # 13. 生圖提示詞過濾 — label "🛡️ 提示詞過濾"
+    if chat_ai_settings.get("t2i_filter_enabled"):
+        filter_pool_id = chat_ai_settings.get("t2i_filter_pool_id", "").strip()
+        filter_model = chat_ai_settings.get("t2i_filter_model", "").strip()
+        pool = chat_ai_settings.get("ai_pool", [])
+        pool_entry = next((e for e in pool if e.get("id") == filter_pool_id), None)
+        if not pool_entry:
+            results.append({"label": "🛡️ 提示詞過濾", "type": "filter", "status": "error", "model": filter_model,
+                            "error": "已啟用但找不到對應的 API 池，請至 Dashboard 設定"})
+        else:
+            pool_model = filter_model or pool_entry.get("model", "")
+            # 用一個明確安全的 prompt 測試過濾是否正常運作
+            f_t0 = _time.monotonic()
+            f_result = await _t2i_filter_prompt("a beautiful landscape painting of mountains", chat_ai_settings)
+            f_elapsed = int((_time.monotonic() - f_t0) * 1000)
+            if f_result.get("allowed"):
+                results.append({"label": "🛡️ 提示詞過濾", "type": "filter", "status": "ok",
+                                "latency_ms": f_elapsed, "model": pool_model,
+                                "response_snippet": "安全提示詞通過審查"})
+            else:
+                results.append({"label": "🛡️ 提示詞過濾", "type": "filter", "status": "error",
+                                "latency_ms": f_elapsed, "model": pool_model,
+                                "error": f"安全提示詞竟被攔截：{f_result.get('reason', '?')}"})
+    else:
+        results.append({"label": "🛡️ 提示詞過濾", "type": "filter", "status": "skipped", "model": "", "error": "提示詞過濾未啟用，跳過"})
 
     # Summary
     total = len(results)

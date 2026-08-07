@@ -605,6 +605,44 @@
     </div>
   </div>
 
+      <!-- 生圖提示詞過濾 -->
+  <div class="bg-[#2b2d31] rounded-xl p-5 border border-red-600/30">
+    <h3 class="font-semibold mb-1">🛡️ 生圖提示詞過濾 <span class="text-xs text-red-400 font-normal">（NSFW 審查，生圖前先過濾）</span></h3>
+    <p class="text-xs text-gray-400 mb-4">啟用後，每次生圖前會先將提示詞送到審查模型檢查是否含 NSFW/不當內容。審查通過才會送出生圖請求，不通過則告知用戶被攔截的原因。審查模型從下方 API 池下拉選擇。</p>
+    <div class="space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <p class="text-sm">啟用提示詞過濾</p>
+          <p class="text-xs text-gray-400">開啟後生圖前先經過審查模型檢查，不通過會退回告知原因</p>
+        </div>
+        <label class="toggle"><input type="checkbox" id="ai-t2i-filter-enabled"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">審查用 API 池</label>
+          <select id="ai-t2i-filter-pool-id" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-red-500 text-sm">
+            <option value="">— 選擇 API 池 —</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">審查模型名稱（留空=用池預設）</label>
+          <input id="ai-t2i-filter-model" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-red-500 text-sm" placeholder="例如 gpt-4o-mini">
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">審查逾時（秒）</label>
+          <input id="ai-t2i-filter-timeout" type="number" min="5" max="60" value="15" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-red-500 text-sm">
+        </div>
+        <div>
+          <label class="block text-sm text-gray-400 mb-1">回覆最大 Token 數</label>
+          <input id="ai-t2i-filter-max-tokens" type="number" min="50" max="500" value="100" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-red-500 text-sm">
+        </div>
+      </div>
+      <p class="text-xs text-gray-500">⚠️ 故障安全策略：如果審查 API 本身故障/逾時，系統會放行生圖（fail-open），避免審查模型出問題時整個生圖功能被卡死。</p>
+    </div>
+  </div>
+
       <!-- 會議排程通知 -->
       <div id="schedule-section" class="bg-[#2b2d31] rounded-xl p-5">
         <h3 class="font-semibold mb-1">📅 會議排程通知系統</h3>
@@ -1163,6 +1201,24 @@ async function showChatAIPanel() {
     premiumUsageEl.textContent = used + ' / ' + limit + '（今日）';
   }
 
+  // 生圖提示詞過濾
+  document.getElementById('ai-t2i-filter-enabled').checked = s.t2i_filter_enabled || false;
+  document.getElementById('ai-t2i-filter-model').value = s.t2i_filter_model || '';
+  document.getElementById('ai-t2i-filter-timeout').value = s.t2i_filter_timeout ?? 15;
+  document.getElementById('ai-t2i-filter-max-tokens').value = s.t2i_filter_max_tokens ?? 100;
+  // 填充池下拉選單
+  const filterPoolSelect = document.getElementById('ai-t2i-filter-pool-id');
+  if (filterPoolSelect) {
+    filterPoolSelect.innerHTML = '<option value="">— 選擇 API 池 —</option>';
+    (s.ai_pool || []).forEach(e => {
+      const opt = document.createElement('option');
+      opt.value = e.id;
+      opt.textContent = e.name + (e.model ? ' (' + e.model + ')' : '');
+      if (e.id === s.t2i_filter_pool_id) opt.selected = true;
+      filterPoolSelect.appendChild(opt);
+    });
+  }
+
   // Turtle Soup
   document.getElementById('ai-turtle-soup-enabled').checked = s.turtle_soup_enabled || false;
   document.getElementById('ai-turtle-soup-channel').value = s.turtle_soup_channel_id || '';
@@ -1450,6 +1506,12 @@ async function saveChatAISettings() {
     t2i_premium_size: document.getElementById('ai-t2i-premium-size').value,
     t2i_premium_quality: document.getElementById('ai-t2i-premium-quality').value,
     t2i_premium_daily_limit: parseInt(document.getElementById('ai-t2i-premium-daily-limit').value) || 30,
+    // 生圖提示詞過濾
+    t2i_filter_enabled: document.getElementById('ai-t2i-filter-enabled').checked,
+    t2i_filter_pool_id: document.getElementById('ai-t2i-filter-pool-id').value,
+    t2i_filter_model: document.getElementById('ai-t2i-filter-model').value.trim(),
+    t2i_filter_timeout: parseInt(document.getElementById('ai-t2i-filter-timeout').value) || 15,
+    t2i_filter_max_tokens: parseInt(document.getElementById('ai-t2i-filter-max-tokens').value) || 100,
     // Turtle Soup
     turtle_soup_enabled: document.getElementById('ai-turtle-soup-enabled').checked,
     turtle_soup_channel_id: document.getElementById('ai-turtle-soup-channel').value.trim(),

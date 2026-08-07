@@ -911,6 +911,9 @@ async def draw_command(interaction: discord.Interaction, prompt: str):
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ 圖片發送失敗: {e}")
     else:
-        await interaction.edit_original_response(content=f"❌ 文生圖失敗：{result.get('error', '未知錯誤')}")
+        if result.get("filtered"):
+            await interaction.edit_original_response(content=f"🚫 提示詞被安全過濾攔截：{result.get('error', '未知錯誤').replace('🚫 提示詞被安全過濾攔截：', '')}")
+        else:
+            await interaction.edit_original_response(content=f"❌ 文生圖失敗：{result.get('error', '未知錯誤')}")
 
 bot.tree.add_command(draw_command)
