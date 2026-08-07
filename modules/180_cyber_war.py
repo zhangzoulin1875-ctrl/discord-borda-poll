@@ -349,6 +349,8 @@ async def _start_new_game(guild):
             "supplies": 100,
             "casualties": 0,
             "defeated": False,
+            "war_beast": None,
+            "war_beast_destroyed": False,
         }
 
     fac_a = _build_faction("A", fac_a_info, side_a_members)
@@ -735,6 +737,61 @@ class CyberWarPanelView(discord.ui.View):
         view = _RoleSwitchView(uid, fkey, n_off, n_sl)
         await interaction.response.send_message("\n".join(lines), view=view, ephemeral=True)
 
+    @discord.ui.button(label="戰爭巨獸", style=discord.ButtonStyle.danger, emoji="🦾", custom_id="cw_war_beast_btn")
+    async def war_beast_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        info = _get_player_role(uid)
+        if not info:
+            await interaction.response.send_message("❌ 你不在本局參戰名單中。", ephemeral=True)
+            return
+        fkey, role, fac = info
+        if role != "officer":
+            await interaction.response.send_message("❌ 只有軍官可以操縱戰爭巨獸。", ephemeral=True)
+            return
+
+        wb = fac.get("war_beast")
+        if not wb or wb.get("destroyed"):
+            await interaction.response.send_message("❌ 你的陣營目前沒有可用的戰爭巨獸。", ephemeral=True)
+            return
+
+        beast_info = _WAR_BEASTS.get(wb.get("type", ""), {})
+        beast_name = beast_info.get("name", "?")
+        beast_emoji = beast_info.get("emoji", "")
+        beast_desc = beast_info.get("desc", "")
+        wb_hp = wb.get("hp", 0)
+        turn = _cyber_war_state.get("turn", 0)
+
+        # 檢查是否已有另一名軍官下達指令
+        existing_order = wb.get("current_order", "")
+        existing_officer = wb.get("ordered_by", "")
+        existing_officer_name = ""
+        if existing_officer:
+            for o in fac.get("officers", []):
+                if o["id"] == existing_officer:
+                    existing_officer_name = o.get("name", "?")
+                    break
+
+        if existing_order and existing_officer != uid:
+            # 另一名軍官已下達指令 → 確認覆蓋
+            view = _WarBeastOverrideView(uid, fkey, turn, existing_order, existing_officer_name, beast_name, beast_emoji)
+            await interaction.response.send_message(
+                f"⚠️ 另一名軍官 {existing_officer_name} 已下達指令：\n"
+                f"「{existing_order[:200]}」\n\n"
+                f"是否要覆蓋他的指令？",
+                view=view, ephemeral=True
+            )
+            return
+
+        # 沒有衝突，直接開 Modal
+        header = (
+            f"{beast_emoji} **{beast_name}** — HP: {wb_hp}/{WAR_BEAST_HP}\n"
+            f"📋 {beast_desc}\n"
+        )
+        await interaction.response.send_modal(CyberWarBeastModal(uid, fkey, turn, header))
+
     @discord.ui.button(label="遊戲規則", style=discord.ButtonStyle.success, emoji="📖", custom_id="cw_rules_btn")
     async def rules_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         rules_text = (
@@ -784,9 +841,80 @@ class CyberWarPanelView(discord.ui.View):
             "每回合1小時，共3天72回合。第一回合後鎖定押金。\n"
             "推進100%或敵方士氣歸0即勝利。時間到則進度高者勝。\n\n"
             "💰 **押金**\n"
-            "開局可自由下注琉璃幣，倍率50~75倍。勝方按押金比例瓜分獎池。"
+            "開局可自由下注琉璃幣，倍率50~75倍。勝方按押金比例瓜分獎池。\n\n"
+            "🦾 **戰爭巨獸**\n"
+            "當雙方進度差距超過30%時，系統自動發一台戰爭巨獸給弱勢方：\n"
+            "  🛸 齊柏林飛艇 — 高空轟炸，可打擊敵方後方陣地與補給線\n"
+            "  🚂 裝甲列車 — 快速機動火力平台，可支援多段戰線\n"
+            "  ⚓ 無畏艦 — 海上巨獸，可進行遠程重砲轟擊\n\n"
+            "巨獸規則：\n"
+            "  • 每局限部署一台，被摧毀後不可再部署\n"
+            "  • 巨獸初始100HP，隨該方戰況受損（進度下降/士氣大跌時受傷）\n"
+            "  • 只有軍官可使用「🦾 戰爭巨獸」按鈕下達指令\n"
+            "  • 若另一名軍官已下達指令，會提示是否覆蓋\n"
+            "  • 巨獸行動由AI裁判評估，可顯著影響戰局\n"
+            "  • 巨獸行動也需符合一戰背景（濫用同樣會受罰）"
         )
         await interaction.response.send_message(rules_text, ephemeral=True)
+
+# ── 戰爭巨獸 Modal ──
+class CyberWarBeastModal(discord.ui.Modal):
+    def __init__(self, uid, fkey, turn, header):
+        super().__init__(title="🦾 戰爭巨獸指令")
+        self._uid = uid
+        self._fkey = fkey
+        self._turn = turn
+        self._header = header
+        self.action = discord.ui.TextInput(
+            label="巨獸行動指令",
+            placeholder="例：飛艇升空轟炸敵方補給線，摧毀其後方糧倉",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=300,
+        )
+        self.add_item(self.action)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        fac = _cyber_war_state["factions"].get(self._fkey, {})
+        wb = fac.get("war_beast")
+        if not wb or wb.get("destroyed"):
+            await interaction.response.edit_message(content="❌ 巨獸已不存在或被摧毀。", view=None)
+            return
+        # 記錄軍官名
+        officer_name = interaction.user.display_name
+        wb["current_order"] = self.action.value
+        wb["ordered_by"] = self._uid
+        save_cyber_war()
+        beast_name = _WAR_BEASTS.get(wb["type"], {}).get("name", "?")
+        await interaction.response.edit_message(
+            content=f"✅ 已下達 {beast_name} 指令：\n「{self.action.value[:200]}」",
+            view=None,
+        )
+        await refresh_war_panel()
+
+# ── 戰爭巨獸覆蓋確認 ──
+class _WarBeastOverrideView(discord.ui.View):
+    def __init__(self, uid, fkey, turn, existing_order, existing_officer_name, beast_name, beast_emoji):
+        super().__init__(timeout=120)
+        self._uid = uid
+        self._fkey = fkey
+        self._turn = turn
+        self._existing_order = existing_order
+        self._existing_officer_name = existing_officer_name
+        self._beast_name = beast_name
+        self._beast_emoji = beast_emoji
+
+    @discord.ui.button(label="覆蓋指令", style=discord.ButtonStyle.danger, emoji="✅", custom_id="cw_wb_override_yes")
+    async def override_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            CyberWarBeastModal(self._uid, self._fkey, self._turn, f"覆蓋 {self._beast_emoji} {self._beast_name} 指令")
+        )
+
+    @discord.ui.button(label="保留原指令", style=discord.ButtonStyle.secondary, emoji="❌", custom_id="cw_wb_override_no")
+    async def override_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=f"✅ 保留 {self._existing_officer_name} 的指令。", view=None
+        )
 
 # ── 換身分 Select ──
 class _RoleSwitchView(discord.ui.View):
@@ -1122,6 +1250,17 @@ async def _ai_evaluate_turn(turn: int):
                 spec_text = f"（{spec}）" if spec else ""
                 lines.append(f"  [soldier{spec_text}] {soldier['name']}：（無行動）")
 
+        # 巨獸行動
+        wb = fac.get("war_beast")
+        if wb and not wb.get("destroyed") and wb.get("current_order"):
+            beast_name = _WAR_BEASTS.get(wb["type"], {}).get("name", "?")
+            beast_emoji = _WAR_BEASTS.get(wb["type"], {}).get("emoji", "")
+            lines.append(f"  [WAR_BEAST{beast_emoji}] {beast_name}（HP:{wb.get('hp',0)}）：{wb['current_order'][:150]}")
+        elif wb and not wb.get("destroyed"):
+            beast_name = _WAR_BEASTS.get(wb["type"], {}).get("name", "?")
+            beast_emoji = _WAR_BEASTS.get(wb["type"], {}).get("emoji", "")
+            lines.append(f"  [WAR_BEAST{beast_emoji}] {beast_name}（HP:{wb.get('hp',0)}）：（軍官未下達指令，閒置中）")
+
         arty = artillery.get(fkey, [])
         if arty:
             lines.append("  砲擊/空襲：")
@@ -1163,6 +1302,7 @@ async def _ai_evaluate_turn(turn: int):
         "考慮因素：行動的具體性、與上級指令的一致性、砲擊效果、補給消耗等。\n"
         "注意：標註〔服從小隊長/軍官指令〕的行動表示該玩家本人未提交行動，由上級統一指令代為執行，效果權重應低於玩家親自撰寫的行動。\n"
         "兵種特性：突擊兵進攻加成、醫療兵減少傷亡/恢復士氣、支援兵提供補給、偵查兵降低敵方突襲效果。\n"
+        "戰爭巨獸：標註[WAR_BEAST]的行動為戰爭巨獸（齊柏林飛艇/裝甲列車/無畏艦），具有強大戰力但有限血量。巨獸行動可顯著影響戰局，但若該方戰況不佳巨獸會受損甚至被摧毀。\n"
         "推進進度變化範圍：-10到+15，士氣變化：-20到+10，補給變化：-15到+5。\n"
         "若一方有濫用行為，該方進度/士氣可超出上述下限（最多-20/-25）。\n\n"
         "請用以下格式回覆（不要加其他文字）：\n"
@@ -1286,6 +1426,67 @@ async def _process_turn_end():
         fac_b["morale"] = max(0, fac_b["morale"] - 5)
 
     s["turn_summary"] = result["summary"]
+
+    # -- 戰爭巨獸自動部署 --
+    a_prog = fac_a.get("progress", 0)
+    b_prog = fac_b.get("progress", 0)
+    gap = abs(a_prog - b_prog)
+    if gap >= WAR_BEAST_TRIGGER_GAP:
+        weaker = "A" if a_prog < b_prog else "B"
+        wf = s["factions"][weaker]
+        wb = wf.get("war_beast")
+        if wb is None and not wf.get("war_beast_destroyed", False):
+            beast_type = _cw_random.choice(list(_WAR_BEASTS.keys()))
+            wf["war_beast"] = {
+                "type": beast_type,
+                "hp": WAR_BEAST_HP,
+                "deployed_turn": turn,
+                "destroyed": False,
+                "current_order": "",
+                "ordered_by": "",
+            }
+            beast_info = _WAR_BEASTS[beast_type]
+            s["turn_summary"] += (
+                "\n\U0001f988 " + wf["flag"] + " " + wf["name"]
+                + " 因進度落後超過" + str(WAR_BEAST_TRIGGER_GAP) + "%，獲得戰爭巨獸："
+                + beast_info["emoji"] + " " + beast_info["name"]
+                + "！軍官可使用「戰爭巨獸」按鈕下達指令。"
+            )
+            print("CW war beast deployed: " + wf["name"] + " gets " + beast_info["name"])
+
+    # -- 巨獸受傷判定 --
+    for fkey, fac in [("A", fac_a), ("B", fac_b)]:
+        wb = fac.get("war_beast")
+        if wb and not wb.get("destroyed"):
+            prog_key = "a_progress" if fkey == "A" else "b_progress"
+            mor_key = "a_morale" if fkey == "A" else "b_morale"
+            delta_prog = result.get(prog_key, 0)
+            delta_mor = result.get(mor_key, 0)
+            beast_damage = 0
+            if delta_prog < 0:
+                beast_damage += abs(delta_prog) * 2
+            if delta_mor < -10:
+                beast_damage += abs(delta_mor)
+            if beast_damage > 0:
+                wb["hp"] = max(0, wb["hp"] - beast_damage)
+                if wb["hp"] <= 0:
+                    wb["destroyed"] = True
+                    fac["war_beast_destroyed"] = True
+                    beast_name = _WAR_BEASTS[wb["type"]]["name"]
+                    beast_emoji = _WAR_BEASTS[wb["type"]]["emoji"]
+                    s["turn_summary"] += (
+                        "\n\U0001f4a5 " + fac["flag"] + " " + fac["name"]
+                        + " 的戰爭巨獸 " + beast_emoji + " " + beast_name
+                        + " 被摧毀！無法再次部署。"
+                    )
+                    print("CW war beast destroyed: " + fac["name"] + " " + beast_name)
+
+    # -- 清除本回合巨獸指令（下回合需重新下達）--
+    for fkey in ("A", "B"):
+        wb = s["factions"][fkey].get("war_beast")
+        if wb and not wb.get("destroyed"):
+            wb["current_order"] = ""
+            wb["ordered_by"] = ""
 
     # 檢查勝負
     a_defeated = fac_a["morale"] <= MORALE_DEFEAT_THRESHOLD or fac_a["progress"] <= 0 and fac_b["progress"] >= PROGRESS_WIN_THRESHOLD
