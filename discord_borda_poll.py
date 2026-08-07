@@ -6916,6 +6916,48 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
     if not settings.get("t2i_filter_enabled"):
         return {"allowed": True}
 
+    # ── 硬編碼色情黑名單（AI 審查之前先快速擋掉） ──
+    # 這些詞彙幾乎只出現在色情/擦邊語境，不需要 AI 判斷即可直接擋掉。
+    # 注意：只列色情/性相關詞彙，不列暴力/戰爭/武器相關詞彙（攻城戰等遊戲場景放行）。
+    _prompt_lower = prompt.lower()
+    _blocklist_en = [
+        "nsfw", "nude", "naked", "nudity", "porn", "porno", "pornographic",
+        "hentai", "ecchi", "lewd", "explicit sexual", "sexual explicit",
+        "18+", "xxx", "erotica", "erotic", "masturbat", "orgasm",
+        "intercourse", "genital", "penis", "vagina", "breast", "boob",
+        "topless", "bottomless", "undressed", "lingerie", "thong",
+        "bikini", "panties", "bra ", "cleavage", "areola", "nipple",
+        "ass ", "butt ", "booty", "thighs", "fetish", "bondage",
+        "bdsm", "dominatrix", "stripper", "strip club", "sensual",
+        "seductive", "provocative", "tit ", "dick ", "cock ", "cum ",
+        "creampie", "milf", "gilf", "dilf", "furry", "anthro sex",
+        "anthropomorphic sex", "anime girl nude", "anime nude",
+        "waifu nude", "rule 34", "rule34", "r34", "cheesecake",
+        "pinup", "pin-up", "glamour shot",
+    ]
+    _blocklist_zh = [
+        "裸體", "裸露", "裸體藝術", "全裸", "半裸", "赤裸",
+        "色情", "成人", "18禁", "限制級", "情趣", "情色",
+        "性交", "做愛", "性愛", "性行為", "自慰", "高潮",
+        "乳溝", "胸部", "奶子", "乳頭", "陰部", "陰道",
+        "陰莖", "龜頭", "屁股", "翹臀", "內褲", "胸罩",
+        "比基尼", "絲襪", "吊帶襪", "兔女郎", "女働裝性感",
+        "性感", "誘惑", "媚惑", "騷", "淫", "蕩",
+        "獸交", "獸人色情", "擬人色情", "擬人性愛",
+        "蘿莉", "正太", "蘿", "兒童色情", "未成年色情",
+        "觸手", "觸手怪", "凌辱", "強暴", "性侵",
+        "二次元裸", "動漫裸體", "本子", "同人誌", "裏番",
+        "肉番", "肉感", "肉體", "肉欲", "肉慾",
+    ]
+    for _w in _blocklist_en:
+        if _w in _prompt_lower:
+            print(f"🎨 T2I 提示詞黑名單命中（EN）：{_w}")
+            return {"allowed": False, "reason": f"提示詞包含色情/擦邊詞彙：{_w}"}
+    for _w in _blocklist_zh:
+        if _w in prompt:
+            print(f"🎨 T2I 提示詞黑名單命中（ZH）：{_w}")
+            return {"allowed": False, "reason": f"提示詞包含色情/擦邊詞彙：{_w}"}
+
     pool_id = settings.get("t2i_filter_pool_id", "").strip()
     filter_model = settings.get("t2i_filter_model", "").strip()
     timeout_s = int(settings.get("t2i_filter_timeout", 15))
@@ -6933,9 +6975,15 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
                  "or CSAM. Allow suggestive content, artistic nudity, violence, gore, weapons, war/battle "
                  "scenes, and other non-sexual mature content.",
         "medium": "Reject if the prompt contains: sexual/explicit/pornographic content, suggestive/implicit "
-                  "sexual content, or CSAM. Do NOT reject for violence, gore, weapons, war/battle scenes, "
+                  "sexual content, sexualized anime/furry characters, or CSAM. Also reject borderline terms "
+                  "commonly used to bypass filters: furry, hentai, ecchi, waifu nude, rule34, lewd, "
+                  " sensual/seductive anime characters. "
+                  "Do NOT reject for violence, gore, weapons, war/battle scenes, "
                   "or other non-sexual content — those are allowed.",
-        "strict": "Reject if the prompt contains: sexual/explicit/pornographic/suggestive content, or CSAM. "
+        "strict": "Reject if the prompt contains: sexual/explicit/pornographic/suggestive content, "
+                  "sexualized anime/furry characters, or CSAM. Also reject borderline terms commonly used "
+                  "to bypass filters: furry, hentai, ecchi, waifu nude, rule34, lewd, sensual/seductive "
+                  "anime characters, pinup/glamour style. "
                   "Be conservative on sexual content — when in doubt about sexual content, block. "
                   "Do NOT reject for violence, gore, weapons, war/battle scenes, hate symbols, or political "
                   "imagery — those are allowed and out of scope for this filter.",
