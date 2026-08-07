@@ -975,7 +975,10 @@ class CyberWarPanelView(discord.ui.View):
         await interaction.response.send_message(
             "🧪 **WW1 測試面板**\n"
             "• **快進一回合** — 為所有未行動玩家隨機生成行動，然後立即結算\n"
-            "• **調整進度差>30%** — 手動設定進度差距以觸發戰爭巨獸部署",
+            "• **調整進度差>30%** — 手動設定進度差距以觸發戰爭巨獸部署\n"
+            "• **🧪 WW1 AI測試** — 測試AI裁判是否能成功調用，回報結果或錯誤\n"
+            "• **查看巨獸狀態** — 查看雙方戰爭巨獸HP與指令\n"
+            "• **立刻部署巨獸** — 直接給弱勢方部署一台巨獸",
             view=view, ephemeral=True
         )
 
@@ -1229,6 +1232,138 @@ class _CWTestView(discord.ui.View):
             else:
                 lines.append(f"{fac['flag']} {fac['name']}：尚未部署巨獸")
         await interaction.response.edit_message(content="\n".join(lines), view=None)
+
+    @discord.ui.button(label="🧪 WW1 AI測試", style=discord.ButtonStyle.success, emoji="🧪", custom_id="cw_test_ai")
+    async def test_ai_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """測試 WW1 AI裁判是否能成功調用，回報結果或錯誤。"""
+        await interaction.response.defer(ephemeral=True)
+        s = _cyber_war_state
+
+        # 構建一個最小測試 prompt（不依賴實際遊戲狀態）
+        test_prompt = (
+            "你是第一次世界大戰的戰場裁判。以下是第1回合的戰況：\n\n"
+            "戰場：凡爾登\n"
+            "當前狀態：\n"
+            "  🇩🇪 德意志帝國 — 推進30%，士氣90，補給80\n"
+            "  🇫🇷 法蘭西共和國 — 推進25%，士氣85，補給75\n\n"
+            "德意志帝國方行動：\n"
+            "  [officer] 馮·法金漢：集中火力壓制敵方前沿陣地，掩護突擊兵衝鋒\n"
+            "  [soldier] 突擊兵（突擊兵）範例：攜帶手榴彈衝鋒敵方壕溝\n\n"
+            "法蘭西共和國方行動：\n"
+            "  [officer] 貝當：構築第二道防線，部署機槍陣地防守\n"
+            "  [soldier] 醫療兵（醫療兵）範例：在後方野戰醫院救治傷員\n\n"
+            "請用以下格式回覆（不要加其他文字）：\n"
+            "===A_PROGRESS_DELTA===\n5\n"
+            "===B_PROGRESS_DELTA===\n2\n"
+            "===A_MORALE_DELTA===\n-3\n"
+            "===B_MORALE_DELTA===\n-5\n"
+            "===A_SUPPLIES_DELTA===\n-3\n"
+            "===B_SUPPLIES_DELTA===\n-2\n"
+            "===A_SUPPLY_POINTS===\n5\n"
+            "===B_SUPPLY_POINTS===\n4\n"
+            "===SUMMARY===\n德軍猛攻法軍前沿，法軍有序後撤至第二道防線。"
+        )
+
+        # 用與 _ai_evaluate_turn 完全相同的 settings + 呼叫方式
+        settings = {
+            "api_url": chat_ai_settings.get("api_url", ""),
+            "api_key": chat_ai_settings.get("api_key", ""),
+            "model": chat_ai_settings.get("model", ""),
+            "fallback_enabled": chat_ai_settings.get("fallback_enabled", False),
+            "fallback_api_url": chat_ai_settings.get("fallback_api_url", ""),
+            "fallback_api_key": chat_ai_settings.get("fallback_api_key", ""),
+            "fallback_model": chat_ai_settings.get("fallback_model", ""),
+            "owner_skip_model_chain": chat_ai_settings.get("owner_skip_model_chain", True),
+            "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
+            "fallback_rate_per_min": chat_ai_settings.get("fallback_rate_per_min", 6),
+            "fallback_daily_limit": chat_ai_settings.get("fallback_daily_limit", 10),
+            "fallback_owner_exempt": chat_ai_settings.get("fallback_owner_exempt", True),
+        }
+
+        api_url = chat_ai_settings.get("api_url", "")
+        api_key = chat_ai_settings.get("api_key", "")
+        if not api_url or not api_key:
+            await interaction.edit_original_response(
+                content="🧪 **WW1 AI 測試結果**\n\n❌ AI API 未設定\n"
+                        "api_url 或 api_key 為空。WW1 會使用演算法裁判代替。\n\n"
+                        f"當前設定：\n  api_url: `{api_url or '(空)'}`\n  model: `{chat_ai_settings.get('model', '(未設定)')}`",
+                view=None
+            )
+            return
+
+        import time as _tt
+        _t0 = _tt.time()
+
+        try:
+            result = await asyncio.wait_for(
+                call_chat_api(
+                    [{"role": "user", "content": test_prompt}], settings,
+                    max_tokens=800, timeout_total=60, timeout_read=50,
+                    is_background=False, fallback_mode="full", category="admin",
+                    fallback_user_id="cyber_war",
+                ),
+                timeout=65,
+            )
+            _elapsed = _tt.time() - _t0
+            text = (result.get("content") or "").strip()
+
+            # 診斷資訊
+            used_fallback = result.get("_used_fallback", False)
+            used_model = result.get("_used_model", "")
+            circuit_open = result.get("circuit_open", False)
+            error = result.get("error", "")
+            diag = result.get("_diag", [])
+
+            if not text or circuit_open:
+                # 失敗 — 報告具體原因
+                fail_reason = "熔斷器開啟（API被封鎖）" if circuit_open else "回應為空"
+                if error:
+                    fail_reason += f"\n錯誤：{error[:300]}"
+                msg = (
+                    f"🧪 **WW1 AI 測試結果**\n\n"
+                    f"❌ **失敗** — {fail_reason}\n\n"
+                    f"⏱️ 耗時：{_elapsed:.1f}s\n"
+                    f"🔄 使用備援：{'是' if used_fallback else '否'}\n"
+                    f"🤖 模型：`{used_model or settings.get('model', '?')}`\n"
+                )
+                if diag:
+                    msg += "\n📋 診斷：\n" + "\n".join(f"  {d}" for d in diag[:8])
+                msg += "\n\n⚠️ WW1 將自動降級為演算法裁判。"
+                await interaction.edit_original_response(content=msg, view=None)
+                return
+
+            # 成功 — 解析並顯示結果
+            msg = (
+                f"🧪 **WW1 AI 測試結果**\n\n"
+                f"✅ **成功！** AI裁判正常運作\n\n"
+                f"⏱️ 耗時：{_elapsed:.1f}s\n"
+                f"🔄 使用備援：{'是' if used_fallback else '否'}\n"
+                f"🤖 模型：`{used_model or settings.get('model', '?')}`\n\n"
+                f"📝 AI回應（前300字）：\n```\n{text[:300]}\n```\n"
+            )
+            if diag:
+                msg += "\n📋 診斷：\n" + "\n".join(f"  {d}" for d in diag[:5])
+            await interaction.edit_original_response(content=msg, view=None)
+
+        except asyncio.TimeoutError:
+            _elapsed = _tt.time() - _t0
+            await interaction.edit_original_response(
+                content=f"🧪 **WW1 AI 測試結果**\n\n"
+                        f"⏰ **逾時** — AI 在 {_elapsed:.0f}s 內未回應\n\n"
+                        f"WW1 將自動降級為演算法裁判。\n"
+                        f"可能原因：API端點過載、reasoning模型思考太久、網路問題。\n"
+                        f"檢查：model_fallback_chain 是否有備用模型可降級。",
+                view=None
+            )
+        except Exception as e:
+            _elapsed = _tt.time() - _t0
+            await interaction.edit_original_response(
+                content=f"🧪 **WW1 AI 測試結果**\n\n"
+                        f"💥 **例外** — {type(e).__name__}: {str(e)[:300]}\n\n"
+                        f"⏱️ 耗時：{_elapsed:.1f}s\n"
+                        f"WW1 將自動降級為演算法裁判。",
+                view=None
+            )
 
     @discord.ui.button(label="立刻部署巨獸", style=discord.ButtonStyle.danger, emoji="🦾", custom_id="cw_test_deploy_beast")
     async def deploy_beast(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1797,6 +1932,10 @@ async def _ai_evaluate_turn(turn: int):
         "fallback_api_key": chat_ai_settings.get("fallback_api_key", ""),
         "fallback_model": chat_ai_settings.get("fallback_model", ""),
         "owner_skip_model_chain": chat_ai_settings.get("owner_skip_model_chain", True),
+        "model_fallback_chain": chat_ai_settings.get("model_fallback_chain", ""),
+        "fallback_rate_per_min": chat_ai_settings.get("fallback_rate_per_min", 6),
+        "fallback_daily_limit": chat_ai_settings.get("fallback_daily_limit", 10),
+        "fallback_owner_exempt": chat_ai_settings.get("fallback_owner_exempt", True),
     }
 
     # 檢查 AI API 是否有設定 — 沒設定就直接走演算法裁判
