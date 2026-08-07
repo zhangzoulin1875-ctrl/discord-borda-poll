@@ -849,6 +849,7 @@ class CyberWarPanelView(discord.ui.View):
             "  ⚓ 無畏艦 — 海上巨獸，可進行遠程重砲轟擊\n\n"
             "巨獸規則：\n"
             "  • 每局限部署一台，被摧毀後不可再部署\n"
+            "  • 進度差距達到門檻時即時部署，不需等待回合結算完成\n"
             "  • 巨獸初始100HP，隨該方戰況受損（進度下降/士氣大跌時受傷）\n"
             "  • 只有軍官可使用「🦾 戰爭巨獸」按鈕下達指令\n"
             "  • 若另一名軍官已下達指令，會提示是否覆蓋\n"
@@ -947,8 +948,15 @@ class _CWTestView(discord.ui.View):
             view=None
         )
 
-        # 執行回合結算
-        await _process_turn_end()
+        # 執行回合結算（包try/except，確保無論成功或失敗都會回覆訊息，不會卡住沒反應）
+        try:
+            await _process_turn_end()
+        except Exception as e:
+            print(f"⚠️ 賽博一戰：測試快進回合例外：{e}")
+            await interaction.edit_original_response(
+                content=f"⚠️ 回合結算過程發生例外，但系統已強制推進回合避免卡死。錯誤：{str(e)[:200]}",
+            )
+            return
 
         # 顯示結果
         summary = s.get("turn_summary", "")
@@ -976,10 +984,12 @@ class _CWTestView(discord.ui.View):
         # 設定 A=60%, B=20%（差距40%），確保觸發巨獸
         fac_a["progress"] = 60
         fac_b["progress"] = 20
+        # 立即檢查並部署巨獸——不需要等下一次（可能很慢的）AI回合結算
+        deployed_now = _check_war_beast_deploy()
         save_cyber_war()
         await refresh_war_panel()
 
-        # 檢查巨獸是否已部署
+        # 檢查巨獸狀態
         wb_b = fac_b.get("war_beast")
         wb_b_destroyed = fac_b.get("war_beast_destroyed", False)
         msg = (
@@ -990,11 +1000,12 @@ class _CWTestView(discord.ui.View):
         )
         if wb_b and not wb_b.get("destroyed"):
             beast_name = _WAR_BEASTS.get(wb_b.get("type", ""), {}).get("name", "?")
-            msg += f"🦾 {fac_b['name']} 已有巨獸：{beast_name}（HP:{wb_b.get('hp',0)}）"
+            prefix = "🦾 已立即部署：" if deployed_now else "🦾 已有巨獸："
+            msg += f"{prefix}{fac_b['name']} — {beast_name}（HP:{wb_b.get('hp',0)}）"
         elif wb_b_destroyed:
             msg += f"💀 {fac_b['name']} 的巨獸已被摧毀，無法再次部署"
         else:
-            msg += "⏳ 巨獸將在下回合結算時自動部署給弱勢方（B方）"
+            msg += "⚠️ 未觸發部署（可能巨獸已存在或已被摧毀，該局限一台）"
         await interaction.response.edit_message(content=msg, view=None)
 
     @discord.ui.button(label="查看巨獸狀態", style=discord.ButtonStyle.secondary, emoji="🦾", custom_id="cw_test_beast")
@@ -1359,60 +1370,69 @@ async def _ai_evaluate_turn(turn: int):
         a = actions.get(fkey, {})
         # 取得本回合統一指令
         fac_orders = s.get("orders", {}).get(turn_str, {}).get(fkey, {})
-
-        # 先列出有提交行動的玩家
         acted_uids = set()
-        for uid, action in a.items():
-            acted_uids.add(uid)
-            role_info = _get_player_role(uid)
-            role = role_info[1] if role_info else "unknown"
-            name = role_info[2]["name"] if role_info and len(role_info) > 2 else uid
-            spec = ""
-            if role == "soldier":
-                soldier = next((s for s in fac.get("soldiers", []) if s["id"] == uid), None)
-                if soldier and soldier.get("specialty"):
-                    spec = f"（{soldier['specialty']}）"
-            lines.append(f"  [{role}{spec}] {name}：{action[:150]}")
 
-        # 小隊長指令直接注入未行動士兵——小隊長發了統一指令但士兵沒打行動，
-        # 視為該士兵服從指令執行（權重低於親自行動，但不是「無行動」）
+        # -- 軍官：人數少（每方2人），逐一列出 --
+        for officer in fac.get("officers", []):
+            oid = officer["id"]
+            if oid in a:
+                acted_uids.add(oid)
+                lines.append(f"  [officer] {officer.get('name','?')}：{a[oid][:150]}")
+            else:
+                order = fac_orders.get(oid, "")
+                if order and isinstance(order, str):
+                    acted_uids.add(oid)
+                    lines.append(f"  [officer] {officer.get('name','?')}：（統一指令）{order[:150]}")
+                else:
+                    lines.append(f"  [officer] {officer.get('name','?')}：（無行動）")
+
+        # -- 小隊長：人數少（每方5人），逐一列出 --
         for sl in fac.get("squad_leaders", []):
             sl_id = sl["id"]
-            sl_order = fac_orders.get(sl_id, "")
-            if not sl_order or not isinstance(sl_order, str):
-                continue
-            sl_name = sl.get("name", "?")
-            for soldier in fac.get("soldiers", []):
-                if soldier.get("squad_leader_id") == sl_id and soldier["id"] not in acted_uids:
-                    acted_uids.add(soldier["id"])
-                    spec = soldier.get("specialty", "")
-                    spec_text = f"（{spec}）" if spec else ""
-                    lines.append(f"  [soldier{spec_text}] {soldier['name']}：〔服從小隊長{sl_name}指令〕{sl_order[:100]}")
+            if sl_id in a:
+                acted_uids.add(sl_id)
+                lines.append(f"  [squad_leader] {sl.get('name','?')}：{a[sl_id][:150]}")
+            else:
+                off_id = sl.get("officer_id")
+                off_order = fac_orders.get(off_id, "") if off_id else ""
+                if off_order and isinstance(off_order, str):
+                    acted_uids.add(sl_id)
+                    lines.append(f"  [squad_leader] {sl.get('name','?')}：〔服從軍官指令〕{off_order[:100]}")
+                else:
+                    lines.append(f"  [squad_leader] {sl.get('name','?')}：（無行動）")
 
-        # 軍官指令注入未行動小隊長（同理）
-        for officer in fac.get("officers", []):
-            off_id = officer["id"]
-            off_order = fac_orders.get(off_id, "")
-            if not off_order or not isinstance(off_order, str):
-                continue
-            off_name = officer.get("name", "?")
-            for sl in fac.get("squad_leaders", []):
-                if sl.get("officer_id") == off_id and sl["id"] not in acted_uids:
-                    acted_uids.add(sl["id"])
-                    lines.append(f"  [squad_leader] {sl['name']}：〔服從軍官{off_name}指令〕{off_order[:100]}")
-
-        # 列出完全無行動且無上級指令的玩家
-        for officer in fac.get("officers", []):
-            if officer["id"] not in acted_uids:
-                lines.append(f"  [officer] {officer.get('name','?')}：（無行動）")
-        for sl in fac.get("squad_leaders", []):
-            if sl["id"] not in acted_uids:
-                lines.append(f"  [squad_leader] {sl.get('name','?')}：（無行動）")
-        for soldier in fac.get("soldiers", []):
-            if soldier["id"] not in acted_uids:
-                spec = soldier.get("specialty", "")
+        # -- 士兵：人數可能高達數百人，改為統計摘要+抽樣，避免prompt過長拖慢/超時AI判定 --
+        soldiers = fac.get("soldiers", [])
+        acted_personally = []
+        inherited_count = 0
+        idle_count = 0
+        spec_acted_count = {}
+        for soldier in soldiers:
+            sid = soldier["id"]
+            spec = soldier.get("specialty", "")
+            if sid in a:
+                acted_uids.add(sid)
+                acted_personally.append((soldier.get("name", "?"), spec, a[sid]))
+                spec_acted_count[spec] = spec_acted_count.get(spec, 0) + 1
+            else:
+                sl_id = soldier.get("squad_leader_id")
+                sl_order = fac_orders.get(sl_id, "") if sl_id else ""
+                if sl_order and isinstance(sl_order, str):
+                    acted_uids.add(sid)
+                    inherited_count += 1
+                else:
+                    idle_count += 1
+        if soldiers:
+            spec_summary = "、".join(f"{k}{v}人" for k, v in spec_acted_count.items()) if spec_acted_count else "無"
+            lines.append(
+                f"  士兵總數：{len(soldiers)}人（親自行動{len(acted_personally)}人[{spec_summary}]、"
+                f"服從上級指令{inherited_count}人、完全無行動{idle_count}人）"
+            )
+            for name, spec, action in acted_personally[:8]:
                 spec_text = f"（{spec}）" if spec else ""
-                lines.append(f"  [soldier{spec_text}] {soldier['name']}：（無行動）")
+                lines.append(f"    範例[士兵{spec_text}] {name}：{action[:100]}")
+            if len(acted_personally) > 8:
+                lines.append(f"    ...另有{len(acted_personally) - 8}名士兵親自行動（人數過多已省略列出，已納入上方統計）")
 
         # 巨獸行動
         wb = fac.get("war_beast")
@@ -1561,148 +1581,188 @@ def _default_turn_result():
     }
 
 # ── 回合結算 ──
+def _check_war_beast_deploy():
+    """檢查兩方進度差是否達到觸發戰爭巨獸部署的門檻，若是則立即部署。
+    獨立成函式，可在回合結算內、測試按鈕、或背景迴圈中隨時呼叫，
+    不需要等待（可能很慢的）AI回合結算完成才能觸發。回傳True表示本次觸發了新部署。"""
+    s = _cyber_war_state
+    if not s.get("active") or s.get("winner"):
+        return False
+    factions = s.get("factions", {})
+    fac_a = factions.get("A")
+    fac_b = factions.get("B")
+    if not fac_a or not fac_b:
+        return False
+    a_prog = fac_a.get("progress", 0)
+    b_prog = fac_b.get("progress", 0)
+    gap = abs(a_prog - b_prog)
+    if gap < WAR_BEAST_TRIGGER_GAP:
+        return False
+    weaker = "A" if a_prog < b_prog else "B"
+    wf = factions[weaker]
+    if wf.get("war_beast") is not None or wf.get("war_beast_destroyed", False):
+        return False
+    beast_type = _cw_random.choice(list(_WAR_BEASTS.keys()))
+    wf["war_beast"] = {
+        "type": beast_type,
+        "hp": WAR_BEAST_HP,
+        "deployed_turn": s.get("turn", 1),
+        "destroyed": False,
+        "current_order": "",
+        "ordered_by": "",
+    }
+    beast_info = _WAR_BEASTS[beast_type]
+    deploy_msg = (
+        "\n\U0001f988 " + wf["flag"] + " " + wf["name"]
+        + " 因進度落後超過" + str(WAR_BEAST_TRIGGER_GAP) + "%，獲得戰爭巨獸："
+        + beast_info["emoji"] + " " + beast_info["name"]
+        + "！軍官可使用「戰爭巨獸」按鈕下達指令。"
+    )
+    s["turn_summary"] = (s.get("turn_summary", "") or "") + deploy_msg
+    print("CW war beast deployed: " + wf["name"] + " gets " + beast_info["name"])
+    return True
+
+
 async def _process_turn_end():
-    """處理回合結束：AI判定 → 更新狀態 → 檢查勝負。"""
+    """處理回合結束：AI判定 → 更新狀態 → 檢查勝負。
+    整段用 try/except/finally 包住：即使AI判定或後續邏輯出錯，也保證
+    phase不會卡死在'processing'、狀態一定會存檔、面板一定會更新。"""
     s = _cyber_war_state
     turn = s.get("turn", 1)
     print(f"⚔️ 賽博一戰：開始處理第{turn}回合結算...")
 
     s["phase"] = "processing"
-    await refresh_war_panel()
+    try:
+        await refresh_war_panel()
+    except Exception as e:
+        print(f"⚠️ 賽博一戰：結算開始時刷新面板失敗：{e}")
 
-    result = await _ai_evaluate_turn(turn)
+    try:
+        result = await _ai_evaluate_turn(turn)
+    except Exception as e:
+        print(f"⚠️ 賽博一戰：_ai_evaluate_turn 例外，改用預設結果。錯誤：{e}")
+        result = _default_turn_result()
 
-    fac_a = s["factions"]["A"]
-    fac_b = s["factions"]["B"]
+    try:
+        fac_a = s["factions"]["A"]
+        fac_b = s["factions"]["B"]
 
-    # 更新狀態
-    fac_a["progress"] = max(0, min(100, fac_a.get("progress", 0) + result["a_progress"]))
-    fac_b["progress"] = max(0, min(100, fac_b.get("progress", 0) + result["b_progress"]))
-    fac_a["morale"] = max(0, min(100, fac_a.get("morale", 100) + result["a_morale"]))
-    fac_b["morale"] = max(0, min(100, fac_b.get("morale", 100) + result["b_morale"]))
-    fac_a["supplies"] = max(0, min(100, fac_a.get("supplies", 100) + result["a_supplies"]))
-    fac_b["supplies"] = max(0, min(100, fac_b.get("supplies", 100) + result["b_supplies"]))
+        # 更新狀態
+        fac_a["progress"] = max(0, min(100, fac_a.get("progress", 0) + result["a_progress"]))
+        fac_b["progress"] = max(0, min(100, fac_b.get("progress", 0) + result["b_progress"]))
+        fac_a["morale"] = max(0, min(100, fac_a.get("morale", 100) + result["a_morale"]))
+        fac_b["morale"] = max(0, min(100, fac_b.get("morale", 100) + result["b_morale"]))
+        fac_a["supplies"] = max(0, min(100, fac_a.get("supplies", 100) + result["a_supplies"]))
+        fac_b["supplies"] = max(0, min(100, fac_b.get("supplies", 100) + result["b_supplies"]))
 
-    # 補給耗盡影響士氣
-    if fac_a["supplies"] <= 0:
-        fac_a["morale"] = max(0, fac_a["morale"] - 5)
-    if fac_b["supplies"] <= 0:
-        fac_b["morale"] = max(0, fac_b["morale"] - 5)
+        # 補給耗盡影響士氣
+        if fac_a["supplies"] <= 0:
+            fac_a["morale"] = max(0, fac_a["morale"] - 5)
+        if fac_b["supplies"] <= 0:
+            fac_b["morale"] = max(0, fac_b["morale"] - 5)
 
-    s["turn_summary"] = result["summary"]
+        s["turn_summary"] = result["summary"]
 
-    # -- 戰爭巨獸自動部署 --
-    a_prog = fac_a.get("progress", 0)
-    b_prog = fac_b.get("progress", 0)
-    gap = abs(a_prog - b_prog)
-    if gap >= WAR_BEAST_TRIGGER_GAP:
-        weaker = "A" if a_prog < b_prog else "B"
-        wf = s["factions"][weaker]
-        wb = wf.get("war_beast")
-        if wb is None and not wf.get("war_beast_destroyed", False):
-            beast_type = _cw_random.choice(list(_WAR_BEASTS.keys()))
-            wf["war_beast"] = {
-                "type": beast_type,
-                "hp": WAR_BEAST_HP,
-                "deployed_turn": turn,
-                "destroyed": False,
-                "current_order": "",
-                "ordered_by": "",
-            }
-            beast_info = _WAR_BEASTS[beast_type]
-            s["turn_summary"] += (
-                "\n\U0001f988 " + wf["flag"] + " " + wf["name"]
-                + " 因進度落後超過" + str(WAR_BEAST_TRIGGER_GAP) + "%，獲得戰爭巨獸："
-                + beast_info["emoji"] + " " + beast_info["name"]
-                + "！軍官可使用「戰爭巨獸」按鈕下達指令。"
-            )
-            print("CW war beast deployed: " + wf["name"] + " gets " + beast_info["name"])
+        # 戰爭巨獸自動部署（獨立函式，隨時可觸發，不依賴後面的邏輯是否出錯）
+        _check_war_beast_deploy()
 
-    # -- 巨獸受傷判定 --
-    for fkey, fac in [("A", fac_a), ("B", fac_b)]:
-        wb = fac.get("war_beast")
-        if wb and not wb.get("destroyed"):
-            prog_key = "a_progress" if fkey == "A" else "b_progress"
-            mor_key = "a_morale" if fkey == "A" else "b_morale"
-            delta_prog = result.get(prog_key, 0)
-            delta_mor = result.get(mor_key, 0)
-            beast_damage = 0
-            if delta_prog < 0:
-                beast_damage += abs(delta_prog) * 2
-            if delta_mor < -10:
-                beast_damage += abs(delta_mor)
-            if beast_damage > 0:
-                wb["hp"] = max(0, wb["hp"] - beast_damage)
-                if wb["hp"] <= 0:
-                    wb["destroyed"] = True
-                    fac["war_beast_destroyed"] = True
-                    beast_name = _WAR_BEASTS[wb["type"]]["name"]
-                    beast_emoji = _WAR_BEASTS[wb["type"]]["emoji"]
-                    s["turn_summary"] += (
-                        "\n\U0001f4a5 " + fac["flag"] + " " + fac["name"]
-                        + " 的戰爭巨獸 " + beast_emoji + " " + beast_name
-                        + " 被摧毀！無法再次部署。"
-                    )
-                    print("CW war beast destroyed: " + fac["name"] + " " + beast_name)
+        # 巨獸受傷判定
+        for fkey, fac in [("A", fac_a), ("B", fac_b)]:
+            wb = fac.get("war_beast")
+            if wb and not wb.get("destroyed"):
+                prog_key = "a_progress" if fkey == "A" else "b_progress"
+                mor_key = "a_morale" if fkey == "A" else "b_morale"
+                delta_prog = result.get(prog_key, 0)
+                delta_mor = result.get(mor_key, 0)
+                beast_damage = 0
+                if delta_prog < 0:
+                    beast_damage += abs(delta_prog) * 2
+                if delta_mor < -10:
+                    beast_damage += abs(delta_mor)
+                if beast_damage > 0:
+                    wb["hp"] = max(0, wb["hp"] - beast_damage)
+                    if wb["hp"] <= 0:
+                        wb["destroyed"] = True
+                        fac["war_beast_destroyed"] = True
+                        beast_name = _WAR_BEASTS[wb["type"]]["name"]
+                        beast_emoji = _WAR_BEASTS[wb["type"]]["emoji"]
+                        s["turn_summary"] += (
+                            "\n\U0001f4a5 " + fac["flag"] + " " + fac["name"]
+                            + " 的戰爭巨獸 " + beast_emoji + " " + beast_name
+                            + " 被摧毀！無法再次部署。"
+                        )
+                        print("CW war beast destroyed: " + fac["name"] + " " + beast_name)
 
-    # -- 清除本回合巨獸指令（下回合需重新下達）--
-    for fkey in ("A", "B"):
-        wb = s["factions"][fkey].get("war_beast")
-        if wb and not wb.get("destroyed"):
-            wb["current_order"] = ""
-            wb["ordered_by"] = ""
+        # 清除本回合巨獸指令（下回合需重新下達）
+        for fkey in ("A", "B"):
+            wb = s["factions"][fkey].get("war_beast")
+            if wb and not wb.get("destroyed"):
+                wb["current_order"] = ""
+                wb["ordered_by"] = ""
 
-    # 檢查勝負
-    a_defeated = fac_a["morale"] <= MORALE_DEFEAT_THRESHOLD or fac_a["progress"] <= 0 and fac_b["progress"] >= PROGRESS_WIN_THRESHOLD
-    b_defeated = fac_b["morale"] <= MORALE_DEFEAT_THRESHOLD or fac_b["progress"] <= 0 and fac_a["progress"] >= PROGRESS_WIN_THRESHOLD
+        # 檢查勝負
+        a_defeated = fac_a["morale"] <= MORALE_DEFEAT_THRESHOLD or fac_a["progress"] <= 0 and fac_b["progress"] >= PROGRESS_WIN_THRESHOLD
+        b_defeated = fac_b["morale"] <= MORALE_DEFEAT_THRESHOLD or fac_b["progress"] <= 0 and fac_a["progress"] >= PROGRESS_WIN_THRESHOLD
 
-    if fac_a["progress"] >= PROGRESS_WIN_THRESHOLD and not a_defeated:
-        b_defeated = True
-    if fac_b["progress"] >= PROGRESS_WIN_THRESHOLD and not b_defeated:
-        a_defeated = True
+        if fac_a["progress"] >= PROGRESS_WIN_THRESHOLD and not a_defeated:
+            b_defeated = True
+        if fac_b["progress"] >= PROGRESS_WIN_THRESHOLD and not b_defeated:
+            a_defeated = True
 
-    if a_defeated and not b_defeated:
-        s["winner"] = "B"
-        fac_a["defeated"] = True
-    elif b_defeated and not a_defeated:
-        s["winner"] = "A"
-        fac_b["defeated"] = True
-    elif a_defeated and b_defeated:
-        # 同歸於盡 → 進度高的贏
-        s["winner"] = "A" if fac_a["progress"] >= fac_b["progress"] else "B"
-        fac_a["defeated"] = True
-        fac_b["defeated"] = True
-
-    if s["winner"]:
-        await _settle_game()
-    else:
-        # 檢查軍官/小隊長怠職，超過門檻自動降階釋出名額
-        _check_inactivity_and_demote(turn)
-        # 進入下一回合
-        s["turn"] = turn + 1
-        s["phase"] = "command"
-        # 第一回合結束後鎖定押金
-        if turn == 1:
-            s["deposits_locked"] = True
-            # 更新 total_deposits 為最終值
-            s["total_deposits"] = sum(d.get("amount", 0) for d in s.get("deposits", {}).values())
-        now = datetime.now(_TZ)
-        next = now + timedelta(hours=s.get("turn_interval_hours", TURN_INTERVAL_HOURS))
-        s["next_turn_time"] = next.isoformat()
-        # 檢查遊戲是否到時間
-        end_dt = _from_iso(s.get("end_time"))
-        if end_dt and now >= end_dt:
-            # 時間到 → 進度高的贏
+        if a_defeated and not b_defeated:
+            s["winner"] = "B"
+            fac_a["defeated"] = True
+        elif b_defeated and not a_defeated:
+            s["winner"] = "A"
+            fac_b["defeated"] = True
+        elif a_defeated and b_defeated:
+            # 同歸於盡 → 進度高的贏
             s["winner"] = "A" if fac_a["progress"] >= fac_b["progress"] else "B"
-            if fac_a["progress"] == fac_b["progress"]:
-                s["winner"] = "A" if fac_a["morale"] >= fac_b["morale"] else "B"
-            other = "B" if s["winner"] == "A" else "A"
-            s["factions"][other]["defeated"] = True
-            await _settle_game()
+            fac_a["defeated"] = True
+            fac_b["defeated"] = True
 
-    save_cyber_war()
-    await refresh_war_panel()
-    print(f"⚔️ 賽博一戰：第{turn}回合結算完成。winner={s.get('winner')}")
+        if s["winner"]:
+            await _settle_game()
+        else:
+            # 檢查軍官/小隊長怠職，超過門檻自動降階釋出名額
+            _check_inactivity_and_demote(turn)
+            # 進入下一回合
+            s["turn"] = turn + 1
+            s["phase"] = "command"
+            # 第一回合結束後鎖定押金
+            if turn == 1:
+                s["deposits_locked"] = True
+                # 更新 total_deposits 為最終值
+                s["total_deposits"] = sum(d.get("amount", 0) for d in s.get("deposits", {}).values())
+            now = datetime.now(_TZ)
+            next = now + timedelta(hours=s.get("turn_interval_hours", TURN_INTERVAL_HOURS))
+            s["next_turn_time"] = next.isoformat()
+            # 檢查遊戲是否到時間
+            end_dt = _from_iso(s.get("end_time"))
+            if end_dt and now >= end_dt:
+                # 時間到 → 進度高的贏
+                s["winner"] = "A" if fac_a["progress"] >= fac_b["progress"] else "B"
+                if fac_a["progress"] == fac_b["progress"]:
+                    s["winner"] = "A" if fac_a["morale"] >= fac_b["morale"] else "B"
+                other = "B" if s["winner"] == "A" else "A"
+                s["factions"][other]["defeated"] = True
+                await _settle_game()
+    except Exception as e:
+        print(f"⚠️ 賽博一戰：_process_turn_end 主體例外：{e}")
+        # 防止卡死：即使中途出錯，也強制把phase帶出processing、推進到下一回合
+        if s.get("phase") == "processing":
+            s["turn"] = turn + 1
+            s["phase"] = "command"
+            now = datetime.now(_TZ)
+            next = now + timedelta(hours=s.get("turn_interval_hours", TURN_INTERVAL_HOURS))
+            s["next_turn_time"] = next.isoformat()
+    finally:
+        save_cyber_war()
+        try:
+            await refresh_war_panel()
+        except Exception as e:
+            print(f"⚠️ 賽博一戰：結算結束時刷新面板失敗：{e}")
+        print(f"⚔️ 賽博一戰：第{turn}回合結算完成。winner={s.get('winner')}")
 
 # ── 結算發獎 ──
 async def _settle_game():
@@ -1747,19 +1807,38 @@ async def cyber_war_loop():
     """每60秒檢查是否需要處理回合結算。"""
     await bot.wait_until_ready()
     print("⚔️ 賽博一戰背景迴圈已啟動")
+    _stuck_processing_counter = 0
     while not bot.is_closed():
         try:
             s = _cyber_war_state
             if s.get("active") and not s.get("winner"):
-                next_turn = _from_iso(s.get("next_turn_time"))
-                if next_turn and datetime.now(_TZ) >= next_turn:
-                    await _process_turn_end()
+                # 安全網：不論何種原因造成的進度差，隨時可觸發巨獸部署，不必等回合結算
+                if _check_war_beast_deploy():
+                    save_cyber_war()
+
+                if s.get("phase") == "processing":
+                    # 防止重複並發呼叫 _process_turn_end()（例如上次還沒跑完，next_turn_time還沒被更新）
+                    _stuck_processing_counter += 1
+                    if _stuck_processing_counter >= 3:
+                        # 連續3次（約3分鐘）仍卡在processing，視為異常卡死，強制恢復
+                        print("⚠️ 賽博一戰：偵測到phase卡在processing超過3分鐘，強制恢復。")
+                        s["phase"] = "command"
+                        now = datetime.now(_TZ)
+                        next_t = now + timedelta(hours=s.get("turn_interval_hours", TURN_INTERVAL_HOURS))
+                        s["next_turn_time"] = next_t.isoformat()
+                        save_cyber_war()
+                        _stuck_processing_counter = 0
+                else:
+                    _stuck_processing_counter = 0
+                    next_turn = _from_iso(s.get("next_turn_time"))
+                    if next_turn and datetime.now(_TZ) >= next_turn:
+                        await _process_turn_end()
 
                 # 確保面板存在
                 if _cyber_war_settings.get("channel_id") and not _cyber_war_settings.get("panel_message_id"):
                     await setup_war_panel()
                 else:
-                    # 定期刷新面板（每5分鐘）
+                    # 定期刷新面板
                     await refresh_war_panel()
             elif s.get("active") == False and s.get("winner") and _cyber_war_settings.get("channel_id"):
                 # 遊戲已結束但面板可能需要更新
