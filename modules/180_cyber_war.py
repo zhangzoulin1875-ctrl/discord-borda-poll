@@ -207,23 +207,7 @@ async def _start_new_game(guild):
     fac_a = _build_faction("A", _FACTION_GERMANY, side_a_members)
     fac_b = _build_faction("B", opponent, side_b_members)
 
-    # 收取押金
-    total_deposit = 0
-    all_players = side_a_members + side_b_members
-    deposit = _cyber_war_settings.get("deposit", DEPOSIT_PER_PLAYER)
-    failed_deposits = []
-    for m in all_players:
-        uid = str(m.id)
-        bal = get_balance(uid)
-        if bal < deposit:
-            # 嘗試扣到0，標記為未繳
-            add_balance(uid, -bal, m.display_name)
-            total_deposit += bal
-            failed_deposits.append(m.display_name)
-        else:
-            add_balance(uid, -deposit, m.display_name)
-            total_deposit += deposit
-
+    # 押金改為自由投注 — 不自動扣款，玩家自行下注
     now = datetime.now(_TZ)
     end = now + timedelta(days=GAME_DURATION_DAYS)
     next_turn = now + timedelta(hours=TURN_INTERVAL_HOURS)
@@ -243,12 +227,14 @@ async def _start_new_game(guild):
         "artillery": {},
         "winner": None,
         "prize_multiplier": multiplier,
-        "total_deposits": total_deposit,
+        "deposits": {},             # {uid: {"amount": int, "name": str}}
+        "deposits_locked": False,   # 第一回合後鎖定
+        "total_deposits": 0,
         "settlement_done": False,
         "turn_summary": "",
     }
     save_cyber_war()
-    return True, f"✅ 第{_cyber_war_state['game_id']}局賽博一戰已開始！\n戰場：{battlefield}\n陣營：{fac_a['flag']} {fac_a['name']} vs {fac_b['flag']} {fac_b['name']}\n參戰人數：{len(all_players)}\n押金總額：{total_deposit} {currency_name()}\n倍率：{multiplier}x\n回合間隔：{TURN_INTERVAL_HOURS}小時\n結束時間：{_fmt_dt(end.isoformat())}"
+    return True, f"✅ 第{_cyber_war_state['game_id']}局賽博一戰已開始！\n戰場：{battlefield}\n陣營：{fac_a['flag']} {fac_a['name']} vs {fac_b['flag']} {fac_b['name']}\n參戰人數：{len(all_players)}\n押金：自由投注（第一回合後鎖定）\n倍率：{multiplier}x\n回合間隔：{TURN_INTERVAL_HOURS}小時\n結束時間：{_fmt_dt(end.isoformat())}"
 
 # ── 角色查詢 ──
 def _get_player_role(uid_str: str):
@@ -319,12 +305,13 @@ def _build_war_embed():
     if winner:
         wf = s["factions"][winner]
         prize = s.get("total_deposits", 0) * s.get("prize_multiplier", 0)
+        total_dep = sum(d.get("amount", 0) for d in s.get("deposits", {}).values())
         embed = discord.Embed(
             title=f"⚔️ 賽博一戰 — 戰局結束 (第{s['game_id']}局)",
             description=(
                 f"🏆 **勝方：{wf['flag']} {wf['name']}**\n"
-                f"💰 獎金總額：{prize:,} {currency_name()}\n"
-                f"📈 倍率：{s.get('prize_multiplier', 0)}x\n"
+                f"💰 總押金池：{total_dep:,} {currency_name()}\n"
+                f"📈 倍率：{s.get('prize_multiplier', 0)}x → 獎金總額：{prize:,} {currency_name()}\n"
                 f"📋 戰報：{s.get('turn_summary', '—')[:200]}"
             ),
             color=discord.Color.gold(),
@@ -342,7 +329,9 @@ def _build_war_embed():
             f"🗺️ 戰場：**{s.get('battlefield', '—')}**\n"
             f"⏱️ 下回合結算：{_time_remaining(s.get('next_turn_time'))}\n"
             f"🏁 遊戲剩餘：{_time_remaining(s.get('end_time'))}\n"
-            f"📋 本回合階段：**{'AI結算中' if s.get('phase') == 'processing' else '行動中'}**"
+            f"📋 本回合階段：**{'AI結算中' if s.get('phase') == 'processing' else '行動中'}**\n"
+            f"💰 獎池：{sum(d.get('amount', 0) for d in s.get('deposits', {}).values()):,} {currency_name()} ×{s.get('prize_multiplier', 0)}\n"
+            f"🔒 押金：**{'已鎖定' if s.get('deposits_locked') else '可自由投注（限第1回合）'}**"
         ),
         color=color,
         timestamp=discord.utils.utcnow(),
@@ -543,6 +532,31 @@ class CyberWarPanelView(discord.ui.View):
 
         await interaction.response.send_modal(CyberWarActionModal(uid, fkey, interaction.user.display_name, turn, order_text))
 
+    @discord.ui.button(label="下注", style=discord.ButtonStyle.secondary, emoji="💰", custom_id="cw_bet_btn")
+    async def bet_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        info = _get_player_role(uid)
+        if not info:
+            await interaction.response.send_message("❌ 你不在本局參戰名單中。", ephemeral=True)
+            return
+        # 第一回合後鎖定
+        if _cyber_war_state.get("deposits_locked"):
+            dep = _cyber_war_state.get("deposits", {}).get(uid, {}).get("amount", 0)
+            await interaction.response.send_message(
+                f"🔒 押金已鎖定，無法加碼或撤回。\n你目前的押金：{dep} {currency_name()}",
+                ephemeral=True,
+            )
+            return
+        fkey, role, fac = info
+        current_dep = _cyber_war_state.get("deposits", {}).get(uid, {}).get("amount", 0)
+        bal = get_balance(uid)
+        await interaction.response.send_modal(
+            CyberWarBetModal(uid, interaction.user.display_name, fkey, current_dep, bal)
+        )
+
 # ── 下屬選擇 Select ──
 class _OrderTargetSelect(discord.ui.View):
     def __init__(self, commander_uid, fkey, role, turn, options):
@@ -576,6 +590,76 @@ class _OrderTargetSelect(discord.ui.View):
         await interaction.response.send_modal(
             CyberWarOrderModal(self.commander_uid, self.fkey, self.role, self.turn, target_id, target_name)
         )
+
+# ── 下注 Modal ──
+class CyberWarBetModal(discord.ui.Modal, title="💰 下注 / 追加 / 撤回"):
+    bet_amount = discord.ui.TextInput(
+        label="金額（正數=追加，負數=撤回）",
+        style=discord.TextStyle.short,
+        placeholder="例如：500（追加500）或 -200（撤回200）",
+        required=True,
+        max_length=10,
+    )
+
+    def __init__(self, uid, user_name, fkey, current_dep, balance):
+        self.uid = uid
+        self.user_name = user_name
+        self.fkey = fkey
+        self._current_dep = current_dep
+        self._balance = balance
+        super().__init__()
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(self.bet_amount.value.strip())
+        except ValueError:
+            await interaction.response.send_message("❌ 請輸入有效數字。", ephemeral=True)
+            return
+        if amount == 0:
+            await interaction.response.send_message("❌ 金額不能為0。", ephemeral=True)
+            return
+
+        deposits = _cyber_war_state.setdefault("deposits", {})
+        current = deposits.get(self.uid, {}).get("amount", 0)
+
+        if amount > 0:
+            # 追加
+            if amount > self._balance:
+                await interaction.response.send_message(
+                    f"❌ 餘額不足。你需要 {amount}，目前只有 {self._balance} {currency_name()}。",
+                    ephemeral=True,
+                )
+                return
+            add_balance(self.uid, -amount, self.user_name)
+            new_dep = current + amount
+            deposits[self.uid] = {"amount": new_dep, "name": self.user_name}
+            _cyber_war_state["total_deposits"] = sum(d.get("amount", 0) for d in deposits.values())
+            save_cyber_war()
+            await interaction.response.send_message(
+                f"✅ 已追加下注 {amount} {currency_name()}。\n你目前的押金：{new_dep} {currency_name()}",
+                ephemeral=True,
+            )
+        else:
+            # 撤回
+            withdraw = abs(amount)
+            if withdraw > current:
+                await interaction.response.send_message(
+                    f"❌ 撤回金額超過你的押金。你目前的押金：{current} {currency_name()}。",
+                    ephemeral=True,
+                )
+                return
+            add_balance(self.uid, withdraw, self.user_name)
+            new_dep = current - withdraw
+            if new_dep > 0:
+                deposits[self.uid] = {"amount": new_dep, "name": self.user_name}
+            else:
+                deposits.pop(self.uid, None)
+            _cyber_war_state["total_deposits"] = sum(d.get("amount", 0) for d in deposits.values())
+            save_cyber_war()
+            await interaction.response.send_message(
+                f"✅ 已撤回 {withdraw} {currency_name()}。\n你目前的押金：{new_dep} {currency_name()}",
+                ephemeral=True,
+            )
 
 # ── 指令輸入 Modal ──
 class CyberWarOrderModal(discord.ui.Modal, title="🎖️ 分配指令"):
@@ -935,6 +1019,11 @@ async def _process_turn_end():
         # 進入下一回合
         s["turn"] = turn + 1
         s["phase"] = "command"
+        # 第一回合結束後鎖定押金
+        if turn == 1:
+            s["deposits_locked"] = True
+            # 更新 total_deposits 為最終值
+            s["total_deposits"] = sum(d.get("amount", 0) for d in s.get("deposits", {}).values())
         now = datetime.now(_TZ)
         next = now + timedelta(hours=s.get("turn_interval_hours", TURN_INTERVAL_HOURS))
         s["next_turn_time"] = next.isoformat()
@@ -955,7 +1044,7 @@ async def _process_turn_end():
 
 # ── 結算發獎 ──
 async def _settle_game():
-    """結算遊戲：發放獎金給勝方。"""
+    """結算遊戲：勝方按個人押金比例分配 total_pool × multiplier 獎金。"""
     s = _cyber_war_state
     if s.get("settlement_done"):
         return
@@ -964,24 +1053,32 @@ async def _settle_game():
         return
 
     winner_fac = s["factions"][winner_key]
-    total_prize = s.get("total_deposits", 0) * s.get("prize_multiplier", 0)
+    deposits = s.get("deposits", {})
+    multiplier = s.get("prize_multiplier", 0)
 
-    # 勝方所有成員平分獎金
+    # 計算獎池 = 全部押金總和（勝方+敗方）× 倍率
+    total_pool = sum(d.get("amount", 0) for d in deposits.values())
+    total_prize = total_pool * multiplier
+
+    # 勝方中有下注的成員，按押金比例分配
     all_winners = (
         [o["id"] for o in winner_fac.get("officers", [])] +
         [sl["id"] for sl in winner_fac.get("squad_leaders", [])] +
         [sol["id"] for sol in winner_fac.get("soldiers", [])]
     )
-    n_winners = len(all_winners)
-    if n_winners > 0 and total_prize > 0:
-        per_person = total_prize // n_winners
-        for uid in all_winners:
-            add_balance(uid, per_person, winner_fac.get("name", ""))
+    winner_deposits = {uid: deposits.get(uid, {}).get("amount", 0) for uid in all_winners}
+    winner_pool = sum(winner_deposits.values())
+
+    if winner_pool > 0 and total_prize > 0:
+        for uid, dep in winner_deposits.items():
+            if dep > 0:
+                share = int(total_prize * dep / winner_pool)
+                add_balance(uid, share, winner_fac.get("name", ""))
 
     s["settlement_done"] = True
     s["active"] = False
     s["phase"] = "ended"
-    print(f"⚔️ 賽博一戰結算完成：勝方={winner_fac.get('name')}，每人分得{per_person if n_winners > 0 else 0}")
+    print(f"⚔️ 賽博一戰結算完成：勝方={winner_fac.get('name')}，獎池={total_prize}，{len([v for v in winner_deposits.values() if v > 0])}人分獲")
 
 # ── 背景迴圈 ──
 async def cyber_war_loop():
@@ -1088,7 +1185,9 @@ class CyberWarGroup(app_commands.Group):
         if info:
             fkey, role, fac = info
             rn = _ROLE_NAMES.get(role, "?")
-            role_text = f"\n🎖️ 你的角色：{fac['flag']} {fac['name']} — {rn}"
+            my_dep = s.get("deposits", {}).get(uid, {}).get("amount", 0)
+            my_potential = my_dep * s.get("prize_multiplier", 0)
+            role_text = f"\n🎖️ 你的角色：{fac['flag']} {fac['name']} — {rn}\n💰 你的押金：{my_dep} {currency_name()}（勝可得 {my_potential:,}）"
 
         fac_a = s.get("factions", {}).get("A", {})
         fac_b = s.get("factions", {}).get("B", {})
@@ -1103,19 +1202,112 @@ class CyberWarGroup(app_commands.Group):
             f"{fac_a.get('flag','')} {fac_a.get('name','')} — 推進{fac_a.get('progress',0)}% | 士氣{fac_a.get('morale',100)}",
             f"{fac_b.get('flag','')} {fac_b.get('name','')} — 推進{fac_b.get('progress',0)}% | 士氣{fac_b.get('morale',100)}",
             "",
-            f"💰 押金總額：{s.get('total_deposits', 0)} | 倍率：{s.get('prize_multiplier', 0)}x",
+            f"💰 獎池：{s.get('total_deposits', 0):,} {currency_name()} ×{s.get('prize_multiplier', 0)}",
+            f"🔒 押金：{'已鎖定' if s.get('deposits_locked') else '可自由投注（限第1回合）'}",
             role_text,
         ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="set_deposit", description="設定每人押金金額（機器人擁有者限定）")
-    async def cw_set_deposit(self, interaction: discord.Interaction, amount: int):
-        if str(interaction.user.id) != str(BOT_OWNER_ID):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+    @app_commands.command(name="bet", description="下注/追加押金（限第1回合）")
+    async def cw_bet(self, interaction: discord.Interaction, amount: int):
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
             return
-        if amount < 10:
-            await interaction.response.send_message("❌ 押金至少需要 10。", ephemeral=True)
+        uid = str(interaction.user.id)
+        info = _get_player_role(uid)
+        if not info:
+            await interaction.response.send_message("❌ 你不在本局參戰名單中。", ephemeral=True)
             return
-        _cyber_war_settings["deposit"] = amount
+        if _cyber_war_state.get("deposits_locked"):
+            dep = _cyber_war_state.get("deposits", {}).get(uid, {}).get("amount", 0)
+            await interaction.response.send_message(
+                f"🔒 押金已鎖定（第一回合結束後不可變更）。\n你目前的押金：{dep} {currency_name()}",
+                ephemeral=True,
+            )
+            return
+        if amount <= 0:
+            await interaction.response.send_message("❌ 下注金額必須為正整數。要撤回請用 /cyber_war withdraw。", ephemeral=True)
+            return
+        bal = get_balance(uid)
+        if amount > bal:
+            await interaction.response.send_message(
+                f"❌ 餘額不足。你需要 {amount}，目前只有 {bal} {currency_name()}。",
+                ephemeral=True,
+            )
+            return
+        deposits = _cyber_war_state.setdefault("deposits", {})
+        current = deposits.get(uid, {}).get("amount", 0)
+        add_balance(uid, -amount, interaction.user.display_name)
+        new_dep = current + amount
+        deposits[uid] = {"amount": new_dep, "name": interaction.user.display_name}
+        _cyber_war_state["total_deposits"] = sum(d.get("amount", 0) for d in deposits.values())
         save_cyber_war()
-        await interaction.response.send_message(f"✅ 押金已設為 {amount} {currency_name()}。", ephemeral=True)
+        await interaction.response.send_message(
+            f"✅ 下注成功！追加 {amount} {currency_name()}。\n你目前的押金：{new_dep} {currency_name()}\n剩餘餘額：{bal - amount} {currency_name()}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="withdraw", description="撤回押金（限第1回合）")
+    async def cw_withdraw(self, interaction: discord.Interaction, amount: int):
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        info = _get_player_role(uid)
+        if not info:
+            await interaction.response.send_message("❌ 你不在本局參戰名單中。", ephemeral=True)
+            return
+        if _cyber_war_state.get("deposits_locked"):
+            dep = _cyber_war_state.get("deposits", {}).get(uid, {}).get("amount", 0)
+            await interaction.response.send_message(
+                f"🔒 押金已鎖定，無法撤回。\n你目前的押金：{dep} {currency_name()}",
+                ephemeral=True,
+            )
+            return
+        if amount <= 0:
+            await interaction.response.send_message("❌ 撤回金額必須為正整數。", ephemeral=True)
+            return
+        deposits = _cyber_war_state.get("deposits", {})
+        current = deposits.get(uid, {}).get("amount", 0)
+        if amount > current:
+            await interaction.response.send_message(
+                f"❌ 撤回金額超過你的押金。你目前的押金：{current} {currency_name()}。",
+                ephemeral=True,
+            )
+            return
+        add_balance(uid, amount, interaction.user.display_name)
+        new_dep = current - amount
+        if new_dep > 0:
+            deposits[uid] = {"amount": new_dep, "name": interaction.user.display_name}
+        else:
+            deposits.pop(uid, None)
+        _cyber_war_state["total_deposits"] = sum(d.get("amount", 0) for d in deposits.values())
+        save_cyber_war()
+        await interaction.response.send_message(
+            f"✅ 撤回成功！退回 {amount} {currency_name()}。\n你目前的押金：{new_dep} {currency_name()}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="my_bet", description="查看自己的押金")
+    async def cw_my_bet(self, interaction: discord.Interaction):
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        info = _get_player_role(uid)
+        if not info:
+            await interaction.response.send_message("❌ 你不在本局參戰名單中。", ephemeral=True)
+            return
+        dep = _cyber_war_state.get("deposits", {}).get(uid, {}).get("amount", 0)
+        locked = _cyber_war_state.get("deposits_locked", False)
+        bal = get_balance(uid)
+        multiplier = _cyber_war_state.get("prize_multiplier", 0)
+        potential = dep * multiplier if dep > 0 else 0
+        await interaction.response.send_message(
+            f"💰 你的押金：{dep} {currency_name()}\n"
+            f"🏦 剩餘餘額：{bal} {currency_name()}\n"
+            f"倍率：{multiplier}x\n"
+            f"若勝方可得：{potential:,} {currency_name()}\n"
+            f"狀態：{'🔒 已鎖定' if locked else '🔓 可調整（限第1回合）'}",
+            ephemeral=True,
+        )
