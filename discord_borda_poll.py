@@ -8130,6 +8130,29 @@ async def api_set_chat_ai_settings(request):
         chat_ai_settings["ai_pool"] = new_pool
     if "model_roles" in body:
         chat_ai_settings["model_roles"] = body["model_roles"]
+        # ── 同步 legacy 欄位 ──
+        # dashboard 的 saveChatAISettings 只同步 main/backup 的 legacy 欄位，
+        # 但 vision/quiz/turtle_soup/werewolf/fortune/chat/admin/entertainment
+        # 的模型名稱存在 model_roles 裡，很多舊程式碼仍讀 legacy 欄位
+        # (e.g. settings.get("vision_model"))，不同步會導致這些功能找不到模型。
+        _pool = chat_ai_settings.get("ai_pool", [])
+        _legacy_sync_map = {
+            "vision": "vision_model",
+            "quiz": "quiz_model",
+            "turtle_soup": "turtle_soup_model",
+            "werewolf": "werewolf_model",
+            "fortune": "fortune_model",
+            "chat": "chat_model",
+            "admin": "admin_model",
+            "entertainment": "entertainment_model",
+        }
+        for _role, _legacy_key in _legacy_sync_map.items():
+            _binding = body["model_roles"].get(_role)
+            if _binding and isinstance(_binding, dict):
+                chat_ai_settings[_legacy_key] = _binding.get("model", "")
+            # If role is unassigned (binding is None/empty), clear legacy too
+            elif _binding is None:
+                chat_ai_settings[_legacy_key] = ""
     if "model_chains" in body:
         chat_ai_settings["model_chains"] = body["model_chains"]
     if "log_channel_id" in body:
@@ -11354,6 +11377,7 @@ async def _gather_community_messages(guild, max_channels=20, msgs_per_channel=20
         try:
             async for m in ch.history(limit=1):
                 return m.created_at.timestamp()
+            return 0  # Channel has no messages
         except Exception:
             return 0
     # Quick check — just grab last message timestamp for sorting

@@ -330,6 +330,18 @@
           </div>
         </div>
       </div>
+      <!-- AI 紀錄頻道 -->
+  <div class="bg-[#2b2d31] rounded-xl p-5">
+    <h3 class="font-semibold mb-1">📝 AI 紀錄頻道</h3>
+    <p class="text-xs text-gray-400 mb-4">AI 對話紀錄 + 禁言紀錄發送到此頻道。也可用 Discord <code>/chat log_channel</code> 指令設定。</p>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm text-gray-400 mb-1">AI 紀錄頻道 ID</label>
+        <input id="ai-log-channel-id" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="123456789012345678（留空 = 不記錄）">
+      </div>
+    </div>
+  </div>
+
       <!-- AI Turtle Soup -->
   <div class="bg-[#2b2d31] rounded-xl p-5">
     <h3 class="font-semibold mb-1">🍜 AI 海龜湯</h3>
@@ -993,6 +1005,9 @@ async function showChatAIPanel() {
   document.getElementById('ai-forum-interval').value = s.forum_index_interval ?? 900;
   document.getElementById('ai-channel-interval').value = s.channel_index_interval ?? 1800;
   document.getElementById('ai-drive-interval').value = s.drive_sync_interval ?? 60;
+  // AI 紀錄頻道
+  document.getElementById('ai-log-channel-id').value = s.log_channel_id || '';
+
   // Turtle Soup
   document.getElementById('ai-turtle-soup-enabled').checked = s.turtle_soup_enabled || false;
   document.getElementById('ai-turtle-soup-channel').value = s.turtle_soup_channel_id || '';
@@ -1259,6 +1274,8 @@ async function saveChatAISettings() {
     forum_index_interval: parseInt(document.getElementById('ai-forum-interval').value) || 900,
     channel_index_interval: parseInt(document.getElementById('ai-channel-interval').value) || 1800,
     drive_sync_interval: parseInt(document.getElementById('ai-drive-interval').value) || 60,
+    // AI 紀錄頻道
+    log_channel_id: document.getElementById('ai-log-channel-id').value.trim() || null,
     // Turtle Soup
     turtle_soup_enabled: document.getElementById('ai-turtle-soup-enabled').checked,
     turtle_soup_channel_id: document.getElementById('ai-turtle-soup-channel').value.trim(),
