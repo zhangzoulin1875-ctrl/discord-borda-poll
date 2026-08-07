@@ -6732,12 +6732,19 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
     Returns: {"success": True, "image_url": "...", "revised_prompt": "..."} or
              {"success": False, "error": "..."}
 
-    Handles two response shapes:
-      1. JSON (OpenAI-style): {"data": [{"url"/"b64_json": ...}]}
-      2. Raw image bytes (e.g. pollinations.ai): HTTP 200 with Content-Type: image/*
-         — the response body itself IS the image, no JSON wrapper.
+    Supports two very different API shapes:
+      1. pollinations.ai's native image API — GET https://image.pollinations.ai/prompt/{prompt}
+         with query params (width/height/seed/model/token). The prompt goes in the URL
+         PATH, not a JSON body — a POST with a JSON body to a made-up /v1/images/generations
+         endpoint gets silently ignored by their server (it returns *a* image, but not one
+         based on your prompt, which looked like "always the same image" bug).
+      2. OpenAI-compatible POST /v1/images/generations with JSON body — for providers that
+         actually implement that spec (DALL-E, and many OpenAI-compatible proxies).
+         Response may be JSON {"data": [{"url"/"b64_json": ...}]} OR raw image bytes
+         (some proxies return the image directly with Content-Type: image/*).
     """
     import random as _random
+    from urllib.parse import quote as _urlquote
 
     api_url = settings.get("t2i_api_url", "").strip()
     api_key = settings.get("t2i_api_key", "").strip()
@@ -6745,8 +6752,78 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
     size = settings.get("t2i_size", "1024x1024")
     quality = settings.get("t2i_quality", "standard")
 
-    if not api_url or not model:
-        return {"success": False, "error": "文生圖 API 未設定完整（需要 URL 和模型名稱）"}
+    if not api_url:
+        return {"success": False, "error": "文生圖 API 未設定完整（需要 URL）"}
+
+    try:
+        w, h = size.split("x")
+        w, h = int(w), int(h)
+    except Exception:
+        w, h = 1024, 1024
+
+    # 隨機 seed — 避免同樣的 prompt 每次都生成同一張圖
+    seed = _random.randint(1, 2_147_483_647)
+
+    # ══════════════════════════════════════════════════════════════
+    # 分支 1：pollinations.ai 原生 GET API（prompt 放在網址路徑裡）
+    # ══════════════════════════════════════════════════════════════
+    if "pollinations.ai" in api_url.lower() and "gen.pollinations.ai" not in api_url.lower():
+        encoded_prompt = _urlquote(prompt[:1000], safe="")
+        poll_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        params = {
+            "width": w,
+            "height": h,
+            "seed": seed,
+            "nologo": "true",
+        }
+        if model:
+            params["model"] = model
+        if api_key:
+            params["token"] = api_key
+
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=100)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(poll_url, params=params, headers=headers) as resp:
+                    if resp.status != 200:
+                        err_text = await resp.text()
+                        print(f"🎨 T2I (pollinations) 失敗 (HTTP {resp.status}): {err_text[:300]}")
+                        return {"success": False, "error": f"API 回應 HTTP {resp.status}: {err_text[:200]}"}
+
+                    content_type = (resp.headers.get("Content-Type") or "").lower()
+                    image_bytes = await resp.read()
+
+                    if not content_type.startswith("image/") and len(image_bytes) < 2000:
+                        # 太小又不是圖片格式，八成是錯誤訊息本體
+                        print(f"🎨 T2I (pollinations) 回應非圖片: {image_bytes[:300]}")
+                        return {"success": False, "error": f"API 未回傳圖片: {image_bytes[:200]}"}
+
+                    ext = "jpg"
+                    if "png" in content_type:
+                        ext = "png"
+                    elif "webp" in content_type:
+                        ext = "webp"
+                    image_path = os.path.join(DATA_DIR, f"t2i_{int(_time.time()*1000)}_{seed}.{ext}")
+                    with open(image_path, "wb") as f:
+                        f.write(image_bytes)
+                    print(f"🎨 T2I (pollinations) 成功: {prompt[:50]}... seed={seed}")
+                    return {"success": True, "image_path": image_path}
+
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "文生圖 API 逾時（超過 120 秒）"}
+        except Exception as e:
+            print(f"🎨 T2I (pollinations) 異常: {type(e).__name__}: {e}")
+            return {"success": False, "error": f"生圖過程發生錯誤: {str(e)[:200]}"}
+
+    # ══════════════════════════════════════════════════════════════
+    # 分支 2：OpenAI 相容 POST /v1/images/generations
+    # ══════════════════════════════════════════════════════════════
+    if not model:
+        return {"success": False, "error": "文生圖 API 未設定完整（需要模型名稱）"}
 
     # Normalize URL — accept both /images/generations and base URLs
     url = api_url
@@ -6755,16 +6832,6 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
             url += "/images/generations"
         else:
             url = url.rstrip("/") + "/v1/images/generations"
-
-    # 隨機 seed — 避免同樣的 prompt 每次都生成同一張圖（pollinations.ai 等
-    # 部分供應商在沒有 seed 或 seed 固定時，對相同 prompt 回傳快取過的相同結果）
-    seed = _random.randint(1, 2_147_483_647)
-
-    try:
-        w, h = size.split("x")
-        w, h = int(w), int(h)
-    except Exception:
-        w, h = 1024, 1024
 
     payload = {
         "model": model,
@@ -6796,7 +6863,7 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
                 content_type = (resp.headers.get("Content-Type") or "").lower()
 
                 # ── 情況 1：伺服器直接回傳圖片二進位（非 JSON）──
-                # 例如 pollinations.ai 成功時 Content-Type 是 image/jpeg、image/png 等，
+                # 有些 OpenAI 相容代理成功時 Content-Type 是 image/jpeg、image/png 等，
                 # 這種情況絕對不能呼叫 resp.json()，直接把整個 body 當圖片下載存檔。
                 if content_type.startswith("image/"):
                     image_bytes = await resp.read()
