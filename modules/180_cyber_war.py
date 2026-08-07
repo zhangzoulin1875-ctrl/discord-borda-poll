@@ -556,11 +556,12 @@ def _build_war_embed():
         title=f"⚔️ 賽博一戰 — 第{s.get('turn', 0)}回合 (第{s.get('game_id', 0)}局)",
         description=(
             f"🗺️ 戰場：**{s.get('battlefield', '—')}**\n"
-            f"⏱️ 下回合結算：{_time_remaining(s.get('next_turn_time'))}\n"
-            f"🏁 遊戲剩餘：{_time_remaining(s.get('end_time'))}\n"
-            f"📋 本回合階段：**{'AI結算中' if s.get('phase') == 'processing' else '行動中'}**\n"
-            f"💰 獎池：{sum(d.get('amount', 0) for d in s.get('deposits', {}).values()):,} {currency_name()} ×{s.get('prize_multiplier', 0)}\n"
-            f"🔒 押金：**{'已鎖定' if s.get('deposits_locked') else '可自由投注（限第1回合）'}**"
+            + f"⏱️ 下回合結算：{_time_remaining(s.get('next_turn_time'))}\n"
+            + (f"🌙 凌晨宵禁中（02:00-06:00不結算）\n" if 2 <= datetime.now(_TZ).hour < 6 else "")
+            + f"🏁 遊戲剩餘：{_time_remaining(s.get('end_time'))}\n"
+            + f"📋 本回合階段：**{'AI結算中' if s.get('phase') == 'processing' else '行動中'}**\n"
+            + f"💰 獎池：{sum(d.get('amount', 0) for d in s.get('deposits', {}).values()):,} {currency_name()} ×{s.get('prize_multiplier', 0)}\n"
+            + f"🔒 押金：**{'已鎖定' if s.get('deposits_locked') else '可自由投注（限第1回合）'}**"
         ),
         color=color,
         timestamp=discord.utils.utcnow(),
@@ -1843,6 +1844,46 @@ async def refresh_war_panel():
     except Exception as e:
         print(f"⚠️ 賽博一戰面板更新失敗：{e}")
 
+# ── 凌晨宵禁常量 ──
+NIGHT_CURFEW_START = 2   # 02:00 開始宵禁
+NIGHT_CURFEW_END = 6     # 06:00 宵禁結束
+
+# ── 無軍官行動時的自動保守指令 ──
+_AUTO_CONSERVATIVE_ORDERS = [
+    "全軍加固現有陣地，構築第二道防線，不主動出擊，節約彈藥與補給",
+    "各部隊維持防守態勢，加強壕溝巡邏，修復受損工事，等待上級進一步指示",
+    "全線轉入防禦，部署機槍陣地掩護前沿，減少不必要的人員調動以保存兵力",
+]
+
+def _check_side_has_officer_actions(fkey, turn_str):
+    """檢查某方是否有任何軍官提交了行動或指令。回傳 True=有，False=完全沒有。"""
+    s = _cyber_war_state
+    fac = s.get("factions", {}).get(fkey, {})
+    actions = s.get("actions", {}).get(turn_str, {}).get(fkey, {})
+    orders = s.get("orders", {}).get(turn_str, {}).get(fkey, {})
+    for officer in fac.get("officers", []):
+        oid = officer["id"]
+        if oid in actions:
+            return True
+        order = orders.get(oid, "")
+        if order and isinstance(order, str):
+            return True
+    return False
+
+def _inject_conservative_order(fkey, turn_str):
+    """為沒有軍官行動的一方自動注入保守指令，消耗少量補給點數。"""
+    s = _cyber_war_state
+    fac = s.get("factions", {}).get(fkey, {})
+    order = _cw_random.choice(_AUTO_CONSERVATIVE_ORDERS)
+    # 消耗2點補給點數（自動防守也要消耗資源）
+    cost = 2
+    current_sp = fac.get("supply_points", 0)
+    fac["supply_points"] = max(0, current_sp - cost)
+    # 記錄為自動指令
+    s.setdefault("orders", {}).setdefault(turn_str, {}).setdefault(fkey, {})["_auto_conservative"] = order
+    save_cyber_war()
+    return order, cost
+
 # ── AI 戰況判定 ──
 async def _ai_evaluate_turn(turn: int):
     """AI 裁判：收集雙方行動+砲擊，判定本回合戰況變化。"""
@@ -1855,6 +1896,14 @@ async def _ai_evaluate_turn(turn: int):
     actions = s.get("actions", {}).get(turn_str, {})
     artillery = s.get("artillery", {}).get(turn_str, {})
 
+    # 檢查雙方是否有軍官行動，沒有則自動注入保守指令
+    _auto_orders = {}
+    for fkey in ("A", "B"):
+        if not _check_side_has_officer_actions(fkey, turn_str):
+            auto_order, auto_cost = _inject_conservative_order(fkey, turn_str)
+            _auto_orders[fkey] = auto_order
+            print(f"🌙 賽博一戰：{fkey}方無軍官行動，自動注入保守指令（消耗{auto_cost}補給點數）")
+
     def _collect_side(fkey, fac):
         lines = []
         a = actions.get(fkey, {})
@@ -1863,6 +1912,7 @@ async def _ai_evaluate_turn(turn: int):
         acted_uids = set()
 
         # -- 軍官：人數少（每方2人），逐一列出 --
+        _auto_order = _auto_orders.get(fkey, "")
         for officer in fac.get("officers", []):
             oid = officer["id"]
             if oid in a:
@@ -1873,6 +1923,9 @@ async def _ai_evaluate_turn(turn: int):
                 if order and isinstance(order, str):
                     acted_uids.add(oid)
                     lines.append(f"  [officer] {officer.get('name','?')}：（統一指令）{order[:150]}")
+                elif _auto_order:
+                    acted_uids.add(oid)
+                    lines.append(f"  [officer] {officer.get('name','?')}：（系統自動防守指令）{_auto_order[:150]}")
                 else:
                     lines.append(f"  [officer] {officer.get('name','?')}：（無行動）")
 
@@ -1977,7 +2030,7 @@ async def _ai_evaluate_turn(turn: int):
         "  騎兵突襲、地下坑道爆破、海上封鎖、潛艇攻擊、宣傳戰、情報收集等。\n\n"
         "其他判定規則：\n"
         "考慮因素：行動的具體性、與上級指令的一致性、支援火力效果（砲擊/空襲/毒氣/煙幕/偵查各有不同效果）、補給消耗等。\n"
-        "注意：標註〔服從小隊長/軍官指令〕的行動表示該玩家本人未提交行動，由上級統一指令代為執行，效果權重應低於玩家親自撰寫的行動。\n"
+        "注意：標註〔服從小隊長/軍官指令〕的行動表示該玩家本人未提交行動，由上級統一指令代為執行，效果權重應低於玩家親自撰寫的行動。標註（系統自動防守指令）的行動表示該方軍官完全未下達任何指令，由系統自動生成保守防守策略，效果應為最低權重且不可能有進攻加成。\n"
         "兵種特性：突擊兵進攻加成、醫療兵減少傷亡/恢復士氣、支援兵提供補給、偵查兵降低敵方突襲效果。\n"
         "陣地影響：\n"
         "  戰壕🛡️：每級減少敵方對我方的推進效果2%、降低我方傷亡。\n"
@@ -2688,7 +2741,15 @@ async def cyber_war_loop():
                     _stuck_processing_counter = 0
                     next_turn = _from_iso(s.get("next_turn_time"))
                     if next_turn and datetime.now(_TZ) >= next_turn:
-                        await _process_turn_end()
+                        # 凌晨宵禁：02:00-06:00 不結算，防止熬夜夜襲
+                        _now_h = datetime.now(_TZ).hour
+                        if 2 <= _now_h < 6:
+                            print(f"🌙 賽博一戰：凌晨宵禁（{_now_h:02d}:xx），跳過本輪結算，排至06:00")
+                            _tonight_6am = datetime.now(_TZ).replace(hour=6, minute=0, second=0, microsecond=0)
+                            s["next_turn_time"] = _tonight_6am.isoformat()
+                            save_cyber_war()
+                        else:
+                            await _process_turn_end()
 
                 # 面板管理：重啟後第一次強制刪舊發新，之後正常刷新
                 if _cyber_war_settings.get("channel_id"):
