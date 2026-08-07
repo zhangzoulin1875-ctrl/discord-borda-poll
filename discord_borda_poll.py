@@ -8126,35 +8126,30 @@ async def api_test_ai_connection(request):
 
     results = []
     if target == "chain":
-        # Test every model in the fallback chain individually
-        chain_raw = chat_ai_settings.get("model_fallback_chain", "").strip()
-        primary_model = chat_ai_settings.get("model", "")
-        models = [primary_model]
-        if chain_raw:
-            models += [m.strip() for m in chain_raw.split(",") if m.strip()]
-        for m in models:
-            results.append(await _test_one(
-                chat_ai_settings.get("api_url", ""),
-                chat_ai_settings.get("api_key", ""),
-                m, f"主 API · {m}"))
+        # 測試主模型 + 池式降級鏈中每一項（每項可有不同 API 端點）
+        main_url, main_key, main_model = _resolve_role_endpoint("main", chat_ai_settings)
+        results.append(await _test_one(main_url, main_key, main_model, f"主模型 · {main_model}"))
+        for c_url, c_key, c_model in _resolve_chain("main", chat_ai_settings):
+            results.append(await _test_one(c_url, c_key, c_model, f"降級鏈 · {c_model}"))
+    elif target == "vision_chain":
+        # 測試視覺模型 + 視覺降級鏈
+        v_url, v_key, v_model = _resolve_role_endpoint("vision", chat_ai_settings)
+        if v_model:
+            results.append(await _test_one(v_url, v_key, v_model, f"視覺模型 · {v_model}"))
+        for c_url, c_key, c_model in _resolve_chain("vision", chat_ai_settings):
+            results.append(await _test_one(c_url, c_key, c_model, f"視覺降級鏈 · {c_model}"))
+        if not results:
+            results.append({"label": "視覺模型", "status": "error", "error": "未設定視覺模型"})
     elif target == "primary" and specific_model:
-        results.append(await _test_one(
-            chat_ai_settings.get("api_url", ""),
-            chat_ai_settings.get("api_key", ""),
-            specific_model, f"主 API · {specific_model}"))
+        main_url, main_key, _ = _resolve_role_endpoint("main", chat_ai_settings)
+        results.append(await _test_one(main_url, main_key, specific_model, f"主模型 · {specific_model}"))
     else:
         if target in ("primary", "both"):
-            results.append(await _test_one(
-                chat_ai_settings.get("api_url", ""),
-                chat_ai_settings.get("api_key", ""),
-                chat_ai_settings.get("model", ""),
-                "主 API"))
+            main_url, main_key, main_model = _resolve_role_endpoint("main", chat_ai_settings)
+            results.append(await _test_one(main_url, main_key, main_model, "主模型"))
         if target in ("fallback", "both"):
-            results.append(await _test_one(
-                chat_ai_settings.get("fallback_api_url", ""),
-                chat_ai_settings.get("fallback_api_key", ""),
-                chat_ai_settings.get("fallback_model", ""),
-                "備援 API"))
+            bk_url, bk_key, bk_model = _resolve_role_endpoint("backup", chat_ai_settings)
+            results.append(await _test_one(bk_url, bk_key, bk_model, "備援模型"))
     return web.json_response({"results": results})
 
 

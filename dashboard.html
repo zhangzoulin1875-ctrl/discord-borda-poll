@@ -358,20 +358,19 @@
       </div>
     </div>
   </div>
-  <!-- Fallback API -->
+  <!-- 備援模型行為設定 -->
       <div class="bg-[#2b2d31] rounded-xl p-5">
-        <h3 class="font-semibold mb-1">🔁 備援 API</h3>
-        <p class="text-xs text-gray-400 mb-4">當主要 API 回報 503/502/500 等供應商錯誤時，自動切換到備援 API</p>
+        <h3 class="font-semibold mb-1">🔁 備援模型行為設定</h3>
+        <p class="text-xs text-gray-400 mb-4">主模型（含降級鏈全部項目）都失敗時，自動切換到上方「模型分配 → 備援模型」指定的模型。所有模型現在統一在「總 AI 池」管理，不再有獨立的備援 API 概念——這裡只設定切換行為與限制。</p>
         <div class="space-y-4">
           <div class="flex items-center justify-between">
             <div>
-              <p class="text-sm">啟用備援 API</p>
-              <p class="text-xs text-gray-400">關閉時即使主要 API 故障也不會使用備援</p>
+              <p class="text-sm">啟用備援切換</p>
+              <p class="text-xs text-gray-400">關閉時即使主模型故障也不會切到備援模型</p>
             </div>
             <label class="toggle"><input type="checkbox" id="ai-fallback-enabled"><span class="toggle-slider"></span></label>
           </div>
           <div>
-            <p class="text-xs text-gray-500 mb-3">備援 API 端點與模型：從上方「模型分配 → 備援模型」選擇</p>
             <label class="block text-sm text-gray-400 mb-1">每位用戶每日備援對話上限</label>
             <input id="ai-fallback-daily-limit" type="number" min="1" max="999" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 mb-3 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="10">
             <label class="block text-sm text-gray-400 mb-1">每分鐘備援請求上限（聊天用）</label>
@@ -386,7 +385,7 @@
             <div class="flex items-center justify-between mb-3">
               <div>
                 <p class="text-sm">擁有者跳過模型降級鏈</p>
-                <p class="text-xs text-gray-400">開啟時，擁有者觸發的請求若主模型失敗，直接切換到備援 API（不逐一嘗試降級鏈中的其他模型）——因為備援模型通常比降級鏈裡的免費模型更強</p>
+                <p class="text-xs text-gray-400">開啟時，擁有者觸發的請求若主模型失敗，直接切換到備援模型（不逐一嘗試降級鏈中的其他模型）——因為備援模型通常比降級鏈裡的免費模型更強</p>
               </div>
               <label class="toggle"><input type="checkbox" id="ai-owner-skip-chain"><span class="toggle-slider"></span></label>
             </div>
@@ -447,7 +446,7 @@
         <div class="mb-3">
           <label class="block text-sm text-gray-400 mb-1">豁免角色 ID（逗號分隔，留空=不自訂豁免）</label>
           <input type="text" id="ai-mod-exempt-roles" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="123456789,987654321">
-          <p class="text-xs text-gray-400 mt-1">伺服器管理員（有管理伺服器權限）自動豁免。API Key 留空則沿用主 API。模型可設為更便宜/快速的模型以節省用量。</p>
+          <p class="text-xs text-gray-400 mt-1">伺服器管理員（有管理伺服器權限）自動豁免。</p>
         </div>
 
         <!-- 嚴重違規自動處置 -->
@@ -526,17 +525,18 @@
 
       <button onclick="saveChatAISettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存 AI 聊天設定</button>
 
-      <!-- API 連接測試 -->
+      <!-- 模型連接測試 -->
       <div class="bg-[#2b2d31] rounded-xl p-5">
-        <h3 class="font-semibold mb-1">🔌 API 連接測試</h3>
-        <p class="text-xs text-gray-400 mb-4">發送一個最小請求來測試主 API 和備援 API 是否正常連線，不需要實際對話</p>
+        <h3 class="font-semibold mb-1">🔌 模型連接測試</h3>
+        <p class="text-xs text-gray-400 mb-4">發送一個最小請求測試池中模型是否正常連線，不需要實際對話</p>
         <div class="flex gap-2 mb-4 flex-wrap">
-          <button onclick="testAIConnection('both')" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg font-semibold text-sm flex-1">🔍 測試全部</button>
+          <button onclick="testAIConnection('both')" class="bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg font-semibold text-sm flex-1">🔍 測試主模型+備援</button>
           <button onclick="testAIConnection('chain')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">🔗 測試降級鏈</button>
-          <button onclick="testAIConnection('primary')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">主 API</button>
-          <button onclick="testAIConnection('fallback')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">備援 API</button>
+          <button onclick="testAIConnection('vision_chain')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">👁️ 測試視覺降級鏈</button>
+          <button onclick="testAIConnection('primary')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">主模型</button>
+          <button onclick="testAIConnection('fallback')" class="bg-[#3a3c43] hover:bg-[#4a4c53] px-4 py-2 rounded-lg font-semibold text-sm">備援模型</button>
         </div>
-        <p class="text-xs text-gray-500 mb-3">🔗 測試降級鏈：逐一測試主模型 + 降級鏈中的每個模型，查看哪些可用、哪些 401/503</p>
+        <p class="text-xs text-gray-500 mb-3">🔗 測試降級鏈：逐一測試主模型 + 降級鏈中每一項（每項用自己對應的 API），查看哪些可用、哪些 401/503。「主模型」「備援模型」皆從上方「模型分配」讀取目前設定。</p>
         <div id="ai-test-results" class="space-y-3"></div>
       </div>
 
@@ -551,7 +551,7 @@
       <!-- 全域功能測試 -->
       <div class="bg-[#2b2d31] rounded-xl p-5">
         <h3 class="font-semibold mb-1">🌍 全域功能測試</h3>
-        <p class="text-xs text-gray-400 mb-4">一次測試所有功能類別的 AI 模型：聊天、行政、娛樂、降級鏈、備援 API、各遊戲模型、視覺模型。快速確認哪些模型可用、哪些逾時或失敗。</p>
+        <p class="text-xs text-gray-400 mb-4">一次測試所有功能類別的 AI 模型：聊天、行政、娛樂、降級鏈、備援模型、各遊戲模型、視覺模型。快速確認哪些模型可用、哪些逾時或失敗。</p>
         <button onclick="testAllFunctions()" class="w-full bg-[#57f287] hover:bg-[#3ba55c] px-4 py-3 rounded-lg font-semibold text-sm text-black">🌍 開始全域功能測試</button>
         <div id="all-functions-test-results" class="space-y-3 mt-4"></div>
       </div>
