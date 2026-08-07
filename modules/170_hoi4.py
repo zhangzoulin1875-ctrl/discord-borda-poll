@@ -1052,6 +1052,32 @@ async def api_hoi4_state(request):
     try: return web.json_response(hoi4_state)
     except Exception as e: return web.json_response({"error": str(e)}, status=500)
 
+async def api_hoi4_mapdebug(request):
+    """診斷地圖模板載入問題：回報檔案是否存在、大小、讀取/解析錯誤細節。"""
+    import traceback
+    info = {"file_path": _MAP_TEMPLATE_FILE, "cwd": os.getcwd()}
+    try:
+        info["exists"] = os.path.exists(_MAP_TEMPLATE_FILE)
+        if info["exists"]:
+            info["size_bytes"] = os.path.getsize(_MAP_TEMPLATE_FILE)
+        info["data_dir_listing"] = os.listdir(DATA_DIR) if os.path.exists(DATA_DIR) else "DATA_DIR不存在"
+    except Exception as e:
+        info["stat_error"] = str(e)
+    try:
+        with open(_MAP_TEMPLATE_FILE, "r", encoding="utf-8") as f:
+            raw = f.read()
+        info["read_bytes"] = len(raw)
+        tpl = json_module.loads(raw)
+        info["parsed_ok"] = True
+        info["province_count"] = len(tpl)
+        info["sample_key"] = list(tpl.keys())[0] if tpl else None
+    except Exception as e:
+        info["parsed_ok"] = False
+        info["error_type"] = type(e).__name__
+        info["error_msg"] = str(e)
+        info["traceback"] = traceback.format_exc()[-2000:]
+    return web.json_response(info)
+
 async def api_hoi4_reset(request):
     """強制重置遊戲（機器人擁有者限定）：清空舊存檔，讓下次加入時用最新地圖模板重新開局。
     用途：地圖模板(data/hoi4_map_template.json)更新後，已經開局的舊存檔不會自動套用新地圖，
@@ -1300,6 +1326,7 @@ _load_hoi4_state()
 HOI4_API_ROUTES = [
     ("/api/game/hoi4/state", "GET", api_hoi4_state),
     ("/api/game/hoi4/reset", "POST", api_hoi4_reset),
+    ("/api/game/hoi4/map-debug", "GET", api_hoi4_mapdebug),
     ("/api/game/hoi4/join", "POST", api_hoi4_join),
     ("/api/game/hoi4/expand", "POST", api_hoi4_expand),
     ("/api/game/hoi4/declare-war", "POST", api_hoi4_declare_war),
