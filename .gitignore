@@ -6,3 +6,8 @@ bot.log
 incoming_files/
 .agents/
 .base44-conversation-workspace
+.agents/.env
+node_modules/
+.npm/
+.cache/
+blobs/
