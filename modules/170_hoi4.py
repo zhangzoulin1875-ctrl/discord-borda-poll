@@ -89,10 +89,6 @@ _MAP_INDEX_FILE = os.path.join(DATA_DIR, "hoi4_map_index.json")
 _map_index_cache = None
 
 def _load_map_index():
-    if not HOI4_ENABLED:
-        global _map_index_cache
-        _map_index_cache = None  # 釋放
-        return None
     """讀取「輕量地圖索引」——跟 hoi4_map_template.json 內容一樣，但完全不含 polygon 座標。
     這是2026-08-07記憶體OOM修復新增的：原本遊戲邏輯（開局產生省份、驗證鄰接）也是呼叫會載入
     含polygon的完整地圖模板，但polygon是4001省份×多邊形嵌套list結構，用json.loads()解析成
@@ -105,6 +101,9 @@ def _load_map_index():
     若輕量索引檔不存在（例如手動更新過地圖但忘了重建索引），退回從完整模板即時抽取欄位、
     抽完立刻丟棄完整模板，只把輕量結果存進cache，避免完整版polygon資料長駐記憶體。"""
     global _map_index_cache
+    if not HOI4_ENABLED:
+        _map_index_cache = None  # 釋放
+        return None
     if _map_index_cache is not None:
         return _map_index_cache
     try:
@@ -1130,8 +1129,8 @@ async def api_hoi4_state(request):
 _hoi4_map_raw_bytes = None  # 原始檔案 bytes，完全不經過 json.loads() 解析
 
 async def api_hoi4_map(request):
+    global _hoi4_map_raw_bytes
     if not HOI4_ENABLED:
-        global _hoi4_map_raw_bytes
         _hoi4_map_raw_bytes = None  # 釋放 22MB
         return _hoi4_disabled_response()
     """地圖多邊形 API —— 直接把 data/hoi4_map_template.json 的原始 bytes 讀出來當 response body
@@ -1150,7 +1149,6 @@ async def api_hoi4_map(request):
     （不快取解析後的物件），用 web.Response(body=...) 原樣回傳。記憶體成本只有檔案
     本身的大小（~22MB），不會有物件解析的10倍膨脹。真正需要解析後欄位的遊戲邏輯
     （開局產生省份等）改用不含polygon的輕量索引 _load_map_index()（見上方，<1MB）。"""
-    global _hoi4_map_raw_bytes
     try:
         if _hoi4_map_raw_bytes is None:
             with open(_MAP_TEMPLATE_FILE, "rb") as f:
