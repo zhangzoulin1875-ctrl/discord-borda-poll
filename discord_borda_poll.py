@@ -251,6 +251,18 @@ async def keep_alive_server():
     app.router.add_post("/api/guilds/{gid}/global-scan/finish", api_global_scan_finish)
     app.router.add_get("/api/siege-settings", api_get_siege_settings)
     app.router.add_put("/api/siege-settings", api_set_siege_settings)
+    # HOI4 game API routes (registered by module 170)
+    try:
+        for _path, _method, _handler in HOI4_API_ROUTES:
+            if _method == "GET":
+                app.router.add_get(_path, _handler)
+            elif _method == "PUT":
+                app.router.add_put(_path, _handler)
+            elif _method == "POST":
+                app.router.add_post(_path, _handler)
+        print("🎮 HOI4 API routes registered")
+    except Exception as e:
+        print(f"⚠️ HOI4 API route registration failed: {e}")
     print(f"📊 Dashboard routes registered")
 
     runner = web.AppRunner(app)
@@ -11068,7 +11080,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), HOI4Group()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -14219,6 +14231,7 @@ bot.add_view(EconomyPanelButtonsView())  # 經濟看板下方的股票/公司管
 bot.add_view(HorseBettingView("persistent"))  # 賽馬下注按鈕持久化（重啟後復原用）
 bot.add_view(_WerewolfResumeView())  # 狼人殺重啟恢復按鈕持久化
 bot.add_view(SiegePanelView())  # 攻城戰按鈕持久化
+bot.add_view(HOI4PanelView())  # HOI4 戰略指揮部面板按鈕持久化
 
 bot.setup_hook = setup_hook
 
