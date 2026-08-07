@@ -10818,7 +10818,7 @@ async def setup_hook():
     await keep_alive_server()
 
     # Register slash command groups (runs once, before bot connects)
-    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup()]:
+    for grp in [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup()]:
         try:
             bot.tree.add_command(grp)
         except Exception as e:
@@ -10892,6 +10892,7 @@ async def setup_hook():
     load_stock_market()
     load_horse_racing()
     load_graceful_restart()
+    load_siege_data()
     load_refine_settings()
     load_refine_knowledge()
     save_quiz_data()  # Create files if not exists
@@ -10918,6 +10919,7 @@ async def setup_hook():
     asyncio.ensure_future(channel_index_refresh_loop())
     asyncio.ensure_future(daily_summary_loop())
     asyncio.ensure_future(quiz_question_loop())
+    asyncio.ensure_future(siege_loop())
     asyncio.ensure_future(turtle_soup_loop())
     asyncio.ensure_future(quiz_settlement_loop())
     asyncio.ensure_future(ai_refine_loop())
@@ -13966,6 +13968,7 @@ bot.add_view(WerewolfSignupView())  # 狼人殺報名按鈕持久化
 bot.add_view(EconomyPanelButtonsView())  # 經濟看板下方的股票/公司管理快捷按鈕持久化
 bot.add_view(HorseBettingView("persistent"))  # 賽馬下注按鈕持久化（重啟後復原用）
 bot.add_view(_WerewolfResumeView())  # 狼人殺重啟恢復按鈕持久化
+bot.add_view(SiegePanelView())  # 攻城戰按鈕持久化
 
 bot.setup_hook = setup_hook
 
