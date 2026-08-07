@@ -1052,6 +1052,36 @@ async def api_hoi4_state(request):
     try: return web.json_response(hoi4_state)
     except Exception as e: return web.json_response({"error": str(e)}, status=500)
 
+async def api_hoi4_reset(request):
+    """強制重置遊戲（機器人擁有者限定）：清空舊存檔，讓下次加入時用最新地圖模板重新開局。
+    用途：地圖模板(data/hoi4_map_template.json)更新後，已經開局的舊存檔不會自動套用新地圖，
+    需要手動重置才能生效。"""
+    try:
+        body = await request.json()
+        user_id = str(body.get("user_id", ""))
+        try:
+            from discord_borda_poll import BOT_OWNER_ID
+            owner_id = str(BOT_OWNER_ID)
+        except Exception:
+            owner_id = "1482256878334640209"
+        if user_id != owner_id:
+            return web.json_response({"error": "此操作僅限機器人擁有者"}, status=403)
+        global hoi4_state
+        hoi4_state = {
+            "game_active": False, "tick": 0, "last_tick_iso": _now_gmt8_iso(),
+            "countries": {}, "provinces": {}, "wars": {},
+            "focus_tree": _DEFAULT_FOCUS_TREE, "tech_tree": _DEFAULT_TECH_TREE,
+            "log": ["[{}] 遊戲已重置，等待下一位玩家加入開局".format(_now_gmt8_str())],
+        }
+        _save_hoi4_state()
+        try:
+            await refresh_hoi4_panel()
+        except Exception:
+            pass
+        return web.json_response({"ok": True, "message": "已重置，下次加入時會用新地圖模板重新開局"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
 async def api_hoi4_declare_war(request):
     """網頁端點擊宣戰：直接傳 country_id + target_id（都是從 state 拿到的，不用打字）。"""
     try:
@@ -1269,6 +1299,7 @@ _load_hoi4_state()
 
 HOI4_API_ROUTES = [
     ("/api/game/hoi4/state", "GET", api_hoi4_state),
+    ("/api/game/hoi4/reset", "POST", api_hoi4_reset),
     ("/api/game/hoi4/join", "POST", api_hoi4_join),
     ("/api/game/hoi4/expand", "POST", api_hoi4_expand),
     ("/api/game/hoi4/declare-war", "POST", api_hoi4_declare_war),
