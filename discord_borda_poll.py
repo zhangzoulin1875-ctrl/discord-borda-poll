@@ -11156,7 +11156,7 @@ async def setup_hook():
 
     # Register slash command groups (runs once, before bot connects)
     _hoi4_on = os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off")
-    _all_groups = [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), ProposalGroup()]
+    _all_groups = [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), ProposalGroup(), CyberWarGroup()]
     if _hoi4_on:
         _all_groups.append(StormGroup())
     for grp in _all_groups:
@@ -11234,6 +11234,7 @@ async def setup_hook():
     load_horse_racing()
     load_graceful_restart()
     load_siege_data()
+    load_cyber_war()
     load_refine_settings()
     load_refine_knowledge()
     save_quiz_data()  # Create files if not exists
@@ -11261,6 +11262,7 @@ async def setup_hook():
     asyncio.ensure_future(daily_summary_loop())
     asyncio.ensure_future(quiz_question_loop())
     asyncio.ensure_future(siege_loop())
+    asyncio.ensure_future(cyber_war_loop())
     asyncio.ensure_future(turtle_soup_loop())
     asyncio.ensure_future(quiz_settlement_loop())
     asyncio.ensure_future(ai_refine_loop())
