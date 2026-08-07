@@ -16,8 +16,8 @@ _siege_settings = {
     "panel_message_id": None,      # 當前面板的訊息 ID
     "reward_pool": 5000,            # 每日獎池總額（琉璃幣）
     "attack_cooldown": 1200,        # 每人攻城冷卻（秒，預設20分鐘）
-    "min_hp": 8000,                # 城池最低血量
-    "max_hp": 15000,               # 城池最高血量
+    "min_hp": 80000,               # 城池最低血量
+    "max_hp": 120000,              # 城池最高血量
     "min_defense": 10,             # 最低防禦減傷%
     "max_defense": 35,             # 最高防禦減傷%
     "min_damage": 100,             # AI 判定最低傷害

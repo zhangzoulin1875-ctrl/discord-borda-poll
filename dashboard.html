@@ -40,6 +40,7 @@
       <div class="nav-tab" data-tab="ai-mod" onclick="showChatAIPanel(); setTimeout(() => { const el = document.getElementById('ai-mod-section'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 300);">🚨 AI 網警</div>
       <div class="nav-tab" data-tab="t2i" onclick="showChatAIPanel(); setTimeout(() => { const el = document.getElementById('ai-t2i-enabled'); if (el) el.closest('.bg-\\[\\#2b2d31\\]').scrollIntoView({behavior: 'smooth', block: 'start'}); }, 300);">🎨 文生圖</div>
       <div class="nav-tab" data-tab="schedule" onclick="showSchedulePanel()">📅 排程通知</div>
+      <div class="nav-tab" data-tab="siege" onclick="showSiegePanel()">⚔️ 攻城戰</div>
     </div>
   </div>
   <div id="nav-user" class="hidden flex items-center gap-3">
@@ -748,6 +749,82 @@
         <button onclick="testAllFunctions()" class="w-full bg-[#57f287] hover:bg-[#3ba55c] px-4 py-3 rounded-lg font-semibold text-sm text-black">🌍 開始全域功能測試</button>
         <div id="all-functions-test-results" class="space-y-3 mt-4"></div>
       </div>
+
+      <!-- AI 攻城戰設定 -->
+      <div id="siege-section" class="bg-[#2b2d31] rounded-xl p-5">
+        <h3 class="font-semibold mb-1">⚔️ AI 攻城戰設定</h3>
+        <p class="text-xs text-gray-400 mb-4">每日 10:00 自動開城，22:00 結算排名。玩家每 20 分鐘可攻城一次，AI 判定傷害值。</p>
+
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">啟用攻城戰</label>
+            <select id="siege-enabled" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm">
+              <option value="true">啟用</option>
+              <option value="false">停用</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">面板頻道 ID</label>
+            <input id="siege-channel-id" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="頻道 ID">
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">每日獎池（琉璃幣）</label>
+            <input id="siege-reward-pool" type="number" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="5000">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">攻城冷卻（秒）</label>
+            <input id="siege-attack-cooldown" type="number" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="1200">
+          </div>
+        </div>
+
+        <h4 class="text-sm font-semibold text-gray-300 mb-2">🏰 城池血量範圍</h4>
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">最低血量</label>
+            <input id="siege-min-hp" type="number" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="80000">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">最高血量</label>
+            <input id="siege-max-hp" type="number" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="120000">
+          </div>
+        </div>
+
+        <h4 class="text-sm font-semibold text-gray-300 mb-2">🛡️ 防禦減傷範圍（%）</h4>
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">最低減傷%</label>
+            <input id="siege-min-defense" type="number" min="0" max="90" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="10">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">最高減傷%</label>
+            <input id="siege-max-defense" type="number" min="0" max="90" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="35">
+          </div>
+        </div>
+
+        <h4 class="text-sm font-semibold text-gray-300 mb-2">⚔️ AI 傷害判定範圍</h4>
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">最低傷害</label>
+            <input id="siege-min-damage" type="number" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="100">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">最高傷害</label>
+            <input id="siege-max-damage" type="number" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="2000">
+          </div>
+        </div>
+
+        <button onclick="saveSiegeSettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">💾 儲存攻城戰設定</button>
+
+        <!-- 當前戰況 -->
+        <div id="siege-status" class="mt-4 bg-[#1e1f22] rounded-lg p-4 hidden">
+          <h4 class="text-sm font-semibold mb-2">📊 當前戰況</h4>
+          <div id="siege-status-content" class="text-sm text-gray-300 space-y-1"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -1155,6 +1232,62 @@ async function saveScheduleSettings() {
   };
   const r = await api('/api/schedule-settings', { method: 'PUT', body: JSON.stringify(data) });
   if (r.ok) alert('✅ 排程設定已儲存');
+  else alert('❌ 儲存失敗');
+}
+
+function showSiegePanel() {
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  document.getElementById('chat-ai-view').classList.remove('hidden');
+  showOnly('main-view');
+  setActiveTab('siege');
+  setTimeout(() => { const el = document.getElementById('siege-section'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 100);
+  loadSiegeSettings();
+}
+
+async function loadSiegeSettings() {
+  const s = await api('/api/siege-settings');
+  if (s.error) { console.error('攻城戰設定載入失敗', s.error); return; }
+  document.getElementById('siege-enabled').value = String(s.enabled);
+  document.getElementById('siege-channel-id').value = s.channel_id || '';
+  document.getElementById('siege-reward-pool').value = s.reward_pool || 5000;
+  document.getElementById('siege-attack-cooldown').value = s.attack_cooldown || 1200;
+  document.getElementById('siege-min-hp').value = s.min_hp || 80000;
+  document.getElementById('siege-max-hp').value = s.max_hp || 120000;
+  document.getElementById('siege-min-defense').value = s.min_defense || 10;
+  document.getElementById('siege-max-defense').value = s.max_defense || 35;
+  document.getElementById('siege-min-damage').value = s.min_damage || 100;
+  document.getElementById('siege-max-damage').value = s.max_damage || 2000;
+
+  // 顯示當前戰況
+  if (s.active) {
+    document.getElementById('siege-status').classList.remove('hidden');
+    const hpPct = s.max_hp_current > 0 ? (s.current_hp / s.max_hp_current * 100).toFixed(0) : 0;
+    document.getElementById('siege-status-content').innerHTML = `
+      <p>🏰 <b>攻城目標</b>：${s.nation_name || '未知'}</p>
+      <p>❤️ <b>血量</b>：${(s.current_hp||0).toLocaleString()} / ${(s.max_hp_current||0).toLocaleString()} (${hpPct}%)</p>
+      <p>🛡️ <b>防禦減傷</b>：${s.defense_pct || 0}%</p>
+      <p>⚔️ <b>累計傷害</b>：${(s.total_damage_dealt||0).toLocaleString()}</p>
+      <p>👥 <b>參與人數</b>：${s.player_count || 0} 人</p>`;
+  } else {
+    document.getElementById('siege-status').classList.add('hidden');
+  }
+}
+
+async function saveSiegeSettings() {
+  const data = {
+    enabled: document.getElementById('siege-enabled').value === 'true',
+    channel_id: document.getElementById('siege-channel-id').value.trim(),
+    reward_pool: parseInt(document.getElementById('siege-reward-pool').value) || 5000,
+    attack_cooldown: parseInt(document.getElementById('siege-attack-cooldown').value) || 1200,
+    min_hp: parseInt(document.getElementById('siege-min-hp').value) || 80000,
+    max_hp: parseInt(document.getElementById('siege-max-hp').value) || 120000,
+    min_defense: parseInt(document.getElementById('siege-min-defense').value) || 10,
+    max_defense: parseInt(document.getElementById('siege-max-defense').value) || 35,
+    min_damage: parseInt(document.getElementById('siege-min-damage').value) || 100,
+    max_damage: parseInt(document.getElementById('siege-max-damage').value) || 2000,
+  };
+  const r = await api('/api/siege-settings', { method: 'PUT', body: JSON.stringify(data) });
+  if (r.ok) alert('✅ 攻城戰設定已儲存');
   else alert('❌ 儲存失敗');
 }
 

@@ -249,6 +249,8 @@ async def keep_alive_server():
     app.router.add_post("/api/guilds/{gid}/global-scan/batch", api_global_scan_batch)
     app.router.add_post("/api/guilds/{gid}/global-scan/init", api_global_scan_init)
     app.router.add_post("/api/guilds/{gid}/global-scan/finish", api_global_scan_finish)
+    app.router.add_get("/api/siege-settings", api_get_siege_settings)
+    app.router.add_put("/api/siege-settings", api_set_siege_settings)
     print(f"📊 Dashboard routes registered")
 
     runner = web.AppRunner(app)
@@ -775,6 +777,62 @@ def _poll_to_dict(poll):
         "options": [{"text": opt.text} for opt in poll.options],
         "votes": {str(uid): v for uid, v in poll.votes.items()},
     }
+
+
+async def api_get_siege_settings(request):
+    """取得攻城戰設定。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({
+        "enabled": _siege_settings.get("enabled", True),
+        "channel_id": _siege_settings.get("channel_id"),
+        "reward_pool": _siege_settings.get("reward_pool", 5000),
+        "attack_cooldown": _siege_settings.get("attack_cooldown", 1200),
+        "min_hp": _siege_settings.get("min_hp", 80000),
+        "max_hp": _siege_settings.get("max_hp", 120000),
+        "min_defense": _siege_settings.get("min_defense", 10),
+        "max_defense": _siege_settings.get("max_defense", 35),
+        "min_damage": _siege_settings.get("min_damage", 100),
+        "max_damage": _siege_settings.get("max_damage", 2000),
+        "active": _siege_state.get("active", False),
+        "nation_name": _siege_state.get("nation_name", ""),
+        "current_hp": _siege_state.get("current_hp", 0),
+        "max_hp_current": _siege_state.get("max_hp", 0),
+        "defense_pct": _siege_state.get("defense_pct", 0),
+        "total_damage_dealt": _siege_state.get("total_damage_dealt", 0),
+        "player_count": len(_siege_state.get("player_damage", {})),
+    })
+
+
+async def api_set_siege_settings(request):
+    """更新攻城戰設定。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await request.json()
+    if "enabled" in body:
+        _siege_settings["enabled"] = body["enabled"]
+    if "channel_id" in body:
+        _siege_settings["channel_id"] = body["channel_id"] if body["channel_id"] else None
+    if "reward_pool" in body:
+        _siege_settings["reward_pool"] = int(body["reward_pool"])
+    if "attack_cooldown" in body:
+        _siege_settings["attack_cooldown"] = int(body["attack_cooldown"])
+    if "min_hp" in body:
+        _siege_settings["min_hp"] = int(body["min_hp"])
+    if "max_hp" in body:
+        _siege_settings["max_hp"] = int(body["max_hp"])
+    if "min_defense" in body:
+        _siege_settings["min_defense"] = int(body["min_defense"])
+    if "max_defense" in body:
+        _siege_settings["max_defense"] = int(body["max_defense"])
+    if "min_damage" in body:
+        _siege_settings["min_damage"] = int(body["min_damage"])
+    if "max_damage" in body:
+        _siege_settings["max_damage"] = int(body["max_damage"])
+    save_siege_data()
+    return web.json_response({"ok": True})
 
 
 async def dashboard_index(request):
