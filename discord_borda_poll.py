@@ -141,6 +141,18 @@ from aiohttp import web
 # Render runs in UTC; we convert everything to Asia/Taipei for display.
 GMT8 = timezone(timedelta(hours=8))
 
+
+def _now_iso() -> str:
+    """目前時間（GMT+8台灣時區）的 ISO 格式字串，用於資料儲存的時間戳記。"""
+    return datetime.now(GMT8).isoformat()
+
+
+def _now_dt():
+    """目前時間（UTC，timezone-aware），用於 discord.Embed 的 timestamp 參數——
+    Discord 客戶端會自動依使用者當地時區顯示，因此 embed timestamp 統一用 UTC，
+    跟其他文字顯示用的 GMT+8 時間字串是分開的兩套（沿用專案既有慣例）。"""
+    return discord.utils.utcnow()
+
 # ── This bot is dedicated to a single Discord server: ICEA (國際總會 |
 # International Cultural Exchange Alliance). The dashboard used to make
 # users pick from a list of every server they happen to manage on Discord
@@ -4396,6 +4408,46 @@ def _get_mute_duration(user_id: str, strictness: str, severity_override: int = 0
     return escalation[idx]
 
 
+# ── 對話紀錄發送診斷（owner 無法直接看 Render log，靠這個自我診斷）──
+# 每次 _send_chat_log 呼叫都會更新這個計數器，透過 /chat log_debug 查看，
+# 失敗時也會私訊擁有者（有速率限制避免洗版）。
+_log_send_stats: dict = {
+    "attempts": 0,
+    "successes": 0,
+    "failures": 0,
+    "skips": 0,
+    "last_error": "",
+    "last_success_at": "",
+    "last_failure_at": "",
+    "last_skip_reason": "",
+    "last_skip_at": "",
+}
+_last_log_failure_dm_sent = 0.0  # epoch time — 限速：最多每10分鐘私訊一次擁有者
+
+
+async def _notify_owner_log_failure(reason: str):
+    """對話紀錄發送失敗時私訊擁有者，讓擁有者不需要 Render log 存取權限
+    也能即時知道 ai-log 又故障了。速率限制：最多每10分鐘一次。"""
+    global _last_log_failure_dm_sent
+    now = _time.time()
+    if now - _last_log_failure_dm_sent < 600:  # 10分鐘內已經私訊過，跳過
+        return
+    _last_log_failure_dm_sent = now
+    try:
+        owner = bot.get_user(BOT_OWNER_ID)
+        if not owner:
+            owner = await bot.fetch_user(BOT_OWNER_ID)
+        if owner:
+            await owner.send(
+                f"⚠️ **AI 對話紀錄發送失敗**\n"
+                f"原因：{reason[:500]}\n\n"
+                f"這代表 ai-log 頻道目前收不到對話紀錄。"
+                f"用 `/chat log_debug` 查看詳細診斷，或用 `/chat log_test` 手動測試。"
+            )
+    except Exception as e:
+        print(f"⚠️ 私訊擁有者失敗（連通知都發不出去）：{e}")
+
+
 async def _resolve_log_channel(guild):
     """Resolve the configured log channel, with cache-miss fallback to a live fetch.
     Returns (channel_or_None, error_reason_or_None)."""
@@ -4432,20 +4484,47 @@ async def _resolve_log_channel(guild):
 async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name: str = "", model_info: dict = None):
     """Send a conversation log to the designated log channel.
     model_info: {"model": str, "fallback": bool, "diag": list} — which model/API answered
-    and the full degradation/error diagnostic trail, for API status monitoring."""
+    and the full degradation/error diagnostic trail, for API status monitoring.
+
+    每一次呼叫都會更新 _log_send_stats（可用 /chat log_debug 查看），失敗時
+    會私訊擁有者（速率限制每10分鐘一次）——因為擁有者沒有 Render log 存取權限，
+    "print 到 stderr 但沒人看" 等於沒發生過，這個機制讓失敗變成看得到的事件。"""
+    global _log_send_stats
+    _log_send_stats["attempts"] += 1
+
+    def _mark_skip(reason: str):
+        _log_send_stats["skips"] += 1
+        _log_send_stats["last_skip_reason"] = reason
+        _log_send_stats["last_skip_at"] = _now_iso()
+
+    def _mark_fail(reason: str):
+        _log_send_stats["failures"] += 1
+        _log_send_stats["last_error"] = reason[:500]
+        _log_send_stats["last_failure_at"] = _now_iso()
+
+    def _mark_success():
+        _log_send_stats["successes"] += 1
+        _log_send_stats["last_success_at"] = _now_iso()
+
     if not chat_ai_settings.get("log_channel_id"):
+        _mark_skip("log_channel_id 未設定")
         return  # not configured, nothing to do
     if not message.guild:
         print("⚠️ 對話紀錄：訊息沒有 guild（私訊？），略過")
+        _mark_skip("訊息沒有 guild（私訊）")
         return
 
     try:
         log_ch, err = await _resolve_log_channel(message.guild)
     except Exception as e:
         print(f"⚠️ 對話紀錄發送失敗（_resolve_log_channel 例外）：{e}")
+        _mark_fail(f"_resolve_log_channel 例外：{e}")
+        asyncio.ensure_future(_notify_owner_log_failure(f"_resolve_log_channel 例外：{e}"))
         return
     if not log_ch:
         print(f"⚠️ 對話紀錄發送失敗：{err}")
+        _mark_fail(f"頻道解析失敗：{err}")
+        asyncio.ensure_future(_notify_owner_log_failure(f"頻道解析失敗：{err}"))
         return
     print(f"📝 已解析紀錄頻道：#{getattr(log_ch, 'name', '?')} ({log_ch.id})")
 
@@ -4527,6 +4606,7 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
         try:
             await log_ch.send(embed=embed)
             print(f"📝 對話紀錄已發送到 #{log_ch.name}（模型={_model_name}, {_api_label}, 診斷={len(_diag_lines)}筆）")
+            _mark_success()
         except discord.HTTPException as http_err:
             # Defensive fallback: any embed validation error (e.g. a field
             # exceeding Discord's length limits) must NOT lose the log entry
@@ -4544,12 +4624,33 @@ async def _send_chat_log(message, user_content: str, ai_reply: str, channel_name
                 minimal_embed.set_footer(text=f"#{ch_name} | {_api_label} | 模型: {_model_name} | User ID: {author.id}")
                 await log_ch.send(embed=minimal_embed)
                 print(f"📝 精簡版對話紀錄已發送到 #{log_ch.name}")
+                _mark_success()
             except Exception as retry_err:
-                print(f"⚠️ 精簡版對話紀錄也發送失敗：{retry_err}")
+                print(f"⚠️ 精簡版對話紀錄也發送失敗，改用純文字最後嘗試：{retry_err}")
+                # 最後一道防線：純文字訊息（連embed都可能因為某種原因失敗，
+                # 但純文字send幾乎不可能因為內容格式而失敗，只會因為權限/網路失敗）
+                try:
+                    plain_text = (
+                        f"💬 對話紀錄（純文字備援 — embed發送持續失敗）\n"
+                        f"👤 {author.display_name}: {user_text}\n"
+                        f"🤖 AI: {ai_text}"
+                    )[:2000]
+                    await log_ch.send(plain_text)
+                    print(f"📝 純文字備援對話紀錄已發送到 #{log_ch.name}")
+                    _mark_success()
+                except Exception as plain_err:
+                    print(f"⚠️ 純文字備援也失敗，對話紀錄徹底遺失：{plain_err}")
+                    _mark_fail(f"embed+精簡版+純文字全部失敗：{plain_err}")
+                    asyncio.ensure_future(_notify_owner_log_failure(f"embed+精簡版+純文字全部失敗：{plain_err}"))
     except discord.Forbidden:
-        print(f"⚠️ 對話紀錄發送失敗：Bot 沒有在 #{getattr(log_ch, 'name', '?')} 發送訊息/嵌入的權限")
+        _reason = f"Bot 沒有在 #{getattr(log_ch, 'name', '?')} 發送訊息/嵌入的權限"
+        print(f"⚠️ 對話紀錄發送失敗：{_reason}")
+        _mark_fail(_reason)
+        asyncio.ensure_future(_notify_owner_log_failure(_reason))
     except Exception as e:
         print(f"⚠️ 對話紀錄發送失敗：{e}")
+        _mark_fail(str(e))
+        asyncio.ensure_future(_notify_owner_log_failure(str(e)))
 
 
 async def _execute_mute(message, duration: int, reason: str):

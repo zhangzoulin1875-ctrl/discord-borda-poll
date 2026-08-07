@@ -263,6 +263,68 @@ class ChatGroup(app_commands.Group):
         else:
             await interaction.response.send_message("⚠️ 請選擇動作和頻道。", ephemeral=True)
 
+    @app_commands.command(name="log_debug", description="查看對話紀錄發送統計 + 用真實流程即時測試（機器人擁有者限定）")
+    async def chat_log_debug(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+
+        stats = _log_send_stats
+        embed = discord.Embed(
+            title="🔍 對話紀錄發送診斷",
+            description="這個統計數字是**本次啟動以來**累積的（重啟會歸零），"
+                        "讓你不需要 Render log 存取權限就能知道 ai-log 是否正常運作。",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="總嘗試次數", value=str(stats["attempts"]), inline=True)
+        embed.add_field(name="✅ 成功", value=str(stats["successes"]), inline=True)
+        embed.add_field(name="❌ 失敗", value=str(stats["failures"]), inline=True)
+        embed.add_field(name="⏭️ 跳過（未設定/私訊）", value=str(stats["skips"]), inline=True)
+        embed.add_field(name="最後成功時間", value=stats["last_success_at"] or "（尚無）", inline=False)
+        if stats["failures"] > 0:
+            embed.add_field(name="最後失敗時間", value=stats["last_failure_at"] or "?", inline=True)
+            embed.add_field(name="最後失敗原因", value=f"```{stats['last_error'][:500]}```", inline=False)
+        if stats["skips"] > 0:
+            embed.add_field(name="最後跳過原因", value=f"{stats['last_skip_reason']}（{stats['last_skip_at']}）", inline=False)
+
+        # ── 即時測試：直接呼叫真正對話紀錄會用的 _send_chat_log 函式 ──
+        # 跟 /chat log_test 不同：log_test 只是自己組一個 embed 直接送，
+        # 不會經過 _resolve_log_channel + _send_chat_log 的完整邏輯，
+        # 這裡改成呼叫「真實對話會走的那條路徑」，確保診斷結果跟實際情況一致。
+        class _FakeMsg:
+            pass
+        fake = _FakeMsg()
+        fake.channel = interaction.channel
+        fake.author = interaction.user
+        fake.content = "（/chat log_debug 即時測試）"
+        fake.guild = interaction.guild
+        fake.attachments = []
+
+        _before_success = stats["successes"]
+        _before_fail = stats["failures"]
+        try:
+            await _send_chat_log(
+                fake,
+                "這是 /chat log_debug 的即時測試訊息",
+                "如果你在 ai-log 頻道看到這則紀錄，代表對話紀錄功能運作正常。",
+                model_info={"model": "log_debug_test", "fallback": False, "diag": []},
+            )
+        except Exception as e:
+            embed.add_field(name="⚠️ 即時測試例外", value=f"```{e}```", inline=False)
+
+        if stats["successes"] > _before_success:
+            embed.add_field(name="🧪 即時測試結果", value="✅ 成功（用真實流程走完整個發送邏輯）", inline=False)
+            embed.color = discord.Color.green()
+        elif stats["failures"] > _before_fail:
+            embed.add_field(name="🧪 即時測試結果", value=f"❌ 失敗：{stats['last_error'][:300]}", inline=False)
+            embed.color = discord.Color.red()
+        else:
+            embed.add_field(name="🧪 即時測試結果", value="⏭️ 跳過（可能未設定 log_channel_id）", inline=False)
+            embed.color = discord.Color.orange()
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
     @app_commands.command(name="log_test", description="發送測試訊息到 AI 紀錄頻道，驗證設定是否正常（機器人擁有者限定）")
     async def chat_log_test(self, interaction: discord.Interaction):
         if not is_owner(interaction):
@@ -498,7 +560,7 @@ class ChatGroup(app_commands.Group):
         embed.add_field(name="微國家百科", value=f"{'✅' if micro_on else '❌'} (最多{micro_max}篇)", inline=True)
         vm = chat_ai_settings.get("vision_model", "")
         embed.add_field(name="視覺模型（識圖）", value=f"`{vm}`" if vm else "❌ 未設定", inline=True)
-        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat memory | /chat micropedia | /chat vision_model | /chat debug")
+        embed.set_footer(text="/chat toggle | /chat filter | /chat abuse_toggle | /chat log_channel | /chat log_debug | /chat memory | /chat micropedia | /chat vision_model | /chat debug")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="micropedia", description="開關微國家百科查詢功能（機器人擁有者限定）")
