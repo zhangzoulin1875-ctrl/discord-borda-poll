@@ -6725,9 +6725,19 @@ def _record_t2i_usage(user_id: str):
     today = datetime.now(GMT8).strftime("%Y-%m-%d")
     _t2i_daily_usage.setdefault(user_id, {})[today] = _t2i_daily_usage.get(user_id, {}).get(today, 0) + 1
 
-def _detect_t2i_request(text: str, settings: dict) -> str | None:
-    """Check if a message is requesting image generation.
-    Returns the extracted prompt if yes, None if no.
+async def _detect_t2i_request_ai(text: str, settings: dict) -> str | None:
+    """Use AI to determine if a user's message is requesting image generation.
+    Returns the extracted image prompt (in English, optimized for image gen) if yes, None if no.
+
+    This replaces the old regex-based _detect_t2i_request — the AI can understand
+    context, nuance, indirect requests, and conversational phrasing that regex
+    patterns fundamentally cannot capture (e.g. "我想看到...", "可以弄一張...嗎",
+    "如果有一張...的圖就好了", "幫我視覺化...").
+
+    Uses a very short, fast API call (max_tokens=60, 5s timeout) to minimize
+    latency impact on normal chat. If the pre-check times out or fails,
+    we fail-safe to NO image generation (don't want to block chat on a
+    flaky classification call).
     """
     if not settings.get("t2i_enabled") or not settings.get("t2i_auto_detect"):
         return None
@@ -6735,26 +6745,67 @@ def _detect_t2i_request(text: str, settings: dict) -> str | None:
         return None
 
     text = text.strip()
-    if len(text) < 4:  # Too short to be a meaningful request
+    if len(text) < 4:
         return None
 
-    # Check negative keywords first
-    text_lower = text.lower()
-    for neg in _T2I_NEGATIVE:
-        if neg in text_lower:
+    # Build the classification prompt — deliberately minimal for speed
+    classify_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an intent classifier. Determine if the user is asking you to GENERATE or CREATE an IMAGE.\n"
+                "Reply with EXACTLY one of:\n"
+                "- IMAGE: <concise English description of what image to generate>\n"
+                "- NO\n\n"
+                "Rules:\n"
+                "1. The user must want a NEW image to be generated/drawn/created — not asking about existing images, screenshots, or discussing image quality.\n"
+                "2. Translate the image description to English (image APIs work better with English prompts).\n"
+                "3. Be concise — the description after 'IMAGE: ' should be a good image generation prompt, max 200 chars.\n"
+                "4. If the user is just chatting, asking questions, discussing topics, or talking about images in general, reply NO.\n"
+                "5. Ambiguous cases (e.g. '我想看一張貓的圖' could be 'show me a cat photo' or 'draw me a cat') → "
+                "lean towards IMAGE if the context suggests they want you (the AI) to create something.\n"
+            )
+        },
+        {"role": "user", "content": text[:500]},
+    ]
+
+    try:
+        result = await call_chat_api(
+            classify_messages, settings,
+            tools=None,
+            max_tokens=60,
+            timeout_total=6,
+            timeout_read=5,
+            is_background=True,
+            fallback_mode="disabled",  # don't waste fallback quota on classification
+            category="chat",
+        )
+        reply = (result.get("content") or "").strip()
+        if not reply:
             return None
 
-    # Try matching trigger patterns
-    for pattern in _T2I_TRIGGERS:
-        m = _t2i_re.search(pattern, text, _t2i_re.IGNORECASE)
-        if m:
-            prompt = m.group(1).strip()
-            # Clean up the prompt — remove trailing particles
-            prompt = _t2i_re.sub(r"^(?:的|圖|圖片)$", "", prompt).strip()
+        reply_upper = reply.upper().strip()
+        if reply_upper.startswith("IMAGE:"):
+            prompt = reply[len("IMAGE:"):].strip()
+            # Clean up — remove quotes if the model wrapped the prompt in them
+            prompt = prompt.strip(chr(34) + chr(39) + chr(96))
             if len(prompt) >= 2:
+                print(f"🎨 AI 判定生圖意圖: {prompt[:80]}...")
                 return prompt
-
-    return None
+            return None
+        elif reply_upper.startswith("NO") or reply_upper == "NO":
+            return None
+        else:
+            # Ambiguous reply — could be the model rambling instead of following format.
+            # Don't treat as image request (fail-safe to normal chat).
+            print(f"🎨 T2I 判定回覆不明確（放行不生圖）: {reply[:80]}")
+            return None
+    except asyncio.TimeoutError:
+        print("🎨 T2I AI 判定逾時（>6s），跳過（正常聊天）")
+        return None
+    except Exception as e:
+        print(f"🎨 T2I AI 判定例外: {type(e).__name__}: {e}，跳過")
+        return None
 
 async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
     """Send the image prompt to a filtering model for safety review BEFORE
@@ -11483,6 +11534,29 @@ async def on_message(message):
         _user_generating.add(uid_str)
         try:
             sem = _chat_semaphore or asyncio.Semaphore(5)
+            # ── 文生圖 AI 意圖判定（AI 聊天室也支援） ──
+            _t2i_prompt = await _detect_t2i_request_ai(message.content, chat_ai_settings)
+            if _t2i_prompt:
+                _uid = str(message.author.id)
+                _allowed, _reason = _check_t2i_rate_limit(_uid, chat_ai_settings)
+                if not _allowed:
+                    try:
+                        await message.reply(_reason, mention_author=False)
+                    except Exception:
+                        pass
+                    _user_generating.discard(_uid)
+                    return
+                print(f"🎨 聊天室偵測到生圖請求: {_t2i_prompt[:80]}...")
+                async with message.channel.typing():
+                    _t2i_result = await _generate_image(_t2i_prompt, chat_ai_settings)
+                if _t2i_result.get("success"):
+                    _record_t2i_usage(_uid)
+                    await _send_t2i_result(message, _t2i_prompt, _t2i_result, chat_ai_settings)
+                else:
+                    await _send_t2i_result(message, _t2i_prompt, _t2i_result, chat_ai_settings, is_command=False)
+                _user_generating.discard(_uid)
+                return
+
             async with sem:
                 async with message.channel.typing():
                     result = await generate_chat_room_reply(message, chat_ai_settings)
@@ -11705,9 +11779,9 @@ async def on_message(message):
         # extra requests QUEUE instead of all hitting the API at once and timing
         # out under load. The semaphore is created in on_ready.
         sem = _chat_semaphore or asyncio.Semaphore(5)
-        # ── 文生圖自動偵測 ──
-        # 在呼叫 AI 之前，先檢查訊息是否為生圖請求
-        _t2i_prompt = _detect_t2i_request(clean or message.content, chat_ai_settings)
+        # ── 文生圖 AI 意圖判定 ──
+        # 用 AI 判斷使用者是否想生圖（取代舊的關鍵字正則匹配）
+        _t2i_prompt = await _detect_t2i_request_ai(clean or message.content, chat_ai_settings)
         if _t2i_prompt:
             _uid = str(message.author.id)
             _allowed, _reason = _check_t2i_rate_limit(_uid, chat_ai_settings)
