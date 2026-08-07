@@ -39,6 +39,7 @@ _siege_state = {
     "settled": False,              # 是否已結算
     "broken": False,               # 是否被攻破
     "date_str": "",                # 日期字串 YYYY-MM-DD
+    "result_message_id": None,     # 結算面板訊息 ID（下次開城前5分鐘刪除）
 }
 
 # ── 持久化 ──
@@ -93,6 +94,9 @@ def _siege_pick_nation():
 async def _siege_start_new_day():
     """每天10:00刷新一個新的攻城目標。"""
     global _siege_state
+
+    # 刪除上一場的結算面板（避免結算面板越堆越多）
+    await _siege_delete_old_result()
 
     # 先結算上一局（如果還在進行中且尚未結算）
     if _siege_state.get("active") and not _siege_state.get("settled"):
@@ -496,6 +500,23 @@ async def _siege_update_panel():
         print(f"⚠️ 攻城戰面板更新失敗：{e}")
 
 # ── 結算結果 Embed + 發送 ──
+async def _siege_delete_old_result():
+    """刪除上一場的結算面板（如果有）。"""
+    old_id = _siege_state.get("result_message_id")
+    if not old_id:
+        return
+    channel = await _siege_get_channel()
+    if not channel:
+        return
+    try:
+        msg = await channel.fetch_message(int(old_id))
+        await msg.delete()
+        print("⚔️ 已刪除舊結算面板")
+    except Exception:
+        pass  # 訊息可能已被手動刪除
+    _siege_state["result_message_id"] = None
+    save_siege_data()
+
 async def _siege_send_result_embed(broken: bool, rewards: list, last_attacker: dict = None):
     channel = await _siege_get_channel()
     if not channel:
@@ -546,7 +567,10 @@ async def _siege_send_result_embed(broken: bool, rewards: list, last_attacker: d
     embed.set_footer(text="每日10:00開城 · 22:00結算 · 明日再戰")
 
     try:
-        await channel.send(embed=embed)
+        msg = await channel.send(embed=embed)
+        _siege_state["result_message_id"] = msg.id
+        save_siege_data()
+        print(f"⚔️ 結算面板已發送（msg_id={msg.id}），將於下次開城前5分鐘刪除")
     except Exception as e:
         print(f"⚠️ 攻城戰結算結果發送失敗：{e}")
 
@@ -582,6 +606,12 @@ async def siege_loop():
             today_str = now.strftime("%Y-%m-%d")
             hour = now.hour
             minute = now.minute
+
+            # 09:55 刪除昨日結算面板（開城前5分鐘清理）
+            if hour == 9 and minute == 55 and last_check_minute != minute:
+                if _siege_state.get("result_message_id"):
+                    await _siege_delete_old_result()
+                last_check_minute = minute
 
             # 10:00 開城（只在整點觸發一次）
             if hour == 10 and minute == 0 and last_check_minute != minute:
