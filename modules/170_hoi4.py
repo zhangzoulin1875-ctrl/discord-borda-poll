@@ -1053,8 +1053,5 @@ except Exception as e: print("HOI4 指令群組註冊失敗: {}".format(e))
 try: bot.add_view(HOI4PanelView())
 except Exception as e: print("HOI4 面板 View 註冊失敗: {}".format(e))
 
-try:
-    asyncio.ensure_future(hoi4_panel_loop())
-    print("HOI4 遊戲循環已啟動")
-except Exception as e:
-    print("HOI4 循環啟動失敗: {}".format(e))
+# hoi4_panel_loop 由 setup_hook() 在 discord_borda_poll.py 中啟動
+# （與 economy_panel_loop、siege_loop 同模式）
