@@ -4212,11 +4212,12 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
     if _primary_error and settings.get("fallback_enabled") and fallback_mode != "disabled":
         _is_provider_error = any(
             code in _primary_error
-            for code in ["503", "502", "500", "504", "401", "403",
+            for code in ["503", "502", "500", "504", "401", "403", "400",
                         "Service Unavailable",
                         "Bad Gateway", "Internal Server Error",
                         "Gateway Timeout", "timeout", "Timeout",
-                        "逾時", "Connection", "connection"]
+                        "逾時", "Connection", "connection",
+                        "Bad Request"]
         )
         if _is_provider_error:
             # Owner exemption — skip rate limit AND daily quota for the bot

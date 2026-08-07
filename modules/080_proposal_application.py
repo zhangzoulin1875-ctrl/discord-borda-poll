@@ -1992,3 +1992,43 @@ class ProposalGroup(app_commands.Group):
         except Exception as e:
             print(f"⚠️ /proposal draft 失敗：{e}")
             await interaction.followup.send(f"⚠️ 生成提案草稿失敗：{e}", ephemeral=True)
+
+    @app_commands.command(name="test", description="測試 AI 提案擴寫功能（機器人擁有者限定）")
+    async def proposal_test(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != str(BOT_OWNER_ID):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        test_content = "建立微國家聯合圖書館"
+        test_reason = "促進成員國文化交流"
+        test_country = "測試國"
+        diag_lines = [
+            f"輸入：content_brief={test_content!r}",
+            f"輸入：reason_brief={test_reason!r}",
+            f"輸入：country={test_country!r}",
+            "",
+            "正在呼叫 AI 擴寫...",
+        ]
+        await interaction.followup.send("\n".join(diag_lines), ephemeral=True)
+
+        result = await _ai_expand_proposal(test_content, test_reason, test_country)
+        diag = [
+            f"ai_ok: {result.get('ai_ok')}",
+            f"error: {result.get('error', '(none)')}",
+            f"--- content (expanded) ---",
+            f"{result.get('content', '')[:500]}",
+            f"--- reason (expanded) ---",
+            f"{result.get('reason', '')[:500]}",
+            "",
+            f"chat_ai_settings.get('fallback_enabled') = {chat_ai_settings.get('fallback_enabled', False)}",
+            f"chat_ai_settings.get('fallback_api_url') = {chat_ai_settings.get('fallback_api_url', '')[:60]}",
+            f"chat_ai_settings.get('fallback_model') = {chat_ai_settings.get('fallback_model', '')}",
+            f"chat_ai_settings.get('api_url') = {chat_ai_settings.get('api_url', '')[:60]}",
+            f"chat_ai_settings.get('model') = {chat_ai_settings.get('model', '')}",
+        ]
+        try:
+            await interaction.followup.send("\n".join(diag), ephemeral=True)
+        except Exception:
+            # Discord 2000 char limit
+            for i in range(0, len("\n".join(diag)), 1900):
+                await interaction.followup.send("\n".join(diag)[i:i+1900], ephemeral=True)
