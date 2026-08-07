@@ -522,37 +522,37 @@ class HOI4PanelView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="國策", style=discord.ButtonStyle.primary, custom_id="hoi4_btn_focus")
-    async def btn_focus(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
+    async def btn_focus(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_focus_menu(interaction)
 
     @discord.ui.button(label="研究", style=discord.ButtonStyle.primary, custom_id="hoi4_btn_research")
-    async def btn_research(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
+    async def btn_research(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_research_menu(interaction)
 
     @discord.ui.button(label="建設", style=discord.ButtonStyle.secondary, custom_id="hoi4_btn_build")
-    async def btn_build(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
+    async def btn_build(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_build_menu(interaction)
 
     @discord.ui.button(label="生產", style=discord.ButtonStyle.secondary, custom_id="hoi4_btn_prod")
-    async def btn_prod(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
+    async def btn_prod(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_production_menu(interaction)
 
     @discord.ui.button(label="戰爭", style=discord.ButtonStyle.danger, custom_id="hoi4_btn_war")
-    async def btn_war(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
+    async def btn_war(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_war_menu(interaction)
 
     @discord.ui.button(label="地圖", style=discord.ButtonStyle.success, custom_id="hoi4_btn_map")
-    async def btn_map(self, interaction: discord.Interaction, button: discord.ui.Button): discord.Interaction, button: discord.ui.Button):
+    async def btn_map(self, interaction: discord.Interaction, button: discord.ui.Button):
         await _hoi4_show_map_link(interaction)
 
-async def _get_player_country(interaction): discord.Interaction): discord.Interaction):
+async def _get_player_country(interaction: discord.Interaction):
     uid = str(interaction.user.id)
     for cid, c in hoi4_state.get("countries",{}).items():
         if c.get("owner") == uid:
             return cid, c, None
     return None, None, "你還沒有加入遊戲，請先用 /hoi4 join 加入。"
 
-async def _hoi4_show_focus_menu(interaction): discord.Interaction):
+async def _hoi4_show_focus_menu(interaction: discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -575,7 +575,7 @@ async def _hoi4_show_focus_menu(interaction): discord.Interaction):
     embed = discord.Embed(title="選擇國策", description=desc, color=discord.Color.blue())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_research_menu(interaction): discord.Interaction):
+async def _hoi4_show_research_menu(interaction: discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -598,7 +598,7 @@ async def _hoi4_show_research_menu(interaction): discord.Interaction):
     embed = discord.Embed(title="研究所", description="\n".join(lines), color=discord.Color.green())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_build_menu(interaction): discord.Interaction):
+async def _hoi4_show_build_menu(interaction: discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -617,7 +617,7 @@ async def _hoi4_show_build_menu(interaction): discord.Interaction):
     embed = discord.Embed(title="建設部", description="\n".join(lines), color=discord.Color.orange())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_production_menu(interaction): discord.Interaction):
+async def _hoi4_show_production_menu(interaction: discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -631,7 +631,7 @@ async def _hoi4_show_production_menu(interaction): discord.Interaction):
     embed = discord.Embed(title="生產部", description="\n".join(lines), color=discord.Color.blurple())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_war_menu(interaction): discord.Interaction):
+async def _hoi4_show_war_menu(interaction: discord.Interaction):
     cid, c, err = await _get_player_country(interaction)
     if err:
         await interaction.response.send_message(err, ephemeral=True); return
@@ -648,7 +648,7 @@ async def _hoi4_show_war_menu(interaction): discord.Interaction):
     embed = discord.Embed(title="軍事指揮", description="\n".join(lines), color=discord.Color.red())
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def _hoi4_show_map_link(interaction): discord.Interaction):
+async def _hoi4_show_map_link(interaction: discord.Interaction):
     embed = discord.Embed(title="戰略地圖",
         description="請到 Dashboard 網頁面板查看互動式地圖、前線微操和師級編制設計。\n\n在 Dashboard 點擊上方導航列的「HOI4」分頁即可。",
         color=discord.Color.green())
