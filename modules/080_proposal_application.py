@@ -1839,7 +1839,12 @@ def _build_proposal_draft_text(country: str, representative: str, code: str,
 
 
 async def _ai_expand_proposal(content_brief: str, reason_brief: str, country: str) -> dict:
-    """把一句話的提案內容/原因擴寫成正式完整格式。失敗時直接回退用原句（不阻斷使用者）。"""
+    """把一句話的提案內容/原因擴寫成正式完整格式。
+    回傳 {"content": ..., "reason": ..., "ai_ok": bool}。
+    AI失敗時回退用原句但 ai_ok=False，讓呼叫端可以告知使用者。"""
+
+    # 用分隔符格式取代JSON — 弱模型常常不回乾淨JSON，分隔符更穩
+    SPLIT_MARKER = "===SPLIT==="
     prompt = (
         "你是微國家組織的提案撰寫助手。使用者只給了一句話的提案內容跟提案原因，"
         "請幫忙擴寫成正式、完整、適合放進官方提案文件的段落。\n\n"
@@ -1850,40 +1855,81 @@ async def _ai_expand_proposal(content_brief: str, reason_brief: str, country: st
         "1. 提案內容：用正式書面語擴寫成完整段落，說明具體要做什麼、如何實施，"
         "但不要捏造使用者沒提到的具體數字/日期/條文編號等細節，只做語氣跟結構上的正式化擴寫。\n"
         "2. 提案原因：用正式書面語擴寫成完整段落，說明為何需要這個提案、預期效果。\n"
-        "3. 兩段都用繁體中文，不需要翻譯成英文。\n"
-        "4. 不要加任何開頭寒暄或結尾祝福，直接是正文段落。\n\n"
-        '請只回覆JSON格式（不要加markdown code block）：{"content": "...", "reason": "..."}'
+        "3. 兩段都用繁體中文。\n"
+        "4. 不要加任何開頭寒暄或結尾祝福。\n"
+        f"5. 兩段之間必須用一行 {SPLIT_MARKER} 分隔，格式如下：\n"
+        "（擴寫後的提案內容段落）\n"
+        f"{SPLIT_MARKER}\n"
+        "（擴寫後的提案原因段落）\n"
     )
     messages = [{"role": "user", "content": prompt}]
+
+    # ── 補齊 fallback 欄位 ──
+    # call_chat_api 內部備援邏輯讀 settings.get("fallback_enabled")，
+    # 缺這個欄位就算 fallback_mode="full" 也不會觸發備援，主 API 一失敗就空字串。
     settings = {
         "api_url": chat_ai_settings.get("api_url", ""),
         "api_key": chat_ai_settings.get("api_key", ""),
         "model": chat_ai_settings.get("model", ""),
+        "fallback_enabled": chat_ai_settings.get("fallback_enabled", False),
+        "fallback_api_url": chat_ai_settings.get("fallback_api_url", ""),
+        "fallback_api_key": chat_ai_settings.get("fallback_api_key", ""),
+        "fallback_model": chat_ai_settings.get("fallback_model", ""),
+        "owner_skip_model_chain": chat_ai_settings.get("owner_skip_model_chain", True),
     }
+
     try:
         result = await asyncio.wait_for(
             call_chat_api(
                 messages, settings,
-                max_tokens=900, timeout_total=40, timeout_read=35,
+                max_tokens=1200, timeout_total=60, timeout_read=50,
                 is_background=False, fallback_mode="full", category="admin",
                 fallback_user_id="proposal_draft",
             ),
-            timeout=45,
+            timeout=65,
         )
         text = (result.get("content") or "").strip()
         if not text or result.get("circuit_open"):
-            print(f"⚠️ AI提案擴寫失敗（circuit_open={result.get('circuit_open')}），回退用原句")
-            return {"content": content_brief, "reason": reason_brief}
+            _err = result.get("error", "unknown")[:200] if isinstance(result, dict) else "unknown"
+            print(f"⚠️ AI提案擴寫失敗：circuit_open={result.get('circuit_open')}, error={_err}")
+            return {"content": content_brief, "reason": reason_brief, "ai_ok": False, "error": _err}
+
+        # 去掉可能的 markdown code block 包裝
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        parsed = json_module.loads(text)
-        return {
-            "content": (parsed.get("content") or content_brief).strip(),
-            "reason": (parsed.get("reason") or reason_brief).strip(),
-        }
+
+        # 用分隔符拆出兩段
+        if SPLIT_MARKER in text:
+            parts = text.split(SPLIT_MARKER, 1)
+            content_expanded = parts[0].strip()
+            reason_expanded = parts[1].strip() if len(parts) > 1 else reason_brief
+            if content_expanded and reason_expanded:
+                return {"content": content_expanded, "reason": reason_expanded, "ai_ok": True}
+
+        # 分隔符找不到 → 嘗試 JSON fallback（模型可能還是回了JSON）
+        try:
+            parsed = json_module.loads(text)
+            c = (parsed.get("content") or "").strip()
+            r = (parsed.get("reason") or "").strip()
+            if c and r:
+                return {"content": c, "reason": r, "ai_ok": True}
+        except Exception:
+            pass
+
+        # 兩種解析都失敗 → 直接用原始回應當 content（至少不是空字串）
+        if len(text) > 20:
+            print(f"⚠️ AI提案擴寫：無法解析分隔符/JSON，用原始回應。前200字：{text[:200]}")
+            return {"content": text, "reason": reason_brief, "ai_ok": False, "error": "parse_failed"}
+
+        print(f"⚠️ AI提案擴寫：回應太短，回退原句。回應={text[:100]}")
+        return {"content": content_brief, "reason": reason_brief, "ai_ok": False, "error": "too_short"}
+
+    except asyncio.TimeoutError:
+        print("⚠️ AI提案擴寫逾時（65s），回退用原句")
+        return {"content": content_brief, "reason": reason_brief, "ai_ok": False, "error": "timeout"}
     except Exception as e:
         print(f"⚠️ AI提案擴寫例外，回退用原句：{e}")
-        return {"content": content_brief, "reason": reason_brief}
+        return {"content": content_brief, "reason": reason_brief, "ai_ok": False, "error": str(e)[:200]}
 
 
 class ProposalGroup(app_commands.Group):
@@ -1925,7 +1971,15 @@ class ProposalGroup(app_commands.Group):
                 expanded["content"], expanded["reason"],
                 joint_countries, joint_representatives,
             )
-            header = "📋 **提案草稿已生成，請確認內容無誤後自行複製貼上到提案區：**\n\n"
+            if expanded.get("ai_ok"):
+                header = "📋 **提案草稿已生成，請確認內容無誤後自行複製貼上到提案區：**\n\n"
+            else:
+                _err = expanded.get("error", "unknown")
+                header = (
+                    "📋 **提案草稿（⚠️ AI擴寫失敗，以下為你輸入的原始內容）：**\n"
+                    f"⚠️ 原因：{_err}\n"
+                    "請稍後再試，或自行手動擴寫後貼到提案區。\n\n"
+                )
             full_msg = header + "```\n" + draft_text + "\n```"
             if len(full_msg) <= 2000:
                 await interaction.followup.send(full_msg, ephemeral=True)
