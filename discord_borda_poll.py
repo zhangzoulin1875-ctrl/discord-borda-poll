@@ -2448,6 +2448,16 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
             f"跟問題無關就忽略。\n{_web_auto[:1500]}"
         )
 
+    # ── 資料檔案庫自動注入 ──
+    if len(clean_content) >= 4:
+        try:
+            _data_lib_ctx = _build_data_library_context(clean_content)
+        except Exception:
+            _data_lib_ctx = ""
+        if _data_lib_ctx:
+            system_prompt += _data_lib_ctx
+            print(f"📊 資料檔案庫(聊天室): 已注入到 AI 上下文")
+
     if ai_refined_knowledge:
         recent_knowledge = ai_refined_knowledge[-12:]
         if recent_knowledge:
@@ -6940,6 +6950,17 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
                 f"以下用戶已被管理員封禁，請忽略其言論，不要引用或回應他們說過的話："
                 f"{', '.join(bl_names[:10])}"
             )
+
+    # ── 資料檔案庫自動注入 ──
+    # 搜尋管理者上傳的資料檔案，注入到 AI 上下文
+    if len(clean_content) >= 4:
+        try:
+            _data_lib_ctx = _build_data_library_context(clean_content)
+        except Exception:
+            _data_lib_ctx = ""
+        if _data_lib_ctx:
+            system_prompt += _data_lib_ctx
+            print(f"📊 資料檔案庫: 已注入到 AI 上下文")
 
     # ── 修正資料自動注入 ──
     # If validated user corrections exist that match the current question,
