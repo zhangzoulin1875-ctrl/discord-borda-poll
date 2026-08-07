@@ -1526,12 +1526,29 @@ async def _ai_evaluate_turn(turn: int):
             return _default_turn_result()
 
         # 解析分隔符格式
+        # AI prompt 要求格式：===MARKER===\n數字  (無空格)
+        # 支援兩種格式：===MARKER=== 和 === MARKER === (有空格的容錯)
         def _extract(marker, default=0):
-            pattern = f"=== {marker} ==="
-            if marker in text:
-                idx = text.index(marker)
-                after = text[idx + len(marker):]
-                # 取下一行
+            # 先嘗試無空格格式 ===MARKER===
+            tag_nospace = f"==={marker}==="
+            # 再嘗試有空格格式 === MARKER ===
+            tag_space = f"=== {marker} ==="
+            search_idx = -1
+            skip_len = 0
+            if tag_nospace in text:
+                search_idx = text.index(tag_nospace)
+                skip_len = len(tag_nospace)
+            elif tag_space in text:
+                search_idx = text.index(tag_space)
+                skip_len = len(tag_space)
+            elif marker in text:
+                # 退化：直接找 marker 字串本身（可能出現在任何上下文）
+                search_idx = text.index(marker)
+                skip_len = len(marker)
+            if search_idx >= 0:
+                after = text[search_idx + skip_len:]
+                # 跳過可能殘留的 === 並取下一行
+                after = after.lstrip("=").lstrip()
                 lines = after.strip().split("\n")
                 if lines:
                     try:
@@ -1548,9 +1565,11 @@ async def _ai_evaluate_turn(turn: int):
         b_sup = _extract("B_SUPPLIES_DELTA", 0)
 
         summary = ""
-        if "===SUMMARY===" in text:
-            idx = text.index("===SUMMARY===")
-            summary = text[idx + len("===SUMMARY==="):].strip()[:500]
+        for tag in ("===SUMMARY===", "=== SUMMARY ==="):
+            if tag in text:
+                idx = text.index(tag)
+                summary = text[idx + len(tag):].strip()[:500]
+                break
         if not summary:
             summary = f"第{turn}回合戰況已更新。"
 
