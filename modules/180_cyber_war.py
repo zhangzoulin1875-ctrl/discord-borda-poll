@@ -95,6 +95,31 @@ def save_cyber_war():
     except Exception as e:
         print(f"⚠️ 賽博一戰存檔失敗：{e}")
 
+
+def _redistribute_unassigned_soldiers(fkey):
+    """重新平均分配沒有小隊長（squad_leader_id 為空）的士兵到各小隊長旗下。
+    每次有人成為新小隊長時呼叫，確保近200名士兵能被平均分給所有小隊長。"""
+    fac = _cyber_war_state.get("factions", {}).get(fkey, {})
+    sls = fac.get("squad_leaders", [])
+    if not sls:
+        return
+    soldiers = fac.get("soldiers", [])
+    unassigned = [sol for sol in soldiers if not sol.get("squad_leader_id")]
+    if not unassigned:
+        return
+    # 統計目前各小隊長的士兵數
+    sl_counts = {sl["id"]: 0 for sl in sls}
+    for sol in soldiers:
+        sid = sol.get("squad_leader_id", "")
+        if sid in sl_counts:
+            sl_counts[sid] += 1
+    # 輪流分配：每次找最少人的小隊長，把一個未分配士兵指給他
+    for sol in unassigned:
+        sl_id = min(sl_counts, key=sl_counts.get)
+        sol["squad_leader_id"] = sl_id
+        sl_counts[sl_id] += 1
+    save_cyber_war()
+
 def load_cyber_war():
     global _cyber_war_settings, _cyber_war_state
     try:
@@ -164,8 +189,10 @@ def _switch_role(uid_str: str, new_role: str, specialty: str = ""):
         else:
             officer_id = ""
         fac["squad_leaders"].append({"id": uid_str, "name": player_name, "officer_id": officer_id, "inactive_turns": 0})
+        # 新小隊長加入後，重新平均分配所有沒有小隊長的士兵到各小隊長旗下
+        _redistribute_unassigned_soldiers(fkey)
     elif new_role == "soldier":
-        # 指派到麾下士兵最少的小隊長（目標每隊8人），若沒有小隊長則留空
+        # 指派到麾下士兵最少的小隊長（平均分配，不固定人數），若沒有小隊長則留空
         sls = fac.get("squad_leaders", [])
         if sls:
             sl_soldier_counts = {sl["id"]: 0 for sl in sls}
@@ -173,7 +200,7 @@ def _switch_role(uid_str: str, new_role: str, specialty: str = ""):
                 sid = s.get("squad_leader_id", "")
                 if sid in sl_soldier_counts:
                     sl_soldier_counts[sid] += 1
-            # 找最少人的小隊長
+            # 找最少人的小隊長，確保平均分配
             sl_id = min(sl_soldier_counts, key=sl_soldier_counts.get)
         else:
             sl_id = ""
@@ -858,7 +885,7 @@ class CyberWarPanelView(discord.ui.View):
         )
         await interaction.response.send_message(rules_text, ephemeral=True)
 
-    @discord.ui.button(label="WW1測試", style=discord.ButtonStyle.secondary, emoji="🧪", custom_id="cw_test_btn")
+    @discord.ui.button(label="管理員", style=discord.ButtonStyle.secondary, emoji="🛠️", custom_id="cw_test_btn")
     async def test_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if str(interaction.user.id) != str(BOT_OWNER_ID):
             await interaction.response.send_message("❌ 此按鈕僅限機器人擁有者使用。", ephemeral=True)
@@ -1031,6 +1058,70 @@ class _CWTestView(discord.ui.View):
             else:
                 lines.append(f"{fac['flag']} {fac['name']}：尚未部署巨獸")
         await interaction.response.edit_message(content="\n".join(lines), view=None)
+
+    @discord.ui.button(label="立刻部署巨獸", style=discord.ButtonStyle.danger, emoji="🦾", custom_id="cw_test_deploy_beast")
+    async def deploy_beast(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """直接部署戰爭巨獸到弱勢方（不需要調整進度差，也不需要等回合結算）。"""
+        s = _cyber_war_state
+        if not s.get("active"):
+            await interaction.response.edit_message(content="❌ 戰局已結束。", view=None)
+            return
+        if s.get("winner"):
+            await interaction.response.edit_message(content="❌ 戰局已分出勝負。", view=None)
+            return
+
+        fac_a = s["factions"]["A"]
+        fac_b = s["factions"]["B"]
+        a_prog = fac_a.get("progress", 0)
+        b_prog = fac_b.get("progress", 0)
+
+        # 判斷弱勢方
+        if a_prog < b_prog:
+            weaker = "A"
+        elif b_prog < a_prog:
+            weaker = "B"
+        else:
+            weaker = _cw_random.choice(["A", "B"])
+
+        wf = s["factions"][weaker]
+        wb = wf.get("war_beast")
+        wb_destroyed = wf.get("war_beast_destroyed", False)
+
+        if wb and not wb.get("destroyed"):
+            beast_name = _WAR_BEASTS.get(wb.get("type", ""), {}).get("name", "?")
+            await interaction.response.edit_message(
+                content=f"⚠️ {wf['flag']} {wf['name']} 已有巨獸：{beast_name}（HP:{wb.get('hp',0)}），每方限一台。",
+                view=None
+            )
+            return
+        if wb_destroyed:
+            await interaction.response.edit_message(
+                content=f"💀 {wf['flag']} {wf['name']} 的巨獸已被摧毀，無法再次部署。",
+                view=None
+            )
+            return
+
+        # 直接部署
+        beast_type = _cw_random.choice(list(_WAR_BEASTS.keys()))
+        wf["war_beast"] = {
+            "type": beast_type,
+            "hp": WAR_BEAST_HP,
+            "deployed_turn": s.get("turn", 1),
+            "destroyed": False,
+            "current_order": "",
+            "ordered_by": "",
+        }
+        beast_info = _WAR_BEASTS[beast_type]
+        save_cyber_war()
+        await refresh_war_panel()
+
+        await interaction.response.edit_message(
+            content=f"🦾 **已立刻部署戰爭巨獸！**\n"
+                    f"  弱勢方：{wf['flag']} {wf['name']}（進度{a_prog if weaker == 'A' else b_prog}% vs 對方{b_prog if weaker == 'A' else a_prog}%）\n"
+                    f"  巨獸：{beast_info['emoji']} {beast_info['name']}（HP:{WAR_BEAST_HP}）\n"
+                    f"  軍官可使用「戰爭巨獸」按鈕下達指令。",
+            view=None
+        )
 
 # ── 戰爭巨獸 Modal ──
 class CyberWarBeastModal(discord.ui.Modal):
