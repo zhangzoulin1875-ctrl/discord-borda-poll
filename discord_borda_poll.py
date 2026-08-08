@@ -254,6 +254,8 @@ async def keep_alive_server():
     app.router.add_put("/api/siege-settings", api_set_siege_settings)
     app.router.add_get("/api/server-registry", api_get_server_registry)
     app.router.add_put("/api/server-registry", api_set_server_registry)
+    app.router.add_get("/api/ww1-settings", api_get_ww1_settings)
+    app.router.add_put("/api/ww1-settings", api_set_ww1_settings)
     # Galgame API routes (registered by module 190)
     try:
         for _path, _method, _handler in _galgame_api_routes:
@@ -974,6 +976,66 @@ async def api_set_server_registry(request):
             _server_registry[gid]["ww1_panel_message_id"] = None
     save_server_registry()
     print(f"📋 Dashboard 更新伺服器 {gid}: tier={_server_registry[gid].get('tier')}, ww1_ch={_server_registry[gid].get('ww1_channel_id')}")
+    return web.json_response({"ok": True})
+
+
+async def api_get_ww1_settings(request):
+    """取得 WW1 賽博一戰設定。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    uid_str = user.get("user_id", "")
+    if str(uid_str) != str(BOT_OWNER_ID):
+        return web.json_response({"error": "forbidden — bot owner only"}, status=403)
+    s = _cyber_war_settings
+    st = _cyber_war_state
+    deposits = st.get("deposits", {})
+    total_pool = sum(d.get("amount", 0) for d in deposits.values())
+    return web.json_response({
+        "channel_id": s.get("channel_id"),
+        "turn_interval_hours": s.get("turn_interval_hours", 1),
+        "deposit": s.get("deposit", 100),
+        # Game state (read-only info)
+        "active": st.get("active", False),
+        "game_id": st.get("game_id", 0),
+        "turn": st.get("turn", 0),
+        "battlefield": st.get("battlefield", ""),
+        "winner": st.get("winner"),
+        "deposits_locked": st.get("deposits_locked", False),
+        "total_pool": total_pool,
+        "prize_multiplier": st.get("prize_multiplier", 0),
+        "bettor_count": sum(1 for d in deposits.values() if d.get("amount", 0) > 0),
+        "fac_a_name": st.get("factions", {}).get("A", {}).get("name", ""),
+        "fac_a_flag": st.get("factions", {}).get("A", {}).get("flag", ""),
+        "fac_a_progress": st.get("factions", {}).get("A", {}).get("progress", 0),
+        "fac_b_name": st.get("factions", {}).get("B", {}).get("name", ""),
+        "fac_b_flag": st.get("factions", {}).get("B", {}).get("flag", ""),
+        "fac_b_progress": st.get("factions", {}).get("B", {}).get("progress", 0),
+    })
+
+
+async def api_set_ww1_settings(request):
+    """更新 WW1 賽博一戰設定。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    uid_str = user.get("user_id", "")
+    if str(uid_str) != str(BOT_OWNER_ID):
+        return web.json_response({"error": "forbidden — bot owner only"}, status=403)
+    body = await request.json()
+    if "channel_id" in body:
+        ch_id = body["channel_id"]
+        _cyber_war_settings["channel_id"] = int(ch_id) if ch_id and str(ch_id).strip() else None
+    if "turn_interval_hours" in body:
+        hours = int(body["turn_interval_hours"])
+        if hours >= 1:
+            _cyber_war_settings["turn_interval_hours"] = hours
+    if "deposit" in body:
+        dep = int(body["deposit"])
+        if dep >= 0:
+            _cyber_war_settings["deposit"] = dep
+    save_cyber_war()
+    print(f"📋 Dashboard 更新 WW1 設定: channel={_cyber_war_settings.get('channel_id')}, interval={_cyber_war_settings.get('turn_interval_hours')}h, deposit={_cyber_war_settings.get('deposit')}")
     return web.json_response({"ok": True})
 
 

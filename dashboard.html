@@ -2630,6 +2630,7 @@ function showCrossServerPanel() {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.querySelector('[data-tab="cross-server"]').classList.add('active');
   loadServerRegistry();
+  loadWW1Settings();
 }
 
 async function loadServerRegistry() {
@@ -2680,6 +2681,44 @@ async function saveServerEntry(gid) {
   const r = await api('/api/server-registry', 'PUT', data);
   if (r.ok) { alert('已更新伺服器設定'); loadServerRegistry(); }
   else { alert('更新失敗：' + (r.error || '未知錯誤')); }
+}
+
+// ═══ WW1 設定 ═══
+async function loadWW1Settings() {
+  const s = await api('/api/ww1-settings');
+  if (s.error) {
+    console.error('WW1設定載入失敗', s.error);
+    return;
+  }
+  document.getElementById('ww1-channel-id').value = s.channel_id || '';
+  document.getElementById('ww1-turn-interval').value = s.turn_interval_hours || 1;
+  document.getElementById('ww1-deposit').value = s.deposit || 100;
+
+  // 顯示當前戰況
+  if (s.active) {
+    document.getElementById('ww1-status').classList.remove('hidden');
+    const lockIcon = s.deposits_locked ? ' [locked]' : '';
+    document.getElementById('ww1-status-content').innerHTML =
+      '<p>Game #' + s.game_id + ' | Turn ' + s.turn + ' | Battlefield: ' + (s.battlefield || '-') + '</p>' +
+      '<p>' + (s.fac_a_flag||'') + ' ' + (s.fac_a_name||'') + ': ' + s.fac_a_progress + '%</p>' +
+      '<p>' + (s.fac_b_flag||'') + ' ' + (s.fac_b_name||'') + ': ' + s.fac_b_progress + '%</p>' +
+      '<p>Pool: ' + (s.total_pool||0).toLocaleString() + ' x' + s.prize_multiplier + lockIcon + '</p>' +
+      '<p>Bettors: ' + s.bettor_count + '</p>' +
+      (s.winner ? '<p style="color:#22c55e">Winner: ' + s.winner + '</p>' : '');
+  } else {
+    document.getElementById('ww1-status').classList.add('hidden');
+  }
+}
+
+async function saveWW1Settings() {
+  const data = {
+    channel_id: document.getElementById('ww1-channel-id').value.trim(),
+    turn_interval_hours: parseInt(document.getElementById('ww1-turn-interval').value) || 1,
+    deposit: parseInt(document.getElementById('ww1-deposit').value) || 100,
+  };
+  const r = await api('/api/ww1-settings', 'PUT', data);
+  if (r.ok) alert('WW1 設定已儲存');
+  else alert('儲存失敗：' + (r.error || '未知錯誤'));
 }
 
 init();
@@ -2738,7 +2777,40 @@ init();
       </tbody>
     </table>
   </div>
+
+  <!-- WW1 賽博一戰設定 -->
+  <div class="bg-[#2b2d31] rounded-xl p-5 mt-4">
+    <h3 class="font-semibold mb-1">WW1 賽博一戰設定</h3>
+    <p class="text-xs text-gray-400 mb-4">設定 WW1 面板頻道、回合間隔與基本押金。遊戲進行中修改回合間隔會在下一回合生效。</p>
+
+    <div class="grid grid-cols-3 gap-4 mb-4">
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">主面板頻道 ID</label>
+        <input id="ww1-channel-id" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="頻道 ID">
+      </div>
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">回合間隔（小時）</label>
+        <input id="ww1-turn-interval" type="number" min="1" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="1">
+      </div>
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">預設押金（琉璃幣）</label>
+        <input id="ww1-deposit" type="number" min="0" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 text-sm" placeholder="100">
+      </div>
+    </div>
+
+    <button onclick="saveWW1Settings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm">儲存 WW1 設定</button>
+
+    <!-- 當前戰況 -->
+    <div id="ww1-status" class="mt-4 bg-[#1e1f22] rounded-lg p-4 hidden">
+      <h4 class="text-sm font-semibold mb-2">當前戰況</h4>
+      <div id="ww1-status-content" class="text-sm text-gray-300 space-y-1"></div>
+    </div>
+  </div>
 </div>
+
+<script>
+init();
+</script>
 
 </body>
 </html>
