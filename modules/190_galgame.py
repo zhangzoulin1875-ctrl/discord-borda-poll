@@ -269,6 +269,31 @@ async def galgame_panel_loop():
 # 面板按鈕（持久化 View）
 # ═══════════════════════════════════════════════════════════════════════
 
+def _build_galgame_admin_embed() -> "discord.Embed":
+    """建構 Galgame 管理面板 embed（供 /vn admin 指令與面板管理按鈕共用）。"""
+    embed = discord.Embed(
+        title="🌸 Galgame 管理面板",
+        description=(
+            f"頻道 ID：{galgame_settings.get('channel_id', '未設定')}\n"
+            f"冷卻時間：{galgame_settings.get('interaction_cooldown', 300)} 秒\n"
+            f"每日上限：{galgame_settings.get('daily_interact_limit', 20)} 次\n"
+            f"送禮範圍：{galgame_settings.get('gift_min_cost', 50)}-{galgame_settings.get('gift_max_cost', 5000)} {currency_name()}\n"
+            f"角色數量：{len(galgame_characters)}\n"
+            f"玩家數量：{len(galgame_progress)}\n\n"
+            "角色管理請至 Dashboard 操作。"
+        ),
+        color=discord.Color.pink(),
+    )
+
+    if galgame_characters:
+        char_list = []
+        for cid, ch in galgame_characters.items():
+            char_list.append(f"• **{ch['name']}** — {ch.get('tagline', '')[:30]} (ID: `{cid}`)")
+        embed.add_field(name="角色清單", value="\n".join(char_list[:10]), inline=False)
+
+    return embed
+
+
 class GalgamePanelView(discord.ui.View):
     """Galgame 面板的持久化按鈕。"""
 
@@ -310,6 +335,17 @@ class GalgamePanelView(discord.ui.View):
     async def my_progress(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = str(interaction.user.id)
         embed = _build_user_progress_embed(uid, interaction.user.display_name)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="管理", style=discord.ButtonStyle.danger, emoji="⚙️",
+        custom_id="galgame:admin"
+    )
+    async def admin_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != str(BOT_OWNER_ID):
+            await interaction.response.send_message("❌ 只有擁有者可以使用此功能。", ephemeral=True)
+            return
+        embed = _build_galgame_admin_embed()
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -1020,27 +1056,7 @@ class GalgameGroup(app_commands.Group):
         if str(interaction.user.id) != str(BOT_OWNER_ID):
             await interaction.response.send_message("❌ 只有擁有者可以使用此指令。", ephemeral=True)
             return
-
-        embed = discord.Embed(
-            title="🌸 Galgame 管理面板",
-            description=(
-                f"頻道 ID：{galgame_settings.get('channel_id', '未設定')}\n"
-                f"冷卻時間：{galgame_settings.get('interaction_cooldown', 300)} 秒\n"
-                f"每日上限：{galgame_settings.get('daily_interact_limit', 20)} 次\n"
-                f"送禮範圍：{galgame_settings.get('gift_min_cost', 50)}-{galgame_settings.get('gift_max_cost', 5000)} {currency_name()}\n"
-                f"角色數量：{len(galgame_characters)}\n"
-                f"玩家數量：{len(galgame_progress)}\n\n"
-                "角色管理請至 Dashboard 操作。"
-            ),
-            color=discord.Color.pink(),
-        )
-
-        if galgame_characters:
-            char_list = []
-            for cid, ch in galgame_characters.items():
-                char_list.append(f"• **{ch['name']}** — {ch.get('tagline', '')[:30]} (ID: `{cid}`)")
-            embed.add_field(name="角色清單", value="\n".join(char_list[:10]), inline=False)
-
+        embed = _build_galgame_admin_embed()
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
