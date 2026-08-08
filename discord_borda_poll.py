@@ -1972,11 +1972,16 @@ def _build_reasoning_params(effort: str) -> dict:
     """
     params = {}
     if effort == "none":
-        # 關閉 reasoning — 不送任何 reasoning 參數。
-        # 原本會送 {"reasoning_effort":"none", "thinking":{"type":"disabled"}, "enable_thinking":False}
-        # 但某些 API 供應商（如 ltzy.top 代理）對未知欄位做嚴格驗證，
-        # 收到 enable_thinking 就直接回 400 Bad Request，浪費 20 秒。
-        # 不送參數 = 讓 API 用自己的預設行為（多數 API 預設就是不做 reasoning）。
+        # 關閉 reasoning — 不送任何參數，交給 API 用自己的預設行為。
+        # ⚠️ 這對「預設不思考」的模型沒問題，但對 gpt-oss 系列、部分
+        # glm/deepseek build 這種「預設就會思考」的 reasoning 模型完全
+        # 無效——不送參數 = 用它自己的預設值，很多時候預設值仍然是
+        # 開著思考的，短預算的聊天請求會被隱藏思考活活拖到逾時，或
+        # max_tokens 被思考吃光只回傳空白內容。呼叫端若需要「真正確定
+        # 關閉」，應改用 _build_reasoning_disable_params()（會明確送出
+        # 關閉信號，並仰賴 _reasoning_unsupported_apis 白名單機制處理
+        # 會拒絕未知欄位的端點）。這個函式維持回傳空字典是為了不影響
+        # 既有沒有該白名單防護機制的呼叫點（call_ai_api 等背景摘要功能）。
         return {}
     elif effort in ("low", "medium", "high", "auto"):
         params["reasoning_effort"] = effort
@@ -1984,6 +1989,32 @@ def _build_reasoning_params(effort: str) -> dict:
         params["enable_thinking"] = True
     # else: effort is empty/unknown → don't send any params (use API default)
     return params
+
+
+def _build_reasoning_disable_params() -> dict:
+    """明確要求 API／模型關閉或最小化 reasoning（思考）行為，而不是單純
+    不送參數賭它預設關閉。同時送多種格式盡量兼容不同供應商：
+    - reasoning_effort: "none"（OpenAI o1/o3 及相容代理格式）
+    - thinking: {"type": "disabled"}（ZhipuAI/GLM 格式）
+    - enable_thinking: False（部分代理使用的布林值格式）
+
+    這是為了修正一個「只針對特定模型優化」的通用性 bug：許多開源
+    reasoning 模型（openai/gpt-oss-120b、gpt-oss-20b 等）是「預設思考」
+    架構，若呼叫端因為預算不足而選擇「不送任何 reasoning 參數」，這些
+    模型仍會用自己的預設值思考，短預算聊天請求下會出現兩種症狀：
+    (1) 思考期間完全不吐字，觸發 socket 逾時（連線層面完全連不上感）；
+    (2) max_tokens 被思考吃光，finish_reason=length 但 content 空白。
+    明確送出關閉信號才能真正改變這些模型的行為，而不是被動猜測。
+
+    ⚠️ 呼叫端必須先確認 api_url 不在 _reasoning_unsupported_apis 白名單
+    裡才呼叫這個函式——某些端點對未知欄位做嚴格驗證會直接 400。
+    一旦真的被拒絕，既有的 400 自動偵測邏輯會把該端點加入白名單並
+    立即用清乾淨的 payload 重試，之後就不會再對它送這些參數。"""
+    return {
+        "reasoning_effort": "none",
+        "thinking": {"type": "disabled"},
+        "enable_thinking": False,
+    }
 
 def _get_reasoning_timeout(effort: str, fallback_mode: str = "full", category: str = "") -> int:
     """根據是否開啟 reasoning 取得適當的 timeout。"""
@@ -3897,11 +3928,25 @@ async def call_chat_api(messages: list, settings: dict, tools: list = None, max_
         # 就被 timeout 切斷了。只有預算 >30s 的場景（海龜湯50s、占卜40s
         # 等背景任務）才值得開 reasoning。
         _budget_for_reasoning = _remaining_primary(floor=0)
-        if _reasoning_params and api_url not in _reasoning_unsupported_apis and _budget_for_reasoning > 30:
+        _reasoning_endpoint_ok = api_url not in _reasoning_unsupported_apis
+        if _reasoning_params and _reasoning_endpoint_ok and _budget_for_reasoning > 30:
             payload.update(_reasoning_params)
             _diag.append(f"🧠 reasoning_effort={_reasoning_effort} (budget {_budget_for_reasoning:.0f}s)")
-        elif _reasoning_params and _budget_for_reasoning <= 30:
-            _diag.append(f"⏭️ reasoning 跳過（預算 {_budget_for_reasoning:.0f}s < 30s）")
+        elif _reasoning_endpoint_ok:
+            # ── FIX：關閉 reasoning 時要「明確要求關閉」，不能只是不送參數 ──
+            # 舊邏輯在這裡什麼都不送，賭 API/模型預設就是不思考的。這個假設
+            # 對很多模型成立，但對 gpt-oss-120b/20b、部分 glm/deepseek build
+            # 這種「預設就會思考」的 reasoning 模型完全錯誤——不送參數只是
+            # 沿用它自己的預設值（往往仍是開著思考），短預算聊天請求下
+            # 輕則 max_tokens 被思考吃光回應空白，重則思考期間完全不吐字
+            # 觸發 socket 逾時（表現得像連線失敗，實際上模型只是還在想）。
+            # 明確送出關閉信號才能真正改變行為；已知會拒絕未知欄位的端點
+            # 已被 _reasoning_unsupported_apis 排除在外，不會受影響。
+            payload.update(_build_reasoning_disable_params())
+            if _reasoning_params:
+                _diag.append(f"⏭️ reasoning 明確關閉（預算 {_budget_for_reasoning:.0f}s < 30s）")
+        else:
+            _diag.append("⏭️ reasoning 略過參數（端點不支援 reasoning 控制欄位）")
         if use_tools:
             payload["tools"] = use_tools
             payload["tool_choice"] = "auto"
@@ -9906,6 +9951,106 @@ async def api_set_schedule_settings(request):
     return web.json_response({"ok": True})
 
 
+async def _post_test_payload(session, url, headers, payload):
+    """POST 一份可能帶有 reasoning 控制欄位的測試 payload。
+    若端點對這些欄位做嚴格驗證回 400，自動移除後重試一次——
+    這樣測試才能公平反映「連線本身」是否正常，不會因為某個模型
+    不支援 reasoning_effort/thinking/enable_thinking 就整個判死刑。
+    回傳 (status, data_or_None, err_text_or_None)。"""
+    async with session.post(url, json=payload, headers=headers) as resp:
+        status = resp.status
+        if status == 200:
+            return status, await resp.json(), None
+        err_text = await resp.text()
+        if status == 400 and "unsupported" in err_text.lower() and any(
+            k in err_text.lower() for k in ("reasoning_effort", "thinking", "enable_thinking")
+        ):
+            payload_clean = {k: v for k, v in payload.items()
+                              if k not in ("reasoning_effort", "thinking", "enable_thinking")}
+            async with session.post(url, json=payload_clean, headers=headers) as resp2:
+                status2 = resp2.status
+                if status2 == 200:
+                    return status2, await resp2.json(), None
+                return status2, None, (await resp2.text())[:200]
+        return status, None, err_text[:200]
+
+
+def _parse_ai_text_result(label, model, data, elapsed, http_status):
+    """解析文字模型測試回應。內容空白一律不算「ok」——即使 HTTP 200，
+    finish_reason=length 代表 max_tokens 被（通常是隱藏的思考過程）
+    吃光，這種模型換到正式聊天的短預算場景下極可能逾時或回應空白，
+    絕對不能標成「正常」讓人誤以為換模型不會出事。"""
+    content = ""
+    choices = data.get("choices", []) if data else []
+    finish_reason = choices[0].get("finish_reason", "?") if choices else "?"
+    if choices:
+        content = (choices[0].get("message", {}).get("content") or "").strip()
+    if not content:
+        return {"label": label, "status": "degraded", "http_status": http_status,
+                "latency_ms": elapsed, "model": model,
+                "error": f"連線成功但內容空白（finish_reason={finish_reason}）——"
+                         f"此模型可能忽略關閉思考的請求，實際聊天時容易在短預算下逾時或回應空白"}
+    return {"label": label, "status": "ok", "latency_ms": elapsed,
+            "model": model, "response_snippet": content[:100]}
+
+
+async def _test_ai_text_model(api_url, api_key, model, label, default_model="gpt-4o-mini", timeout_total=20):
+    """通用文字模型連線測試——刻意比照正式聊天路徑的「短預算、明確關閉
+    reasoning」設定，這樣測試結果才能真正反映換模型後聊天功能會不會出包。
+    不這樣做的話，測試本身沒設定 reasoning 控制參數，對「預設就會思考」
+    的模型（如 gpt-oss 系列）測起來會比實際聊天時表現更好、給假的安心感。
+
+    回傳 status 一律是下列四種之一：
+      - "ok"       連線成功且拿到真正的文字內容
+      - "degraded" 連線成功但內容空白（即使已明確要求關閉 reasoning）——
+                    模型很可能在實際短預算聊天情境下也會空白/逾時
+      - "timeout"  請求逾時
+      - "error"    HTTP 錯誤或其他例外
+    """
+    import time as _time
+    _model = model or default_model
+    if not api_url or not api_key:
+        return {"label": label, "status": "error", "model": _model, "error": "API URL 或 Key 未設定"}
+    url = api_url.strip()
+    if not url.endswith("/chat/completions"):
+        if url.endswith("/v1") or url.endswith("/v2"):
+            url += "/chat/completions"
+        else:
+            url += "/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {
+        "model": _model,
+        "messages": [{"role": "user", "content": "請回覆「連線正常」四個字，不要有其他內容。"}],
+        "max_tokens": 50,
+        "stream": False,
+        # 明確關閉 reasoning——不能只是「不送參數」，因為很多開源
+        # reasoning 模型是「預設思考」架構，沒收到關閉指令就會用自己的
+        # 預設行為（往往還是開著思考）。已知會拒絕未知欄位的端點會被
+        # _post_test_payload 自動偵測並移除重試。
+        "reasoning_effort": "none",
+        "thinking": {"type": "disabled"},
+        "enable_thinking": False,
+    }
+    t0 = _time.monotonic()
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_total, sock_read=max(8, timeout_total - 5))) as sess:
+            status, data, err_text = await _post_test_payload(sess, url, headers, payload)
+            elapsed = int((_time.monotonic() - t0) * 1000)
+            if status != 200:
+                return {"label": label, "status": "error", "http_status": status,
+                        "latency_ms": elapsed, "model": _model,
+                        "error": f"HTTP {status}: {err_text or ''}"}
+            return _parse_ai_text_result(label, _model, data, elapsed, status)
+    except asyncio.TimeoutError:
+        elapsed = int((_time.monotonic() - t0) * 1000)
+        return {"label": label, "status": "timeout", "latency_ms": elapsed,
+                "model": _model, "error": f"請求逾時（{timeout_total} 秒）"}
+    except Exception as e:
+        elapsed = int((_time.monotonic() - t0) * 1000)
+        return {"label": label, "status": "error", "latency_ms": elapsed,
+                "model": _model, "error": str(e)[:300]}
+
+
 async def api_test_ai_connection(request):
     """Test primary and/or fallback API connection with a minimal request.
     POST body: {"target": "primary" | "fallback" | "both" | "chain"}
@@ -9920,58 +10065,8 @@ async def api_test_ai_connection(request):
     specific_model = body.get("model", "").strip()
 
     async def _test_one(api_url, api_key, model, label):
-        import time as _time
-        if not api_url or not api_key:
-            return {"label": label, "status": "error", "error": "API URL 或 Key 未設定"}
-        url = api_url.strip()
-        if not url.endswith("/chat/completions"):
-            if url.endswith("/v1"):
-                url += "/chat/completions"
-            else:
-                url += "/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": model or "gpt-4o-mini",
-            "messages": [
-                {"role": "user", "content": "請回覆「連線正常」四個字。"}
-            ],
-            "max_tokens": 20,
-            "stream": False,
-        }
-        t0 = _time.monotonic()
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15, sock_read=10)) as sess:
-                async with sess.post(url, json=payload, headers=headers) as resp:
-                    elapsed = int((_time.monotonic() - t0) * 1000)
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        return {"label": label, "status": "error", "http_status": resp.status,
-                                "latency_ms": elapsed, "model": model or "gpt-4o-mini",
-                                "error": f"HTTP {resp.status}: {err_text[:200]}"}
-                    data = await resp.json()
-                    content = ""
-                    choices = data.get("choices", [])
-                    if choices:
-                        content = (choices[0].get("message", {}).get("content") or "").strip()
-                        if not content:
-                            # Model returned 200 but empty/None content (e.g. gpt-oss-120b
-                            # sometimes does this for trivial prompts) — not a real failure,
-                            # just note it so the test doesn't crash or look broken.
-                            finish_reason = choices[0].get("finish_reason", "?")
-                            content = f"（模型回應空白，finish_reason={finish_reason}）"
-                    return {"label": label, "status": "ok", "latency_ms": elapsed,
-                            "model": model or "gpt-4o-mini",
-                            "response_snippet": content[:100]}
-        except asyncio.TimeoutError:
-            elapsed = int((_time.monotonic() - t0) * 1000)
-            return {"label": label, "status": "timeout", "latency_ms": elapsed,
-                    "model": model or "gpt-4o-mini",
-                    "error": "請求逾時（15 秒）"}
-        except Exception as e:
-            elapsed = int((_time.monotonic() - t0) * 1000)
-            return {"label": label, "status": "error", "latency_ms": elapsed,
-                    "model": model or "gpt-4o-mini",
-                    "error": str(e)[:300]}
+        return await _test_ai_text_model(api_url, api_key, model, label,
+                                          default_model="gpt-4o-mini", timeout_total=15)
 
     results = []
     if target == "chain":
@@ -10068,49 +10163,9 @@ async def api_test_admin_functions(request):
             return {"label": label, "type": "text", "status": "error", "error": "API URL 或 Key 未設定"}
         if not model:
             return {"label": label, "type": "text", "status": "error", "error": "模型名稱未設定"}
-        url = api_url.strip()
-        if not url.endswith("/chat/completions"):
-            if url.endswith("/v1") or url.endswith("/v2"):
-                url += "/chat/completions"
-            else:
-                url += "/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "user", "content": "請回覆「連線正常」四個字，不要有其他內容。"}
-            ],
-            "max_tokens": 20,
-            "stream": False,
-        }
-        t0 = _time.monotonic()
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, sock_read=20)) as sess:
-                async with sess.post(url, json=payload, headers=headers) as resp:
-                    elapsed = int((_time.monotonic() - t0) * 1000)
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        return {"label": label, "type": "text", "status": "error",
-                                "http_status": resp.status, "latency_ms": elapsed,
-                                "model": model, "error": f"HTTP {resp.status}: {err_text[:200]}"}
-                    data = await resp.json()
-                    content_text = ""
-                    choices = data.get("choices", [])
-                    if choices:
-                        content_text = (choices[0].get("message", {}).get("content") or "").strip()
-                        if not content_text:
-                            finish_reason = choices[0].get("finish_reason", "?")
-                            content_text = f"（模型回應空白，finish_reason={finish_reason}）"
-                    return {"label": label, "type": "text", "status": "ok", "latency_ms": elapsed,
-                            "model": model, "response_snippet": content_text[:100]}
-        except asyncio.TimeoutError:
-            elapsed = int((_time.monotonic() - t0) * 1000)
-            return {"label": label, "type": "text", "status": "timeout", "latency_ms": elapsed,
-                    "model": model, "error": "請求逾時（30 秒）"}
-        except Exception as e:
-            elapsed = int((_time.monotonic() - t0) * 1000)
-            return {"label": label, "type": "text", "status": "error", "latency_ms": elapsed,
-                    "model": model, "error": str(e)[:300]}
+        result = await _test_ai_text_model(api_url, api_key, model, label, timeout_total=30)
+        result["type"] = "text"
+        return result
 
     async def _test_vision(api_url, api_key, vision_model, label):
         if not api_url or not api_key:
@@ -10148,46 +10203,50 @@ async def api_test_admin_functions(request):
             "max_tokens": 200,
             "temperature": 0.1,
             "stream": False,
+            # 跟文字模型測試一致：明確關閉 reasoning，避免「預設思考」的
+            # 視覺模型把 max_tokens 燒在隱藏思考過程上，回不了 JSON 判讀結果。
+            "reasoning_effort": "none",
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
         }
         t0 = _time.monotonic()
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60, sock_read=50)) as sess:
-                async with sess.post(url, json=payload, headers=headers) as resp:
-                    elapsed = int((_time.monotonic() - t0) * 1000)
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        return {"label": label, "type": "vision", "status": "error",
-                                "http_status": resp.status, "latency_ms": elapsed,
-                                "model": vision_model,
-                                "error": f"HTTP {resp.status}: {err_text[:200]}",
-                                "vision_ok": False}
-                    data = await resp.json()
-                    content_text = ""
-                    choices = data.get("choices", [])
-                    if choices:
-                        content_text = (choices[0].get("message", {}).get("content") or "").strip()
-                    vision_ok = False
-                    desc = ""
-                    if not content_text:
-                        finish_reason = choices[0].get("finish_reason", "?") if choices else "?"
-                        return {"label": label, "type": "vision", "status": "error",
-                                "latency_ms": elapsed, "model": vision_model,
-                                "error": f"模型回應空白（finish_reason={finish_reason}），無法判讀圖片",
-                                "vision_ok": False}
-                    try:
-                        if content_text.startswith("```"):
-                            content_text = content_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-                        parsed = json_module.loads(content_text)
-                        vision_ok = bool(parsed.get("has_image", False))
-                        desc = parsed.get("description", "")
-                    except Exception:
-                        # If JSON parse fails, check if response mentions image
-                        if any(kw in content_text.lower() for kw in ["圖片", "image", "紅色", "藍色", "圓形", "flag"]):
-                            vision_ok = True
-                            desc = content_text[:100]
-                    return {"label": label, "type": "vision", "status": "ok", "latency_ms": elapsed,
-                            "model": vision_model, "response_snippet": (desc or content_text)[:150],
-                            "vision_ok": vision_ok}
+                status, data, err_text = await _post_test_payload(sess, url, headers, payload)
+                elapsed = int((_time.monotonic() - t0) * 1000)
+                if status != 200:
+                    return {"label": label, "type": "vision", "status": "error",
+                            "http_status": status, "latency_ms": elapsed,
+                            "model": vision_model,
+                            "error": f"HTTP {status}: {err_text or ''}",
+                            "vision_ok": False}
+                content_text = ""
+                choices = data.get("choices", [])
+                if choices:
+                    content_text = (choices[0].get("message", {}).get("content") or "").strip()
+                vision_ok = False
+                desc = ""
+                if not content_text:
+                    finish_reason = choices[0].get("finish_reason", "?") if choices else "?"
+                    return {"label": label, "type": "vision", "status": "degraded",
+                            "latency_ms": elapsed, "model": vision_model,
+                            "error": f"連線成功但內容空白（finish_reason={finish_reason}），無法判讀圖片——"
+                                     f"此模型可能忽略關閉思考的請求",
+                            "vision_ok": False}
+                try:
+                    if content_text.startswith("```"):
+                        content_text = content_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                    parsed = json_module.loads(content_text)
+                    vision_ok = bool(parsed.get("has_image", False))
+                    desc = parsed.get("description", "")
+                except Exception:
+                    # If JSON parse fails, check if response mentions image
+                    if any(kw in content_text.lower() for kw in ["圖片", "image", "紅色", "藍色", "圓形", "flag"]):
+                        vision_ok = True
+                        desc = content_text[:100]
+                return {"label": label, "type": "vision", "status": "ok", "latency_ms": elapsed,
+                        "model": vision_model, "response_snippet": (desc or content_text)[:150],
+                        "vision_ok": vision_ok}
         except asyncio.TimeoutError:
             elapsed = int((_time.monotonic() - t0) * 1000)
             return {"label": label, "type": "vision", "status": "timeout", "latency_ms": elapsed,
@@ -10312,49 +10371,9 @@ async def api_test_all_functions(request):
             return {"label": label, "type": "text", "status": "skipped", "model": "", "error": "模型未設定，跳過"}
         if not api_url or not api_key:
             return {"label": label, "type": "text", "status": "error", "model": model, "error": "API URL 或 Key 未設定"}
-        url = api_url.strip()
-        if not url.endswith("/chat/completions"):
-            if url.endswith("/v1") or url.endswith("/v2"):
-                url += "/chat/completions"
-            else:
-                url += "/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "user", "content": "請回覆「連線正常」四個字，不要有其他內容。"}
-            ],
-            "max_tokens": 20,
-            "stream": False,
-        }
-        t0 = _time.monotonic()
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, sock_read=20)) as sess:
-                async with sess.post(url, json=payload, headers=headers) as resp:
-                    elapsed = int((_time.monotonic() - t0) * 1000)
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        return {"label": label, "type": "text", "status": "error",
-                                "http_status": resp.status, "latency_ms": elapsed,
-                                "model": model, "error": f"HTTP {resp.status}: {err_text[:200]}"}
-                    data = await resp.json()
-                    content_text = ""
-                    choices = data.get("choices", [])
-                    if choices:
-                        content_text = (choices[0].get("message", {}).get("content") or "").strip()
-                        if not content_text:
-                            finish_reason = choices[0].get("finish_reason", "?")
-                            content_text = f"（模型回應空白，finish_reason={finish_reason}）"
-                    return {"label": label, "type": "text", "status": "ok", "latency_ms": elapsed,
-                            "model": model, "response_snippet": content_text[:100]}
-        except asyncio.TimeoutError:
-            elapsed = int((_time.monotonic() - t0) * 1000)
-            return {"label": label, "type": "text", "status": "timeout", "latency_ms": elapsed,
-                    "model": model, "error": "請求逾時（30 秒）"}
-        except Exception as e:
-            elapsed = int((_time.monotonic() - t0) * 1000)
-            return {"label": label, "type": "text", "status": "error", "latency_ms": elapsed,
-                    "model": model, "error": str(e)[:300]}
+        result = await _test_ai_text_model(api_url, api_key, model, label, timeout_total=30)
+        result["type"] = "text"
+        return result
 
     async def _test_vision(api_url, api_key, vision_model, label):
         if not vision_model:
@@ -10391,41 +10410,45 @@ async def api_test_all_functions(request):
             "max_tokens": 200,
             "temperature": 0.1,
             "stream": False,
+            # 跟文字模型測試一致：明確關閉 reasoning，避免「預設思考」的
+            # 視覺模型把 max_tokens 燒在隱藏思考過程上，回不了 JSON 判讀結果。
+            "reasoning_effort": "none",
+            "thinking": {"type": "disabled"},
+            "enable_thinking": False,
         }
         t0 = _time.monotonic()
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60, sock_read=50)) as sess:
-                async with sess.post(url, json=payload, headers=headers) as resp:
-                    elapsed = int((_time.monotonic() - t0) * 1000)
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        return {"label": label, "type": "vision", "status": "error",
-                                "http_status": resp.status, "latency_ms": elapsed,
-                                "model": vision_model, "error": f"HTTP {resp.status}: {err_text[:200]}"}
-                    data = await resp.json()
-                    content_text = ""
-                    choices = data.get("choices", [])
-                    if choices:
-                        content_text = (choices[0].get("message", {}).get("content") or "").strip()
-                    vision_ok = False
-                    desc = ""
-                    if not content_text:
-                        finish_reason = choices[0].get("finish_reason", "?") if choices else "?"
-                        return {"label": label, "type": "vision", "status": "error",
-                                "latency_ms": elapsed, "model": vision_model,
-                                "error": f"模型回應空白（finish_reason={finish_reason}），無法判讀圖片"}
-                    try:
-                        if content_text.startswith("```"):
-                            content_text = content_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-                        parsed = json_module.loads(content_text)
-                        vision_ok = bool(parsed.get("has_image", False))
-                        desc = parsed.get("description", "")
-                    except Exception:
-                        if any(kw in content_text.lower() for kw in ["圖片", "image", "紅色", "藍色", "圓形", "flag"]):
-                            vision_ok = True
-                            desc = content_text[:100]
-                    return {"label": label, "type": "vision", "status": "ok", "latency_ms": elapsed,
-                            "model": vision_model, "response_snippet": (desc or content_text)[:150]}
+                status, data, err_text = await _post_test_payload(sess, url, headers, payload)
+                elapsed = int((_time.monotonic() - t0) * 1000)
+                if status != 200:
+                    return {"label": label, "type": "vision", "status": "error",
+                            "http_status": status, "latency_ms": elapsed,
+                            "model": vision_model, "error": f"HTTP {status}: {err_text or ''}"}
+                content_text = ""
+                choices = data.get("choices", [])
+                if choices:
+                    content_text = (choices[0].get("message", {}).get("content") or "").strip()
+                vision_ok = False
+                desc = ""
+                if not content_text:
+                    finish_reason = choices[0].get("finish_reason", "?") if choices else "?"
+                    return {"label": label, "type": "vision", "status": "degraded",
+                            "latency_ms": elapsed, "model": vision_model,
+                            "error": f"連線成功但內容空白（finish_reason={finish_reason}），無法判讀圖片——"
+                                     f"此模型可能忽略關閉思考的請求"}
+                try:
+                    if content_text.startswith("```"):
+                        content_text = content_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                    parsed = json_module.loads(content_text)
+                    vision_ok = bool(parsed.get("has_image", False))
+                    desc = parsed.get("description", "")
+                except Exception:
+                    if any(kw in content_text.lower() for kw in ["圖片", "image", "紅色", "藍色", "圓形", "flag"]):
+                        vision_ok = True
+                        desc = content_text[:100]
+                return {"label": label, "type": "vision", "status": "ok", "latency_ms": elapsed,
+                        "model": vision_model, "response_snippet": (desc or content_text)[:150]}
         except asyncio.TimeoutError:
             elapsed = int((_time.monotonic() - t0) * 1000)
             return {"label": label, "type": "vision", "status": "timeout", "latency_ms": elapsed,
