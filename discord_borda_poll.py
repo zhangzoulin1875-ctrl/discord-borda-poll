@@ -14700,15 +14700,29 @@ _SUB_BOT_GROUP_CLASSES = [
     QuizGroup, TurtleSoupGroup, WerewolfGroup, StockGroup,
     HorseRacingGroup, SiegeGroup, CyberWarGroup, GalgameGroup,
 ]
-_SUB_BOT_ADMIN_MARKERS = ("管理員", "擁有者", "限定")
 _SUB_BOT_CMD_CONFIG_FILE = "data/sub_bot_commands.json"
 _sub_bot_cmd_config = {}
 
+# 指令描述文字常寫「機器人擁有者限定」，但實際權限檢查未必真的鎖死在單一
+# BOT_OWNER_ID——例如 /quiz channel、/soup channel 實際呼叫的是 is_admin()
+# （檢查該伺服器的 Manage Server / Administrator 權限），任何 Guest 伺服器
+# 自己的管理員都能用，跟文字描述誤導的「僅機器人擁有者」完全是两回事。
+# 這裡改用「實際程式碼權限檢查」而非「描述文字關鍵字」來決定預設開關：
+# 只有真的寫死比對單一 BOT_OWNER_ID（跨伺服器都只有那一個人能用）的指令
+# 才預設關閉，其餘一律預設開啟，讓子機器人真正做到「Guest 伺服器自治」。
+_SUB_BOT_TRUE_OWNER_ONLY_KEYS = {
+    "ww.toggle", "ww.channel", "ww.end", "ww.test",          # modules/010_werewolf.py: is_owner()
+    "horse.set_channel", "horse.start_now",                   # modules/140_horse_racing.py: is_owner()
+    "siege.start", "siege.settle", "siege.setup", "siege.toggle",  # modules/160_siege.py: 寫死 BOT_OWNER_ID
+    "cyber_war.start", "cyber_war.set_channel", "cyber_war.end",   # modules/180_cyber_war.py: 寫死 BOT_OWNER_ID
+    "vn.set_channel", "vn.admin",                              # modules/190_galgame.py: 寫死 BOT_OWNER_ID
+}
 
-def _sub_bot_cmd_default_enabled(description: str) -> bool:
-    """管理員/擁有者限定的子指令預設關閉；一般玩家可用的預設開啟。"""
-    desc = description or ""
-    return not any(marker in desc for marker in _SUB_BOT_ADMIN_MARKERS)
+
+def _sub_bot_cmd_default_enabled(key: str) -> bool:
+    """真正被鎖死在單一機器人擁有者 ID 的指令預設關閉；其餘（含 is_admin()
+    每伺服器管理員可用的指令，如 /quiz channel、/soup channel）預設開啟。"""
+    return key not in _SUB_BOT_TRUE_OWNER_ONLY_KEYS
 
 
 def _load_sub_bot_cmd_config():
@@ -14744,7 +14758,7 @@ def _get_sub_bot_command_catalog():
             continue
         for cmd in inst.commands:
             key = f"{inst.name}.{cmd.name}"
-            default_enabled = _sub_bot_cmd_default_enabled(cmd.description)
+            default_enabled = _sub_bot_cmd_default_enabled(key)
             catalog.append({
                 "key": key,
                 "group": inst.name,
@@ -14781,7 +14795,7 @@ def _register_sub_bot_commands():
             continue
         for cmd in list(grp.commands):
             key = f"{grp.name}.{cmd.name}"
-            default_enabled = _sub_bot_cmd_default_enabled(cmd.description)
+            default_enabled = _sub_bot_cmd_default_enabled(key)
             if not _sub_bot_cmd_config.get(key, default_enabled):
                 grp.remove_command(cmd.name)
         if len(grp.commands) == 0:
