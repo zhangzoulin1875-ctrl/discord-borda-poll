@@ -4,6 +4,22 @@
 # All shared globals/utilities from the main file are accessible.
 # ═════════════════════════════════════════════════════════════════
 
+try:
+    ICEA_GUILD_ID
+except NameError:
+    try:
+        from discord_borda_poll import ICEA_GUILD_ID
+    except ImportError:
+        ICEA_GUILD_ID = "1425065927027720286"
+
+try:
+    get_channel_any
+except NameError:
+    try:
+        from discord_borda_poll import get_channel_any
+    except ImportError:
+        def get_channel_any(ch_id): return None
+
 def load_quiz_data():
     """Load quiz data from disk."""
     global quiz_settings, quiz_scores, quiz_champions, quiz_active_questions, _quiz_last_question_time
@@ -828,3 +844,33 @@ class QuizGroup(app_commands.Group):
 # 快報與公報指令
 # ──────────────────────────────────────────────
 
+
+def _get_all_quiz_channels() -> list:
+    """Return a list of channel objects for all configured quiz channels
+    (main channel + all guest guild sub-panel channels)."""
+    channels = []
+    seen_ids = set()
+
+    main_ch_id = quiz_settings.get("channel_id")
+    if main_ch_id:
+        try:
+            ch = get_channel_any(int(main_ch_id))
+            if ch:
+                channels.append(ch)
+                seen_ids.add(str(main_ch_id))
+        except Exception as e:
+            print(f"⚠️ Quiz: Failed to get main channel {main_ch_id}: {e}")
+
+    guild_channels = quiz_settings.get("guild_channels", {})
+    for g_id, ch_id in guild_channels.items():
+        if not ch_id or str(ch_id) in seen_ids:
+            continue
+        try:
+            ch = get_channel_any(int(ch_id))
+            if ch:
+                channels.append(ch)
+                seen_ids.add(str(ch_id))
+        except Exception as e:
+            print(f"⚠️ Quiz: Failed to get guild channel {ch_id} for guild {g_id}: {e}")
+
+    return channels

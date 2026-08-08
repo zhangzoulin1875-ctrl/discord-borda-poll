@@ -1966,6 +1966,7 @@ chat_ai_settings = {
     "ai_soft_target": 16,            # AI 軟目標（秒）
     "turtle_soup_enabled": False,    # AI 海龜湯遊戲是否啟用
     "turtle_soup_channel_id": None,  # 海龜湯頻道 ID
+    "turtle_soup_guild_channels": {}, # {guild_id_str: channel_id_str} 外伺服器子頻道
     "turtle_soup_difficulty": "medium",  # 預設難度：easy / medium / hard
     "vision_extra_budget": 20,       # 訊息含圖片時，額外加給文字 AI 的預算（秒）——
                                       # 圖片描述會塞進 system prompt，讓文字模型要處理的
@@ -12819,6 +12820,7 @@ quiz_settings = {
     "guild_id": None,         # Discord guild ID
     "enabled": False,         # on/off
     "interval_minutes": 30,   # question frequency
+    "guild_channels": {},     # {guild_id_str: channel_id_str} for guest servers
 }
 quiz_scores = {}      # {user_id_str: {username, daily_score, total_score, date}}
 quiz_champions = []   # [{date, champion_id, champion_name, champion_score, runner_up_name, runner_up_score}]
