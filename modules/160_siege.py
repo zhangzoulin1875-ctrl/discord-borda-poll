@@ -7,13 +7,37 @@
 import random as _siege_random
 import time as _siege_time
 
+try:
+    ICEA_GUILD_ID
+except NameError:
+    try:
+        from discord_borda_poll import ICEA_GUILD_ID
+    except ImportError:
+        ICEA_GUILD_ID = "1425065927027720286"
+try:
+    get_channel_any
+except NameError:
+    try:
+        from discord_borda_poll import get_channel_any
+    except ImportError:
+        def get_channel_any(ch_id): return None
+try:
+    is_admin
+except NameError:
+    try:
+        from discord_borda_poll import is_admin
+    except ImportError:
+        def is_admin(inter): return inter.user.guild_permissions.manage_guild if inter.guild else False
+
 SIEGE_DATA_FILE = os.path.join(DATA_DIR, "siege_data.json")
 
 # ── 攻城戰設定 ──
 _siege_settings = {
     "enabled": True,
-    "channel_id": None,            # 攻城戰面板頻道
-    "panel_message_id": None,      # 當前面板的訊息 ID
+    "channel_id": None,            # 攻城戰主面板頻道
+    "panel_message_id": None,      # 當前主面板的訊息 ID
+    "guild_channels": {},          # 訪客伺服器子面板 {guild_id_str: channel_id_str}
+    "guild_panel_messages": {},    # 訪客伺服器子面板訊息 ID {guild_id_str: message_id}
     "reward_pool": 5000,            # 每日獎池總額（琉璃幣）
     "attack_cooldown": 1200,        # 每人攻城冷卻（秒，預設20分鐘）
     "min_hp": 80000,               # 城池最低血量
@@ -452,52 +476,81 @@ async def _siege_judge_damage(prompt: str) -> int:
 
 # ── 面板管理 ──
 async def _siege_get_channel():
+    """Return the main panel channel (legacy single-channel callers)."""
     ch_id = _siege_settings.get("channel_id")
     if not ch_id:
         return None
-    for guild in bot.guilds:
-        ch = guild.get_channel(int(ch_id))
+    ch = get_channel_any(int(ch_id))
+    return ch
+
+def _siege_get_all_channels():
+    """Return list of all panel channels (main + guest guild sub-panels)."""
+    channels = []
+    seen = set()
+    main_id = _siege_settings.get("channel_id")
+    if main_id:
+        ch = get_channel_any(int(main_id))
         if ch:
-            return ch
-    return None
+            channels.append(ch)
+            seen.add(str(main_id))
+    for g_id, ch_id in _siege_settings.get("guild_channels", {}).items():
+        if ch_id and str(ch_id) not in seen:
+            ch = get_channel_any(int(ch_id))
+            if ch:
+                channels.append(ch)
+                seen.add(str(ch_id))
+    return channels
 
 async def _siege_setup_panel():
-    """發送新的攻城戰面板（刪除舊的）。"""
-    channel = await _siege_get_channel()
-    if not channel:
+    """發送新的攻城戰面板到所有頻道（刪除舊的）。"""
+    channels = _siege_get_all_channels()
+    if not channels:
         print("⚔️ 攻城戰：頻道未設定，跳過面板發送")
         return None
 
-    # 刪除舊面板
-    old_msg_id = _siege_settings.get("panel_message_id")
-    if old_msg_id:
+    guild_msgs = _siege_settings.get("guild_panel_messages", {})
+    for channel in channels:
+        ch_id_str = str(channel.id)
+        is_main = (ch_id_str == str(_siege_settings.get("channel_id", "")))
+        old_msg_id = _siege_settings.get("panel_message_id") if is_main else guild_msgs.get(ch_id_str)
+        if old_msg_id:
+            try:
+                old_msg = await channel.fetch_message(int(old_msg_id))
+                await old_msg.delete()
+            except Exception:
+                pass
         try:
-            old_msg = await channel.fetch_message(int(old_msg_id))
-            await old_msg.delete()
-        except Exception:
-            pass
+            new_msg = await channel.send(embed=_build_siege_embed(), view=SiegePanelView())
+            if is_main:
+                _siege_settings["panel_message_id"] = new_msg.id
+            else:
+                guild_msgs[ch_id_str] = new_msg.id
+        except Exception as e:
+            print(f"⚠️ 攻城戰面板發送至頻道 {ch_id_str} 失敗：{e}")
 
-    new_msg = await channel.send(embed=_build_siege_embed(), view=SiegePanelView())
-    _siege_settings["panel_message_id"] = new_msg.id
+    _siege_settings["guild_panel_messages"] = guild_msgs
     save_siege_data()
-    return new_msg
+    return True
 
 async def _siege_update_panel():
-    """就地更新面板 embed（保持按鈕不變）。"""
-    channel = await _siege_get_channel()
-    if not channel:
+    """就地更新所有頻道的面板 embed（保持按鈕不變）。"""
+    channels = _siege_get_all_channels()
+    if not channels:
         return
-    msg_id = _siege_settings.get("panel_message_id")
-    if not msg_id:
-        await _siege_setup_panel()
-        return
-    try:
-        msg = await channel.fetch_message(int(msg_id))
-        await msg.edit(embed=_build_siege_embed())
-    except discord.NotFound:
-        await _siege_setup_panel()
-    except Exception as e:
-        print(f"⚠️ 攻城戰面板更新失敗：{e}")
+    guild_msgs = _siege_settings.get("guild_panel_messages", {})
+    for channel in channels:
+        ch_id_str = str(channel.id)
+        is_main = (ch_id_str == str(_siege_settings.get("channel_id", "")))
+        msg_id = _siege_settings.get("panel_message_id") if is_main else guild_msgs.get(ch_id_str)
+        if not msg_id:
+            continue
+        try:
+            msg = await channel.fetch_message(int(msg_id))
+            await msg.edit(embed=_build_siege_embed())
+        except discord.NotFound:
+            pass  # Will be recreated on next setup_panel
+        except Exception as e:
+            print(f"⚠️ 攻城戰面板更新失敗（頻道 {ch_id_str}）：{e}")
 
 # ── 結算結果 Embed + 發送 ──
 async def _siege_delete_old_result():
@@ -646,8 +699,8 @@ class SiegeGroup(app_commands.Group):
 
     @app_commands.command(name="start", description="手動開始一場攻城戰（管理員）")
     async def siege_start(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != "1482256878334640209":
-            await interaction.response.send_message("❌ 只有管理員可以使用此指令。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         await _siege_start_new_day()
@@ -655,8 +708,8 @@ class SiegeGroup(app_commands.Group):
 
     @app_commands.command(name="settle", description="手動結算攻城戰（管理員）")
     async def siege_settle_cmd(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != "1482256878334640209":
-            await interaction.response.send_message("❌ 只有管理員可以使用此指令。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if not _siege_state.get("active"):
             await interaction.response.send_message("❌ 目前沒有進行中的攻城戰。", ephemeral=True)
@@ -700,24 +753,30 @@ class SiegeGroup(app_commands.Group):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="setup", description="設定攻城戰頻道（管理員）")
+    @app_commands.command(name="setup", description="設定攻城戰頻道（管理員限定）")
     @app_commands.describe(channel="攻城戰面板所在頻道")
     async def siege_setup(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if str(interaction.user.id) != "1482256878334640209":
-            await interaction.response.send_message("❌ 只有管理員可以使用此指令。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
-        _siege_settings["channel_id"] = channel.id
+        guild_id_str = str(interaction.guild.id) if interaction.guild else None
+        if guild_id_str == ICEA_GUILD_ID:
+            _siege_settings["channel_id"] = channel.id
+            msg = "✅ 攻城戰主面板頻道已設為"
+        elif guild_id_str:
+            _siege_settings.setdefault("guild_channels", {})[guild_id_str] = str(channel.id)
+            msg = "✅ 本伺服器的攻城戰子面板頻道已設為"
         save_siege_data()
-        await interaction.response.send_message(f"✅ 攻城戰頻道已設為 {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"{msg} {channel.mention}", ephemeral=True)
 
         # 如果有進行中的攻城戰，重新發送面板
         if _siege_state.get("active"):
             await _siege_setup_panel()
 
-    @app_commands.command(name="toggle", description="開關攻城戰功能（管理員）")
+    @app_commands.command(name="toggle", description="開關攻城戰功能（管理員限定）")
     async def siege_toggle(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != "1482256878334640209":
-            await interaction.response.send_message("❌ 只有管理員可以使用此指令。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         _siege_settings["enabled"] = not _siege_settings.get("enabled", True)
         save_siege_data()

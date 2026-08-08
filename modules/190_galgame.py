@@ -19,13 +19,30 @@ from datetime import datetime, timedelta, timezone
 
 GMT8 = timezone(timedelta(hours=8))
 
+try:
+    ICEA_GUILD_ID
+except NameError:
+    try:
+        from discord_borda_poll import ICEA_GUILD_ID
+    except ImportError:
+        ICEA_GUILD_ID = "1425065927027720286"
+try:
+    is_admin
+except NameError:
+    try:
+        from discord_borda_poll import is_admin
+    except ImportError:
+        def is_admin(inter): return inter.user.guild_permissions.manage_guild if inter.guild else False
+
 # ── 資料檔案 ──
 GALGAME_FILE = os.path.join(DATA_DIR, "galgame.json")
 
 # ── 全域狀態 ──
 galgame_settings = {
-    "channel_id": None,           # Galgame 面板頻道
-    "message_id": None,           # 面板訊息 ID
+    "channel_id": None,           # Galgame 主面板頻道
+    "message_id": None,           # 主面板訊息 ID
+    "guild_channels": {},         # 訪客伺服器子面板 {guild_id_str: channel_id_str}
+    "guild_panel_messages": {},   # 訪客伺服器子面板訊息 ID {guild_id_str: message_id}
     "interaction_cooldown": 300,  # 每次互動冷卻（秒）
     "chat_annoyance_threshold": 15,  # 同日對話達此次數後角色開始不耐煩
     "chat_annoyance_severe": 25,      # 同日對話達此次數後角色明�不耐煩、好感度不再增長
@@ -136,7 +153,7 @@ def load_galgame():
 # ── 面板刷新排程 ──
 def _schedule_galgame_panel_refresh():
     global _galgame_panel_refresh_task
-    if not galgame_settings.get("channel_id"):
+    if not galgame_settings.get("channel_id") and not galgame_settings.get("guild_channels"):
         return
     loop = asyncio.get_event_loop()
     if _galgame_panel_refresh_task is not None and not _galgame_panel_refresh_task.done():
@@ -213,65 +230,76 @@ def _get_galgame_panel_channel():
         return None
     return get_channel_any(int(ch_id))
 
+def _get_all_galgame_channels():
+    """Return list of all galgame panel channels (main + guest guild sub-panels)."""
+    channels = []
+    seen = set()
+    main_id = galgame_settings.get("channel_id")
+    if main_id:
+        ch = get_channel_any(int(main_id))
+        if ch:
+            channels.append(ch)
+            seen.add(str(main_id))
+    for g_id, ch_id in galgame_settings.get("guild_channels", {}).items():
+        if ch_id and str(ch_id) not in seen:
+            ch = get_channel_any(int(ch_id))
+            if ch:
+                channels.append(ch)
+                seen.add(str(ch_id))
+    return channels
+
 
 async def setup_galgame_panel():
-    """(重新)發送 Galgame 面板到設定的頻道。"""
-    channel = _get_galgame_panel_channel()
-    if not channel:
+    """(重新)發送 Galgame 面板到所有設定的頻道（主面板 + 訪客伺服器子面板）。"""
+    channels = _get_all_galgame_channels()
+    if not channels:
         return None
-
-    # 刪除舊面板
-    old_msg_id = galgame_settings.get("message_id")
-    if old_msg_id:
+    guild_msgs = galgame_settings.get("guild_panel_messages", {})
+    result = None
+    for channel in channels:
+        ch_id_str = str(channel.id)
+        is_main = (ch_id_str == str(galgame_settings.get("channel_id", "")))
+        old_msg_id = galgame_settings.get("message_id") if is_main else guild_msgs.get(ch_id_str)
+        if old_msg_id:
+            try:
+                old_msg = await channel.fetch_message(int(old_msg_id))
+                await old_msg.delete()
+            except Exception:
+                pass
         try:
-            old_msg = await channel.fetch_message(int(old_msg_id))
-            await old_msg.delete()
-            print(f"🧹 已刪除舊的 Galgame 面板訊息（ID: {old_msg_id}）")
-        except discord.NotFound:
-            pass
+            new_msg = await channel.send(embed=_build_galgame_embed(), view=GalgamePanelView())
+            if is_main:
+                galgame_settings["message_id"] = new_msg.id
+                result = new_msg
+            else:
+                guild_msgs[ch_id_str] = new_msg.id
+            print(f"✅ Galgame 面板已發送至 #{channel.name}（ID: {new_msg.id}）")
         except Exception as e:
-            print(f"⚠️ 刪除舊 Galgame 面板失敗：{e}")
-
-    # 清掃殘留
-    try:
-        async for msg in channel.history(limit=30):
-            if msg.author.id == bot.user.id and msg.embeds:
-                if msg.embeds[0].title and GALGAME_PANEL_TITLE in msg.embeds[0].title:
-                    try:
-                        await msg.delete()
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-
-    # 發送新面板
-    try:
-        new_msg = await channel.send(embed=_build_galgame_embed(), view=GalgamePanelView())
-        galgame_settings["message_id"] = new_msg.id
-        save_galgame()
-        print(f"✅ Galgame 面板已發送至 #{channel.name}（ID: {new_msg.id}）")
-        return new_msg
-    except Exception as e:
-        print(f"❌ 發送 Galgame 面板失敗：{e}")
-        return None
+            print(f"❌ 發送 Galgame 面板至頻道 {ch_id_str} 失敗：{e}")
+    galgame_settings["guild_panel_messages"] = guild_msgs
+    save_galgame()
+    return result
 
 
 async def refresh_galgame_panel():
-    """就地更新現有的 Galgame 面板。"""
-    channel = _get_galgame_panel_channel()
-    if not channel:
+    """就地更新所有頻道的 Galgame 面板。"""
+    channels = _get_all_galgame_channels()
+    if not channels:
         return
-    msg_id = galgame_settings.get("message_id")
-    if not msg_id:
-        await setup_galgame_panel()
-        return
-    try:
-        msg = await channel.fetch_message(int(msg_id))
-        await msg.edit(embed=_build_galgame_embed())
-    except discord.NotFound:
-        await setup_galgame_panel()
-    except Exception as e:
-        print(f"⚠️ 更新 Galgame 面板失敗：{e}")
+    guild_msgs = galgame_settings.get("guild_panel_messages", {})
+    for channel in channels:
+        ch_id_str = str(channel.id)
+        is_main = (ch_id_str == str(galgame_settings.get("channel_id", "")))
+        msg_id = galgame_settings.get("message_id") if is_main else guild_msgs.get(ch_id_str)
+        if not msg_id:
+            continue
+        try:
+            msg = await channel.fetch_message(int(msg_id))
+            await msg.edit(embed=_build_galgame_embed())
+        except discord.NotFound:
+            pass  # Will be recreated on next setup_galgame_panel
+        except Exception as e:
+            print(f"⚠️ 更新 Galgame 面板失敗 ({ch_id_str})：{e}")
 
 
 async def galgame_panel_loop():
@@ -300,6 +328,7 @@ def _build_galgame_admin_embed() -> "discord.Embed":
         title="🌸 Galgame 管理面板",
         description=(
             f"頻道 ID：{galgame_settings.get('channel_id', '未設定')}\n"
+            f"子面板數：{len(galgame_settings.get('guild_channels', {}))}\n"
             f"冷卻時間：{galgame_settings.get('interaction_cooldown', 300)} 秒\n"
             f"不耐煩門檻：{galgame_settings.get('chat_annoyance_threshold', 15)}/{galgame_settings.get('chat_annoyance_severe', 25)}/{galgame_settings.get('chat_annoyance_max', 35)} 次\n"
             f"送禮範圍：{galgame_settings.get('gift_min_cost', 50)}-{galgame_settings.get('gift_max_cost', 5000)} {currency_name()}\n"
@@ -1098,28 +1127,35 @@ class GalgameGroup(app_commands.Group):
         view = GalgamePanelView()
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @app_commands.command(name="set_channel", description="設定互動小說固定看板頻道（僅擁有者）")
+    @app_commands.command(name="set_channel", description="設定互動小說固定看板頻道（管理員限定）")
     @app_commands.describe(channel="要固定顯示看板的頻道")
     async def vn_set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if str(interaction.user.id) != str(BOT_OWNER_ID):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
 
-        galgame_settings["channel_id"] = channel.id
-        galgame_settings["message_id"] = None  # 強制重新發送（清除舊頻道殘留的關聯）
+        guild_id_str = str(interaction.guild.id) if interaction.guild else None
+        if guild_id_str == ICEA_GUILD_ID:
+            galgame_settings["channel_id"] = channel.id
+            galgame_settings["message_id"] = None
+            msg = "互動小說主面板看板已設定至"
+        elif guild_id_str:
+            galgame_settings.setdefault("guild_channels", {})[guild_id_str] = str(channel.id)
+            galgame_settings.setdefault("guild_panel_messages", {}).pop(guild_id_str, None)
+            msg = "本伺服器的互動小說子面板看板已設定至"
         save_galgame()
 
         await interaction.response.send_message(f"⏳ 正在於 {channel.mention} 設定互動小說看板...", ephemeral=True)
         new_msg = await setup_galgame_panel()
         if new_msg:
-            await interaction.followup.send(f"✅ 互動小說看板已設定至 {channel.mention}，將即時更新。", ephemeral=True)
+            await interaction.followup.send(f"✅ {msg} {channel.mention}，將即時更新。", ephemeral=True)
         else:
             await interaction.followup.send(f"⚠️ 看板設定已儲存，但發送失敗，請確認機器人在 {channel.mention} 有發言權限。", ephemeral=True)
 
-    @app_commands.command(name="admin", description="互動小說管理（僅擁有者）")
+    @app_commands.command(name="admin", description="互動小說管理（管理員限定）")
     async def vn_admin(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != str(BOT_OWNER_ID):
-            await interaction.response.send_message("❌ 只有擁有者可以使用此指令。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         embed = _build_galgame_admin_embed()
         await interaction.response.send_message(embed=embed, ephemeral=True)

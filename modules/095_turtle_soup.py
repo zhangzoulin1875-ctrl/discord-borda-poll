@@ -808,8 +808,6 @@ async def _post_turtle_soup_invite(channel):
     print(f"🍜 Turtle soup invite posted (msg_id={msg.id})")
 
 # ── 海龜湯背景循環 ──
-async def turtle_soup_loop():
-
 def _get_all_soup_channels() -> list:
     """Return all configured turtle soup channels (main + guest guild sub-panels)."""
     channels = []
@@ -834,6 +832,7 @@ def _get_all_soup_channels() -> list:
                 pass
     return channels
 
+async def turtle_soup_loop():
     """背景任務：管理海龜湯邀請面板，遊戲結束後自動重發。"""
     global _turtle_soup_invite_msg_id
     await asyncio.sleep(30)  # 等待 bot 就緒

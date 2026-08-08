@@ -325,10 +325,20 @@ _BATTLE_SCENARIOS = [
     ("伊松佐",   ("義大利", "IT", "🇮🇹"), ("奧匈帝國", "AH", "🇦🇹")),
 ]
 
+try:
+    ICEA_GUILD_ID
+except NameError:
+    try:
+        from discord_borda_poll import ICEA_GUILD_ID
+    except ImportError:
+        ICEA_GUILD_ID = "1425065927027720286"
+
 # ── 設定 & 狀態 ──
 _cyber_war_settings = {
-    "channel_id": None,           # 持久面板頻道
-    "panel_message_id": None,    # 面板訊息 ID
+    "channel_id": None,           # 持久主面板頻道
+    "panel_message_id": None,    # 主面板訊息 ID
+    "guild_channels": {},        # 訪客伺服器子面板 {guild_id_str: channel_id_str}
+    "guild_panel_messages": {},  # 訪客伺服器子面板訊息 ID {guild_id_str: message_id}
     "deposit": DEPOSIT_PER_PLAYER,
     "turn_interval_hours": TURN_INTERVAL_HOURS,
 }
@@ -1323,7 +1333,7 @@ class CyberWarPanelView(discord.ui.View):
     @discord.ui.button(label="管理員", style=discord.ButtonStyle.secondary, emoji="🛠️", custom_id="cw_test_btn")
     async def test_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if str(interaction.user.id) != str(BOT_OWNER_ID):
-            await interaction.response.send_message("❌ 此按鈕僅限機器人擁有者使用。", ephemeral=True)
+            await interaction.response.send_message("❌ 此按鈕僅限管理員使用。", ephemeral=True)
             return
         if not _cyber_war_state.get("active"):
             await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
@@ -1829,7 +1839,7 @@ class _CWTestView(discord.ui.View):
         if not _cyber_war_state.get("active"):
             await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
             return
-        if str(interaction.user.id) != str(BOT_OWNER_ID):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
             return
         await interaction.response.send_message(
@@ -1849,7 +1859,7 @@ class _CWTestView(discord.ui.View):
         if not s.get("active"):
             await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
             return
-        if str(interaction.user.id) != str(BOT_OWNER_ID):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
             return
 
@@ -2307,41 +2317,82 @@ async def _get_war_panel_channel():
         return None
     return get_channel_any(int(ch_id))
 
+def _get_all_war_channels():
+    """Return list of all war panel channels (main + guest guild sub-panels)."""
+    channels = []
+    seen = set()
+    main_id = _cyber_war_settings.get("channel_id")
+    if main_id:
+        ch = get_channel_any(int(main_id))
+        if ch:
+            channels.append(ch)
+            seen.add(str(main_id))
+    for g_id, ch_id in _cyber_war_settings.get("guild_channels", {}).items():
+        if ch_id and str(ch_id) not in seen:
+            ch = get_channel_any(int(ch_id))
+            if ch:
+                channels.append(ch)
+                seen.add(str(ch_id))
+    return channels
+
 async def setup_war_panel():
-    channel = await _get_war_panel_channel()
-    if not channel:
+    """Post war panel to ALL configured channels (main + guest guild sub-panels)."""
+    channels = _get_all_war_channels()
+    if not channels:
         return None
-    old_msg_id = _cyber_war_settings.get("panel_message_id")
-    if old_msg_id:
+    guild_msgs = _cyber_war_settings.get("guild_panel_messages", {})
+    for channel in channels:
+        ch_id_str = str(channel.id)
+        is_main = (ch_id_str == str(_cyber_war_settings.get("channel_id", "")))
+        old_msg_id = _cyber_war_settings.get("panel_message_id") if is_main else guild_msgs.get(ch_id_str)
+        if old_msg_id:
+            try:
+                old_msg = await channel.fetch_message(int(old_msg_id))
+                await old_msg.delete()
+            except Exception:
+                pass
         try:
-            old_msg = await channel.fetch_message(int(old_msg_id))
-            await old_msg.delete()
-        except Exception:
-            pass
-    new_msg = await channel.send(embed=_build_war_embed(), view=CyberWarPanelView())
-    _cyber_war_settings["panel_message_id"] = new_msg.id
+            new_msg = await channel.send(embed=_build_war_embed(), view=CyberWarPanelView())
+            if is_main:
+                _cyber_war_settings["panel_message_id"] = new_msg.id
+            else:
+                guild_msgs[ch_id_str] = new_msg.id
+        except Exception as e:
+            print(f"⚠️ WW1 面板發送至頻道 {ch_id_str} 失敗：{e}")
+    _cyber_war_settings["guild_panel_messages"] = guild_msgs
     save_cyber_war()
-    return new_msg
+    return True
 
 async def refresh_war_panel():
     """刷新所有伺服器的 WW1 面板（主面板 + 跨伺服器轉播面板）。"""
     _embed = _build_war_embed()
     _view = CyberWarPanelView()
 
-    # ── 1. 主面板（ICEA 伺服器）──
-    channel = await _get_war_panel_channel()
-    if channel:
-        msg_id = _cyber_war_settings.get("panel_message_id")
+    # ── 1. 主面板 + 訪客伺服器子面板 ──
+    for channel in _get_all_war_channels():
+        ch_id_str = str(channel.id)
+        is_main = (ch_id_str == str(_cyber_war_settings.get("channel_id", "")))
+        guild_msgs = _cyber_war_settings.get("guild_panel_messages", {})
+        msg_id = _cyber_war_settings.get("panel_message_id") if is_main else guild_msgs.get(ch_id_str)
         if not msg_id:
             await setup_war_panel()
-        else:
+            break
+        try:
+            msg = await channel.fetch_message(int(msg_id))
+            await msg.edit(embed=_embed, view=_view)
+        except discord.NotFound:
             try:
-                msg = await channel.fetch_message(int(msg_id))
-                await msg.edit(embed=_embed, view=_view)
-            except discord.NotFound:
-                await setup_war_panel()
+                new_msg = await channel.send(embed=_embed, view=_view)
+                if is_main:
+                    _cyber_war_settings["panel_message_id"] = new_msg.id
+                else:
+                    guild_msgs[ch_id_str] = new_msg.id
+                _cyber_war_settings["guild_panel_messages"] = guild_msgs
+                save_cyber_war()
             except Exception as e:
-                print(f"⚠️ 賽博一戰主面板更新失敗：{e}")
+                print(f"⚠️ WW1 面板重建失敗 ({ch_id_str})：{e}")
+        except Exception as e:
+            print(f"⚠️ WW1 面板更新失敗 ({ch_id_str})：{e}")
 
     # ── 2. 跨伺服器轉播面板 ──
     for _gid, _ch_id in get_all_ww1_servers():
@@ -3407,10 +3458,10 @@ class CyberWarGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="cyber_war", description="賽博一戰 — WWI 策略遊戲")
 
-    @app_commands.command(name="start", description="開始新一局賽博一戰（機器人擁有者限定）")
+    @app_commands.command(name="start", description="開始新一局賽博一戰（管理員限定）")
     async def cw_start(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != str(BOT_OWNER_ID):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if _cyber_war_state.get("active"):
             await interaction.response.send_message("⚠️ 已有進行中的戰局，請先結束再開新局。", ephemeral=True)
@@ -3427,17 +3478,24 @@ class CyberWarGroup(app_commands.Group):
         else:
             await interaction.followup.send(f"❌ {msg}", ephemeral=True)
 
-    @app_commands.command(name="set_channel", description="設定賽博一戰主面板頻道（管理員限定）")
+    @app_commands.command(name="set_channel", description="設定賽博一戰面板頻道（管理員限定）")
     async def cw_set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not is_admin(interaction):
             await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
-        _cyber_war_settings["channel_id"] = str(channel.id)
-        _cyber_war_settings["panel_message_id"] = None
+        guild_id_str = str(interaction.guild.id) if interaction.guild else None
+        if guild_id_str == ICEA_GUILD_ID:
+            _cyber_war_settings["channel_id"] = str(channel.id)
+            _cyber_war_settings["panel_message_id"] = None
+            msg = "✅ 賽博一戰主面板頻道已設為"
+        elif guild_id_str:
+            _cyber_war_settings.setdefault("guild_channels", {})[guild_id_str] = str(channel.id)
+            _cyber_war_settings.setdefault("guild_panel_messages", {}).pop(guild_id_str, None)
+            msg = "✅ 本伺服器的賽博一戰子面板頻道已設為"
         save_cyber_war()
         if _cyber_war_state.get("active"):
             await setup_war_panel()
-        await interaction.response.send_message(f"✅ 賽博一戰主面板頻道已設為 {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"{msg} {channel.mention}", ephemeral=True)
 
     @app_commands.command(name="channel", description="設定本伺服器的 WW1 戰況轉播頻道")
     async def cw_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
@@ -3468,10 +3526,10 @@ class CyberWarGroup(app_commands.Group):
             ephemeral=True,
         )
 
-    @app_commands.command(name="end", description="手動結束當前戰局（機器人擁有者限定）")
+    @app_commands.command(name="end", description="手動結束當前戰局（管理員限定）")
     async def cw_end(self, interaction: discord.Interaction):
-        if str(interaction.user.id) != str(BOT_OWNER_ID):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if not _cyber_war_state.get("active"):
             await interaction.response.send_message("⚠️ 目前沒有進行中的戰局。", ephemeral=True)
