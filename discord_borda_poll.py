@@ -14736,14 +14736,20 @@ if sub_bot is not None:
         if not getattr(on_ready, "_sub_done", False):
             on_ready._sub_done = True
             print(f"[OK] Sub-bot online: {sub_bot.user}")
-            try:
-                synced = await sub_bot.tree.sync()
-                print(f"[OK] Sub-bot synced {len(synced)} slash commands")
-            except Exception as e:
-                print(f"[ERR] Sub-bot sync failed: {e}")
+            # Guild-specific sync (instant) + global sync (backup)
             for g in sub_bot.guilds:
                 _is_owner = (str(g.id) == ICEA_GUILD_ID)
                 register_server(g.id, g.name, is_owner_server=_is_owner)
+                try:
+                    synced = await sub_bot.tree.sync(guild=g)
+                    print(f"[OK] Sub-bot synced {len(synced)} commands to guild {g.name} ({g.id})")
+                except Exception as e:
+                    print(f"[ERR] Sub-bot guild sync failed for {g.name}: {e}")
+            try:
+                synced_global = await sub_bot.tree.sync()
+                print(f"[OK] Sub-bot global sync: {len(synced_global)} commands")
+            except Exception as e:
+                print(f"[ERR] Sub-bot global sync failed: {e}")
 
     @sub_bot.event
     async def on_guild_join(guild):
