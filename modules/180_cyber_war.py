@@ -154,7 +154,7 @@ def _apply_special_event(event_id):
     if any(effects.get(f"b_{k}") for k in ["progress","morale","supplies","supply_points","fort_damage"]):
         _apply("B", fac_b, "b")
     # 記錄到事件歷史
-    s.setdefault("event_history", []).append({"event_id": event_id, "name": ev["name"], "emoji": ev["emoji"], "turn": s.get("turn", 0), "time": _cw_now_iso()})
+    s.setdefault("event_history", []).append({"event_id": event_id, "name": ev["name"], "emoji": ev["emoji"], "turn": s.get("turn", 0), "time": _now_iso()})
     if len(s.get("event_history", [])) > 20:
         s["event_history"] = s["event_history"][-20:]
     save_cyber_war()
@@ -225,18 +225,34 @@ class _EventSelectView(discord.ui.View):
             return
         # 先 defer 回應（3秒內），避免 Discord 互動超時
         await interaction.response.defer()
-        # 重活：寫盤 + 刷新面板
-        ev_info, changes = _apply_special_event(event_id)
-        if not ev_info:
-            await interaction.edit_original_response(content="❌ 事件套用失敗。", view=None)
-            return
-        if "❌" in changes:
-            await interaction.edit_original_response(content=changes, view=None)
-            return
+        # 整段包 try/except：先前這裡曾因 _apply_special_event() 內部呼叫一個
+        # 不存在的函式（_cw_now_iso，正確應為 _now_iso）而拋出未捕捉的
+        # NameError，導致：(1) 事件數值雖已套用到記憶體但 save_cyber_war()
+        # 與 refresh_war_panel() 那兩行完全執行不到、(2) 互動卡在 defer 後
+        # 沒有任何後續回應，管理員只看到下拉選單停在已選取狀態、沒有任何
+        # 確認或錯誤訊息，誤以為「沒生效」。現在整段包起來，任何例外都會
+        # 印出診斷log並回覆管理員明確的錯誤訊息，不再無聲失敗。
         try:
-            await refresh_war_panel()
-        except Exception:
-            pass
+            ev_info, changes = _apply_special_event(event_id)
+            if not ev_info:
+                await interaction.edit_original_response(content="❌ 事件套用失敗。", view=None)
+                return
+            if "❌" in changes:
+                await interaction.edit_original_response(content=changes, view=None)
+                return
+            try:
+                await refresh_war_panel()
+            except Exception as e:
+                print(f"⚠️ 賽博一戰特殊事件套用後刷新面板失敗：{e}")
+        except Exception as e:
+            import traceback
+            print(f"⚠️ 賽博一戰特殊事件套用失敗（event_id={event_id}）：{e}")
+            traceback.print_exc()
+            try:
+                await interaction.edit_original_response(content=f"❌ 事件套用時發生錯誤，已記錄到日誌：{str(e)[:200]}", view=None)
+            except Exception:
+                pass
+            return
         fac_a = _cyber_war_state.get("factions", {}).get("A", {})
         fac_b = _cyber_war_state.get("factions", {}).get("B", {})
         result_text = (
