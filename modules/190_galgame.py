@@ -1078,6 +1078,139 @@ class GalgameGroup(app_commands.Group):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+
+# ── 微國家百科匯入角色 ──
+
+async def api_galgame_import_micropedia(request):
+    """從微國家百科 URL 抓取頁面內容，用 AI 整理成 Galgame 角色表單欄位。
+    POST /api/galgame/import-micropedia
+    body: {"url": "https://www.micropedia.site/wiki/某人"}
+    回傳: {"ok": true, "character": {name, tagline, personality, ...}}"""
+    import urllib.parse as _up
+    import re as _re
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if str(user.get("user_id", "")) != str(BOT_OWNER_ID):
+        return web.json_response({"error": "forbidden — 只有擁有者可以匯入角色"}, status=403)
+
+    body = await request.json()
+    url = body.get("url", "").strip()
+    if not url:
+        return web.json_response({"error": "請提供微國家百科 URL"}, status=400)
+
+    # 從 URL 提取頁面標題
+    # 格式: https://www.micropedia.site/wiki/頁面名稱
+    parsed = _up.urlparse(url)
+    if "micropedia.site" not in (parsed.netloc or "").lower():
+        return web.json_response({"error": "URL 必須是 micropedia.site 的頁面"}, status=400)
+
+    path_parts = parsed.path.strip("/").split("/")
+    if len(path_parts) < 2 or path_parts[0].lower() != "wiki":
+        return web.json_response({"error": "URL 格式應為 https://www.micropedia.site/wiki/頁面名稱"}, status=400)
+
+    page_title = _up.unquote(path_parts[1])
+    if not page_title:
+        return web.json_response({"error": "無法從 URL 解析頁面標題"}, status=400)
+
+    # 用 MediaWiki API 抓取頁面 wikitext
+    try:
+        timeout = aiohttp.ClientTimeout(total=10, connect=5)
+        api_url = (
+            f"https://www.micropedia.site/api.php?action=query"
+            f"&titles={_up.quote(page_title)}"
+            f"&prop=revisions&rvprop=content&format=json&redirects=1"
+        )
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url, headers={"User-Agent": "DiscordBot (galgame-import/1.0)"}, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return web.json_response({"error": f"微國家百科 API 回傳 {resp.status}"}, status=502)
+                data = await resp.json()
+
+        pages = data.get("query", {}).get("pages", {})
+        wikitext = ""
+        resolved_title = page_title
+        for pid, page in pages.items():
+            if pid == "-1" or "missing" in page:
+                continue
+            revs = page.get("revisions", [])
+            if revs:
+                wikitext = revs[0].get("*", "")
+                resolved_title = page.get("title", page_title)
+
+        if not wikitext or len(wikitext) < 10:
+            return web.json_response({"error": f"找不到頁面「{page_title}」或內容為空"}, status=404)
+
+        # 清理 wikitext → 純文字
+        clean_text = _clean_wikitext(wikitext)
+        if len(clean_text) > 4000:
+            clean_text = clean_text[:4000]
+
+    except Exception as e:
+        return web.json_response({"error": f"抓取頁面失敗：{e}"}, status=500)
+
+    # 用 AI 把百科內容整理成 Galgame 角色欄位
+    ai_prompt = f"""你是互動小說角色設計師。以下是來自微國家百科的條目「{resolved_title}」的內容。請根據這些資訊，為互動小說（Galgame）遊戲設計一個角色。
+
+要求：
+1. 把這個真實人物的資訊轉化為遊戲角色的設定
+2. 欄位要豐富、有細節，但不要捏造百科中沒有的核心事實
+3. 可以根據百科內容的語氣和風格推演出角色的性格和說話方式
+4. 如果百科內容不足，可以用合理的想像補充，但要標明是推測
+
+請直接回傳 JSON（不要加 markdown code block），格式如下：
+{{
+  "name": "角色名稱（直接用條目標題或人物本名）",
+  "tagline": "一句話簡介（20字以內）",
+  "personality": "性格描述（根據百科事跡推演出3-5個性格特質，用頓號分隔）",
+  "background": "背景故事（根據百科內容改寫成的角色故事，200-400字，用故事化的口吻而非百科條目列舉）",
+  "appearance": "外貌描述（如果百科有提到就忠實描述，沒有就根據角色形象推測，1-2句話）",
+  "speech_style": "說話風格（根據百科中的言行記錄推演，1-2句話）",
+  "gift_preferences": "禮物偏好（根據角色特質推測2-3個適合的禮物類型，用頓號分隔）"
+}}
+
+百科內容：
+{clean_text}"""
+
+    try:
+        result = await call_chat_api(
+            messages=[
+                {"role": "system", "content": "你是互動小說角色設計師，擅長把真實人物資料轉化為生動的遊戲角色設定。只回傳 JSON，不要加任何說明文字或 markdown 格式。"},
+                {"role": "user", "content": ai_prompt},
+            ],
+            settings=chat_ai_settings,
+            max_tokens=1500,
+            timeout_total=60,
+            timeout_read=55,
+            is_background=True,
+            fallback_mode="full",
+            category="entertainment",
+        )
+
+        ai_text = result.get("content", "").strip()
+        if not ai_text:
+            return web.json_response({"error": "AI 生成角色設定失敗（空回應）"}, status=500)
+
+        # 去除可能的 markdown code block 包裹
+        ai_text = _re.sub(r"^```(?:json)?\s*", "", ai_text)
+        ai_text = _re.sub(r"\s*```$", "", ai_text)
+
+        character_data = json_module.loads(ai_text)
+
+        # 確保所有欄位都是字串
+        for key in ("name", "tagline", "personality", "background", "appearance", "speech_style", "gift_preferences"):
+            val = character_data.get(key, "")
+            if not isinstance(val, str):
+                character_data[key] = str(val)
+            character_data[key] = val.strip()
+
+        return web.json_response({"ok": True, "character": character_data, "source_title": resolved_title})
+
+    except json_module.JSONDecodeError as e:
+        return web.json_response({"error": f"AI 回應解析失敗（非 JSON 格式）：{e}"}, status=500)
+    except Exception as e:
+        return web.json_response({"error": f"AI 生成角色設定失敗：{e}"}, status=500)
+
 # ═══════════════════════════════════════════════════════════════════════
 # 啟動
 # ═══════════════════════════════════════════════════════════════════════
@@ -1091,6 +1224,7 @@ _galgame_api_routes = [
     ("POST", "/api/galgame/character",      api_galgame_add_character),
     ("PUT",  "/api/galgame/character",      api_galgame_update_character),
     ("DELETE", "/api/galgame/character",    api_galgame_delete_character),
+    ("POST",  "/api/galgame/import-micropedia", api_galgame_import_micropedia),
 ]
 
 # 持久化 View 由主程式統一註冊（bot.add_view），這裡不重複

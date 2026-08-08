@@ -874,6 +874,15 @@
           <!-- 新增/編輯角色表單 -->
           <div class="bg-[#1e1f22] rounded-lg p-4 mb-3">
             <input id="galgame-char-id" type="hidden">
+            <!-- 微國家百科匯入 -->
+            <div class="mb-3 p-3 bg-[#2b2d31] rounded-lg border border-[#3f4147]">
+              <label class="text-xs text-gray-400 block mb-1">📖 從微國家百科匯入</label>
+              <div class="flex gap-2">
+                <input id="galgame-micropedia-url" type="text" class="flex-1 bg-[#1e1f22] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="貼上 micropedia.site/wiki/某人 的網址">
+                <button id="galgame-import-btn" onclick="importFromMicropedia()" class="bg-[#23a559] hover:bg-[#1d8a47] px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap">🔍 AI 匯入</button>
+              </div>
+              <p id="galgame-import-status" class="text-xs text-gray-400 mt-1 hidden"></p>
+            </div>
             <div class="grid grid-cols-2 gap-3 mb-2">
               <div>
                 <label class="text-xs text-gray-400 block mb-1">角色名稱 *</label>
@@ -1518,6 +1527,60 @@ function resetGalgameCharForm() {
   document.getElementById('galgame-char-speech').value = '';
   document.getElementById('galgame-char-gift-pref').value = '';
   document.getElementById('galgame-char-events').value = '';
+  document.getElementById('galgame-micropedia-url').value = '';
+  const st = document.getElementById('galgame-import-status');
+  st.classList.add('hidden');
+  st.textContent = '';
+}
+
+async function importFromMicropedia() {
+  const url = document.getElementById('galgame-micropedia-url').value.trim();
+  const st = document.getElementById('galgame-import-status');
+  const btn = document.getElementById('galgame-import-btn');
+  if (!url) {
+    st.textContent = '⚠️ 請先貼上微國家百科網址';
+    st.className = 'text-xs text-yellow-400 mt-1';
+    st.classList.remove('hidden');
+    return;
+  }
+  if (!url.includes('micropedia.site')) {
+    st.textContent = '⚠️ 網址必須是 micropedia.site 的頁面';
+    st.className = 'text-xs text-yellow-400 mt-1';
+    st.classList.remove('hidden');
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '⏳ AI 分析中…';
+  st.textContent = '正在抓取百科頁面並用 AI 整理角色資訊，請稍候…';
+  st.className = 'text-xs text-blue-400 mt-1';
+  st.classList.remove('hidden');
+  try {
+    const resp = await api('/api/galgame/import-micropedia', 'POST', { url: url });
+    if (resp.ok && resp.character) {
+      const c = resp.character;
+      document.getElementById('galgame-char-name').value = c.name || '';
+      document.getElementById('galgame-char-tagline').value = c.tagline || '';
+      document.getElementById('galgame-char-personality').value = c.personality || '';
+      document.getElementById('galgame-char-background').value = c.background || '';
+      document.getElementById('galgame-char-appearance').value = c.appearance || '';
+      document.getElementById('galgame-char-speech').value = c.speech_style || '';
+      document.getElementById('galgame-char-gift-pref').value = c.gift_preferences || '';
+      st.textContent = '✅ 已從「' + (resp.source_title || '百科') + '」匯入角色資訊，請檢查並修改後點「新增/更新角色」。';
+      st.className = 'text-xs text-green-400 mt-1';
+      st.classList.remove('hidden');
+    } else {
+      st.textContent = '❌ ' + (resp.error || '匯入失敗');
+      st.className = 'text-xs text-red-400 mt-1';
+      st.classList.remove('hidden');
+    }
+  } catch (e) {
+    st.textContent = '❌ 匯入失敗：' + e.message;
+    st.className = 'text-xs text-red-400 mt-1';
+    st.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 AI 匯入';
+  }
 }
 
 async function showChatAIPanel() {
