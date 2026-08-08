@@ -823,13 +823,13 @@ def _build_war_embed():
 
     def _faction_field(key, label):
         f = s["factions"][key]
-        defeated = " 💀 已敗" if f.get("defeated") else ""
+        defeated = " 💀已敗" if f.get("defeated") else ""
         n_off = len(f.get("officers", []))
         n_sl = len(f.get("squad_leaders", []))
         n_sol = len(f.get("soldiers", []))
         # 進度條
         prog = f.get("progress", 0)
-        bar_len = 20
+        bar_len = 14
         filled = int(prog / 100 * bar_len)
         bar = "█" * filled + "░" * (bar_len - filled)
         morale = f.get("morale", 100)
@@ -839,46 +839,40 @@ def _build_war_embed():
         arty = len(s.get("artillery", {}).get(turn, {}).get(key, []))
         fort = f.get("fortifications", {})
         supply_pts = f.get("supply_points", 0)
-        fort_line = (
-            f"🛡️戰壕{fort.get('trench',0)} 🏥醫療{fort.get('medical',0)} "
-            f"🔫機槍{fort.get('mg_nest',0)} 💥野砲{fort.get('field_gun',0)} 💣迫砲{fort.get('mortar',0)}"
-        )
         # 戰爭巨獸狀態
         wb = f.get("war_beast")
         if wb and not wb.get("destroyed"):
             beast_info = _WAR_BEASTS.get(wb.get("type", ""), {})
-            beast_line = f"{beast_info.get('emoji','🦾')}{beast_info.get('name','巨獸')} HP:{wb.get('hp',0)}/{WAR_BEAST_HP}"
+            beast_line = f"{beast_info.get('emoji','🦾')} {beast_info.get('name','巨獸')}　HP {wb.get('hp',0)}/{WAR_BEAST_HP}"
         elif f.get("war_beast_destroyed"):
             beast_line = "💀 巨獸已被摧毀"
         else:
-            beast_line = "🦾 尚未部署"
+            beast_line = "尚未部署"
         # 戰略資源
         res = f.get("resources", {})
         bullets = res.get("bullets", 0)
         shells = res.get("shells", 0)
         iodine = res.get("iodine", 0)
-        # 格式化數字（萬/百萬）
-        def _fmt_res(val, unit):
-            if unit == "萬枚":
-                if val >= 10000:
-                    return f"{val/10000:.0f}億枚"
-                return f"{val}萬枚"
-            elif unit == "萬發":
-                if val >= 10000:
-                    return f"{val/10000:.0f}億發"
-                return f"{val}萬發"
-            elif unit == "公升":
-                return f"{val}L"
-            return str(val)
-        res_line = f"🔫子彈{_fmt_res(bullets,'萬枚')} 💥砲彈{_fmt_res(shells,'萬發')} 🏥碘酒{_fmt_res(iodine,'公升')}"
+        bullets_s = f"{bullets/10000:.0f}億枚" if bullets >= 10000 else f"{bullets}萬枚"
+        shells_s = f"{shells/10000:.0f}億發" if shells >= 10000 else f"{shells}萬發"
+        iodine_s = f"{iodine}L"
         return (
             f"{f['flag']} **{f['name']}**{defeated}\n"
-            f"```\n推進 [{bar}] {prog}%\n士氣 ❤️ {morale}  補給 📦 {supplies}  補給點數 ⚡{supply_pts}\n"
-            f"軍官 {n_off}/{OFFICERS_PER_SIDE} | 小隊長 {n_sl}/{SQUAD_LEADERS_PER_SIDE} | 士兵 {n_sol}\n"
-            f"本回合砲擊/空襲：{arty}/{MAX_ARTILLERY_PER_TURN}\n"
-            f"陣地：{fort_line}\n"
-            f"資源：{res_line}\n"
-            f"戰爭巨獸：{beast_line}```"
+            f"`{bar}` **{prog}%**\n"
+            f"\n"
+            f"❤️ 士氣 **{morale}**　📦 補給 **{supplies}**　⚡ 點數 **{supply_pts}**\n"
+            f"👥 軍官 {n_off}/{OFFICERS_PER_SIDE}　小隊長 {n_sl}/{SQUAD_LEADERS_PER_SIDE}　士兵 {n_sol}\n"
+            f"💥 本回合支援 {arty}/{MAX_ARTILLERY_PER_TURN}\n"
+            f"\n"
+            f"**🏗️ 陣地**\n"
+            f"🛡️戰壕{fort.get('trench',0)}　🏥醫療{fort.get('medical',0)}　🔫機槍{fort.get('mg_nest',0)}　💥野砲{fort.get('field_gun',0)}　💣迫砲{fort.get('mortar',0)}\n"
+            f"\n"
+            f"**📦 資源**\n"
+            f"🔫 子彈 {bullets_s}\n"
+            f"💥 砲彈 {shells_s}\n"
+            f"🏥 碘酒 {iodine_s}\n"
+            f"\n"
+            f"🦾 巨獸：{beast_line}"
         )
 
     embed.add_field(name="陣營 A", value=_faction_field("A", "A"), inline=True)
