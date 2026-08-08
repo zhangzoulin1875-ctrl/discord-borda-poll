@@ -2345,8 +2345,8 @@ async def refresh_war_panel():
 
     # ── 2. 跨伺服器轉播面板 ──
     for _gid, _ch_id in get_all_ww1_servers():
-        # 跳過主伺服器（已在上面處理）
-        if str(_gid) == str(channel.id if channel else 0):
+        # 跳過主伺服器（已在上面處理）— 比對 guild ID，不是 channel ID
+        if str(_gid) == str(GUILD_ID):
             continue
         try:
             _guild = bot.get_guild(_gid)

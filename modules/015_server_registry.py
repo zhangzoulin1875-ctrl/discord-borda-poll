@@ -32,35 +32,35 @@ AI_FREE_COMMANDS = {
     "meeting",     # 會議
     "schedule",    # 排程
     "system",      # 系統管理
-    "econ",        # 經濟系統（無 AI 消耗）
+    "economy",     # 經濟系統（無 AI 消耗）
 }
 
 # 娛樂功能 — 跨伺服器開放（會消耗 AI Token 但頻率可控，不像聊天每訊息都燒）
 ENTERTAINMENT_COMMANDS = {
     "quiz",           # AI 搶答
-    "turtle_soup",    # AI 海龜湯
-    "werewolf",       # AI 狼人殺
+    "soup",           # AI 海龜湯（指令群組名=soup）
+    "ww",             # AI 狼人殺（指令群組名=ww）
     "stock",          # AI 股市
     "horse",          # AI 賽馬
-    "galgame",        # AI Galgame
+    "vn",             # AI Galgame（指令群組名=vn）
     "siege",          # 攻城戰
     "cyber_war",      # WW1 賽博一戰（跨伺服器千人戰場）
-    "draw",           # 文生圖
+    "draw",           # 文生圖（頂層指令）
 }
 
 # 僅限 ICEA 主伺服器的功能（AI 聊天 + 行政功能）
 ICEA_ONLY_COMMANDS = {
-    "chat",           # AI 聊天 + 聊天室（高頻 per-message Token 消耗）
-    "chat_room",       # AI 聊天室管理
+    "chat",           # AI 聊天 + 聊天室設定（高頻 per-message Token 消耗）
+    "room",           # AI 聊天室管理（指令群組名=room）
     "proposal",       # AI 提案/入盟分析
     "briefing",       # AI 晨報
-    "nation",         # AI 國家分析
+    "nation",         # AI 會員國管理（MemberNationGroup name=nation）
+    "nation-group",   # AI 微國家評價（NationGroup auto-derived name）
     "analyze",        # AI 性格分析
-    "member_nation",  # AI 會員國分析
     "awareness",      # AI 意識形態分析
     "tally",          # AI 計票
-    "data_library",   # 資料庫管理
-    "storm",          # HOI4（狀態管理複雜，暫不開放）
+    "data",           # 資料庫管理（指令群組名=data）
+    "storm",          # HOI4 鋼鐵風暴（狀態管理複雜，暫不開放）
 }
 
 

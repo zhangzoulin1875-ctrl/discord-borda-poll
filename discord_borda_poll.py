@@ -11471,8 +11471,8 @@ async def on_guild_join(guild):
                 description=(
                     "我是 ICEA 的多功能機器人，提供豐富的娛樂與實用功能。\n\n"
                     "**🎮 娛樂功能（可用！）：**\n"
-                    "• `/quiz` — AI 搶答 • `/turtle_soup` — AI 海龜湯\n"
-                    "• `/werewolf` — AI 狼人殺 • `/galgame` — AI 互動小說\n"
+                    "• `/quiz` — AI 搶答 • `/soup` — AI 海龜湯\n"
+                    "• `/ww` — AI 狼人殺 • `/vn` — AI 互動小說\n"
                     "• `/draw` — AI 文生圖 • `/siege` — 攻城戰\n"
                     "• `/stock` — AI 股市 • `/horse` — 賽馬\n"
                     "• `/cyber_war` — ⚔️ 跨伺服器 WW1 千人大戰場！\n\n"
@@ -11480,7 +11480,7 @@ async def on_guild_join(guild):
                     "• `/poll` — 波達計數法投票\n"
                     "• `/meeting` — 會議管理\n"
                     "• `/schedule` — 排程提醒\n"
-                    "• `/econ` — 經濟系統\n\n"
+                    "• `/economy` — 經濟系統\n\n"
                     "**🔒 僅限 ICEA 主伺服器：**\n"
                     "AI 聊天、提案/入盟分析、晨報、計票等功能。"
                 ),
@@ -12050,12 +12050,12 @@ async def on_message(message):
                     await message.reply(
                         "🔒 AI 聊天僅限 ICEA 主伺服器使用。\n\n"
                         "**✅ 可用功能：**\n"
-                        "🎮 `/quiz` `/turtle_soup` `/werewolf` `/galgame` `/siege`\n"
+                        "🎮 `/quiz` `/soup` `/ww` `/vn` `/siege`\n"
                         "🎨 `/draw` — 文生圖\n"
                         "📈 `/stock` `/horse` — 股市 & 賽馬\n"
                         "⚔️ `/cyber_war` — 跨伺服器 WW1 大戰\n"
                         "📊 `/poll` `/meeting` `/schedule`\n"
-                        "💰 `/econ` — 經濟系統",
+                        "💰 `/economy` — 經濟系統",
                         mention_author=False,
                     )
                 except Exception:
