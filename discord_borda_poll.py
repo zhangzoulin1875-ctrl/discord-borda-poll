@@ -252,6 +252,8 @@ async def keep_alive_server():
     app.router.add_post("/api/guilds/{gid}/global-scan/finish", api_global_scan_finish)
     app.router.add_get("/api/siege-settings", api_get_siege_settings)
     app.router.add_put("/api/siege-settings", api_set_siege_settings)
+    app.router.add_get("/api/server-registry", api_get_server_registry)
+    app.router.add_put("/api/server-registry", api_set_server_registry)
     # Galgame API routes (registered by module 190)
     try:
         for _path, _method, _handler in _galgame_api_routes:
@@ -917,6 +919,61 @@ async def api_set_siege_settings(request):
     if "max_damage" in body:
         _siege_settings["max_damage"] = int(body["max_damage"])
     save_siege_data()
+    return web.json_response({"ok": True})
+
+
+async def api_get_server_registry(request):
+    """取得所有已註冊伺服器清單（含分級 & WW1 設定）。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    uid_str = user.get("user_id", "")
+    if str(uid_str) != str(BOT_OWNER_ID):
+        return web.json_response({"error": "forbidden — bot owner only"}, status=403)
+    servers = []
+    for gid, info in _server_registry.items():
+        servers.append({
+            "guild_id": gid,
+            "name": info.get("name", "Unknown"),
+            "tier": info.get("tier", "guest"),
+            "member_count": info.get("member_count", 0),
+            "ww1_channel_id": info.get("ww1_channel_id"),
+            "ww1_panel_message_id": info.get("ww1_panel_message_id"),
+            "joined_at": info.get("joined_at", ""),
+        })
+    # Sort: owner first, then by member_count desc
+    servers.sort(key=lambda s: (s["tier"] != "owner", -(s["member_count"] or 0)))
+    summary = get_registry_summary()
+    return web.json_response({"servers": servers, "summary": summary})
+
+
+async def api_set_server_registry(request):
+    """更新指定伺服器的分級 / WW1 頻道。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    uid_str = user.get("user_id", "")
+    if str(uid_str) != str(BOT_OWNER_ID):
+        return web.json_response({"error": "forbidden — bot owner only"}, status=403)
+    body = await request.json()
+    gid = str(body.get("guild_id", ""))
+    if not gid or gid not in _server_registry:
+        return web.json_response({"error": "伺服器未註冊"}, status=400)
+    # Tier update
+    if "tier" in body:
+        new_tier = body["tier"]
+        if new_tier in ("owner", "guest"):
+            _server_registry[gid]["tier"] = new_tier
+    # WW1 channel update
+    if "ww1_channel_id" in body:
+        ch_id = body["ww1_channel_id"]
+        if ch_id and str(ch_id).strip():
+            _server_registry[gid]["ww1_channel_id"] = int(str(ch_id).strip())
+        else:
+            _server_registry[gid]["ww1_channel_id"] = None
+            _server_registry[gid]["ww1_panel_message_id"] = None
+    save_server_registry()
+    print(f"📋 Dashboard 更新伺服器 {gid}: tier={_server_registry[gid].get('tier')}, ww1_ch={_server_registry[gid].get('ww1_channel_id')}")
     return web.json_response({"ok": True})
 
 

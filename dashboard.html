@@ -42,6 +42,7 @@
       <div class="nav-tab" data-tab="schedule" onclick="showSchedulePanel()">📅 排程通知</div>
       <div class="nav-tab" data-tab="siege" onclick="showSiegePanel()">⚔️ 攻城戰</div>
       <div class="nav-tab" data-tab="galgame" onclick="showGalgamePanel()">💬 Galgame</div>
+      <div class="nav-tab" data-tab="cross-server" onclick="showCrossServerPanel()">🌍 跨伺服器</div>
       <div class="nav-tab" onclick="window.open('/hoi4', '_blank')">🎮 HOI4</div>
     </div>
   </div>
@@ -1181,7 +1182,7 @@ function showLoading(msg) { document.getElementById('loading-msg').textContent =
 
 function navigate(view) {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view','cross-server-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
   showOnly('main-view');
   if (view === 'polls') { document.getElementById('polls-view').classList.remove('hidden'); setActiveTab('polls'); }
   else if (view === 'detail') { document.getElementById('detail-view').classList.remove('hidden'); setActiveTab('polls'); }
@@ -2622,8 +2623,122 @@ function showScanTab(tab) {
   document.getElementById('scan-tab-' + tab).classList.remove('bg-[#4e5058]');
 }
 
+// ═══ 跨伺服器管理 ═══
+function showCrossServerPanel() {
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view','cross-server-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  document.getElementById('cross-server-view').classList.remove('hidden');
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('[data-tab="cross-server"]').classList.add('active');
+  loadServerRegistry();
+}
+
+async function loadServerRegistry() {
+  const r = await api('/api/server-registry');
+  if (r.error) {
+    console.error('載入伺服器清單失敗', r.error);
+    if (r.error.includes('forbidden')) {
+      document.getElementById('server-registry-table').innerHTML = '<tr><td colspan="6" class="text-center text-red-400 py-4">此功能僅限機器人擁者使用</td></tr>';
+    }
+    return;
+  }
+  const s = r.summary || {};
+  document.getElementById('sr-total').textContent = s.total || 0;
+  document.getElementById('sr-owner').textContent = s.owner || 0;
+  document.getElementById('sr-guest').textContent = s.guest || 0;
+  document.getElementById('sr-ww1').textContent = s.ww1_servers || 0;
+
+  const tbody = document.getElementById('server-registry-table');
+  if (!r.servers || r.servers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-gray-400 py-4">尚無已註冊伺服器</td></tr>';
+    return;
+  }
+  tbody.innerHTML = r.servers.map(srv => {
+    const isOwner = srv.tier === 'owner';
+    const tierSelect = isOwner
+      ? '<span class="px-2 py-1 rounded text-xs bg-[#5865f2] text-white">主伺服器</span>'
+      : '<select id="sr-tier-' + srv.guild_id + '" class="bg-[#1e1f22] text-white rounded px-2 py-1 text-xs"><option value="guest"' + (srv.tier==='guest'?' selected':'') + '>Guest</option><option value="owner"' + (srv.tier==='owner'?' selected':'') + '>Owner</option></select>';
+    const ww1Ch = srv.ww1_channel_id || '';
+    return '<tr class="border-t border-[#3a3c43]">' +
+      '<td class="py-2 px-3 text-sm text-white">' + (srv.name || 'Unknown') + '</td>' +
+      '<td class="py-2 px-3 text-xs text-gray-400">' + srv.guild_id + '</td>' +
+      '<td class="py-2 px-3 text-sm text-gray-300">' + (srv.member_count || 0) + '</td>' +
+      '<td class="py-2 px-3">' + tierSelect + '</td>' +
+      '<td class="py-2 px-3"><input id="sr-ww1ch-' + srv.guild_id + '" type="text" value="' + ww1Ch + '" class="w-full bg-[#1e1f22] text-white rounded px-2 py-1 text-xs" placeholder="頻道 ID"' + (isOwner ? ' disabled' : '') + '></td>' +
+      '<td class="py-2 px-3 text-center">' + (isOwner ? '' : '<button onclick="saveServerEntry(\'' + srv.guild_id + '\')" class="bg-[#5865f2] hover:bg-[#4752c4] px-3 py-1 rounded text-xs text-white">儲存</button>') + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+async function saveServerEntry(gid) {
+  const tierEl = document.getElementById('sr-tier-' + gid);
+  const ww1El = document.getElementById('sr-ww1ch-' + gid);
+  const data = {
+    guild_id: gid,
+    tier: tierEl ? tierEl.value : 'guest',
+    ww1_channel_id: ww1El ? ww1El.value.trim() : '',
+  };
+  const r = await api('/api/server-registry', 'PUT', data);
+  if (r.ok) { alert('已更新伺服器設定'); loadServerRegistry(); }
+  else { alert('更新失敗：' + (r.error || '未知錯誤')); }
+}
+
 init();
 </script>
+
+<!-- ═══ 跨伺服器管理 ═══ -->
+<div id="cross-server-view" class="hidden fade-in">
+  <div class="flex items-center gap-3 mb-6">
+    <button onclick="goHome()" class="text-gray-400 hover:text-white text-sm">← 返回</button>
+    <h2 class="text-xl font-bold">🌍 跨伺服器管理</h2>
+  </div>
+
+  <div class="grid grid-cols-4 gap-3 mb-6">
+    <div class="bg-[#2b2d31] rounded-xl p-4 text-center">
+      <p class="text-2xl font-bold text-white" id="sr-total">—</p>
+      <p class="text-xs text-gray-400 mt-1">已註冊伺服器</p>
+    </div>
+    <div class="bg-[#2b2d31] rounded-xl p-4 text-center">
+      <p class="text-2xl font-bold text-[#5865f2]" id="sr-owner">—</p>
+      <p class="text-xs text-gray-400 mt-1">主伺服器</p>
+    </div>
+    <div class="bg-[#2b2d31] rounded-xl p-4 text-center">
+      <p class="text-2xl font-bold text-gray-300" id="sr-guest">—</p>
+      <p class="text-xs text-gray-400 mt-1">Guest 伺服器</p>
+    </div>
+    <div class="bg-[#2b2d31] rounded-xl p-4 text-center">
+      <p class="text-2xl font-bold text-red-400" id="sr-ww1">—</p>
+      <p class="text-xs text-gray-400 mt-1">WW1 參戰伺服器</p>
+    </div>
+  </div>
+
+  <div class="bg-[#2b2d31] rounded-xl p-4 mb-4">
+    <h3 class="font-semibold text-sm mb-2">功能分級說明</h3>
+    <div class="text-xs text-gray-400 space-y-1">
+      <p>所有伺服器可用：投票、會議、排程、經濟、搶答、海龜湯、狼人殺、股市、賽馬、Galgame、攻城戰、文生圖、WW1</p>
+      <p>僅主伺服器：AI 聊天、聊天室、提案/入盟、晨報、計票、會員國、分析、意識形態、資料庫、HOI4</p>
+      <p>WW1 跨伺服器：在 Guest 伺服器設定 WW1 頻道 ID 即可參與跨伺服器世界大戰</p>
+    </div>
+  </div>
+
+  <div class="bg-[#2b2d31] rounded-xl p-5">
+    <h3 class="font-semibold mb-3">已註冊伺服器</h3>
+    <table class="w-full">
+      <thead>
+        <tr class="text-xs text-gray-400 border-b border-[#3a3c43]">
+          <th class="py-2 px-3 text-left">伺服器名稱</th>
+          <th class="py-2 px-3 text-left">ID</th>
+          <th class="py-2 px-3 text-left">人數</th>
+          <th class="py-2 px-3 text-left">分級</th>
+          <th class="py-2 px-3 text-left">WW1 頻道</th>
+          <th class="py-2 px-3 text-center">操作</th>
+        </tr>
+      </thead>
+      <tbody id="server-registry-table">
+        <tr><td colspan="6" class="text-center text-gray-400 py-4">載入中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
 
 </body>
 </html>
