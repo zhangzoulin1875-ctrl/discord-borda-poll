@@ -14597,8 +14597,15 @@ def main():
         discord.utils.setup_logging()  # preserve discord.py's default logging (normally set up by bot.run)
         loop = asyncio.get_event_loop()
         _install_shutdown_handler(loop)
-        async with bot:
-            await bot.start(token)
+        if sub_bot is not None and SUB_BOT_TOKEN_ENV:
+            print("[INFO] Starting main bot + sub bot...")
+            await asyncio.gather(
+                bot.start(token),
+                sub_bot.start(SUB_BOT_TOKEN_ENV),
+            )
+        else:
+            async with bot:
+                await bot.start(token)
 
     try:
         asyncio.run(runner())
@@ -14624,6 +14631,70 @@ if _os_mod.path.isdir(_modules_dir):
             print(f"  ✅ Loaded module: {_fname}")
 print(f"📦 Loaded {_loaded_mods} feature modules from modules/")
 
+
+# ================================================================
+# Sub-bot (Entertainment Bot) -- separate Discord bot for other servers
+# Only registers entertainment + AI-free commands. Shares all state
+# (economy, WW1, AI API, data) with the main bot since same process.
+# ================================================================
+sub_bot = None
+SUB_BOT_TOKEN_ENV = os.getenv("SUB_BOT_TOKEN")
+
+# Helper: cross-bot channel/guild lookup
+def get_channel_any(ch_id):
+    """Look up a channel across both bots (main + sub)."""
+    ch = bot.get_channel(ch_id)
+    if ch is None and sub_bot is not None:
+        ch = sub_bot.get_channel(ch_id)
+    return ch
+
+def get_guild_any(gid):
+    """Look up a guild across both bots (main + sub)."""
+    g = bot.get_guild(gid)
+    if g is None and sub_bot is not None:
+        g = sub_bot.get_guild(gid)
+    return g
+
+if SUB_BOT_TOKEN_ENV:
+    _sub_intents = discord.Intents.default()
+    _sub_intents.message_content = True
+    _sub_intents.members = True
+    sub_bot = commands.Bot(command_prefix="!", intents=_sub_intents)
+
+    async def _sub_setup_hook():
+        _sub_groups = [
+            PollGroup(), MeetingGroup(), ScheduleGroup(), SystemGroup(), EconomyGroup(),
+            QuizGroup(), TurtleSoupGroup(), WerewolfGroup(), StockGroup(),
+            HorseRacingGroup(), SiegeGroup(), CyberWarGroup(), GalgameGroup(),
+        ]
+        for grp in _sub_groups:
+            try:
+                sub_bot.tree.add_command(grp)
+            except Exception as e:
+                print(f"[WARN] Sub-bot cannot register group {type(grp).__name__}: {e}")
+        try:
+            sub_bot.tree.add_command(draw_command)
+        except Exception as e:
+            print(f"[WARN] Sub-bot cannot register /draw: {e}")
+        print(f"[INFO] Sub-bot registered {len(_sub_groups)} command groups + /draw")
+
+    async def _sub_tree_interaction_check(interaction: discord.Interaction) -> bool:
+        if interaction.user and is_blacklisted(interaction.user.id):
+            try:
+                await interaction.response.send_message(
+                    "\U0001f6ab You are blacklisted.", ephemeral=True,
+                )
+            except Exception:
+                pass
+            return False
+        return True
+
+    sub_bot.setup_hook = _sub_setup_hook
+    sub_bot.tree.interaction_check = _sub_tree_interaction_check
+    print("[INFO] Sub-bot (Entertainment) initialized, waiting for connection...")
+else:
+    print("[INFO] SUB_BOT_TOKEN not set, skipping sub-bot initialization.")
+
 # Register setup_hook so discord.py calls it before connecting
 # Register persistent views for AI Chat Room buttons (survives bot restarts)
 bot.add_view(AIChatRoomPanelView())
@@ -14639,6 +14710,69 @@ if os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off"):
     bot.add_view(HOI4PanelView())  # HOI4 戰略指揮部面板按鈕持久化
 
 bot.setup_hook = setup_hook
+
+# ================================================================
+# Sub-bot event handlers (only if sub_bot exists)
+# ================================================================
+if sub_bot is not None:
+    for _view_cls in [TurtleSoupStartView, WerewolfSignupView, EconomyPanelButtonsView,
+                      GalgamePanelView, HorseBettingView, _WerewolfResumeView, SiegePanelView]:
+        try:
+            sub_bot.add_view(_view_cls())
+        except Exception as e:
+            print(f"[WARN] Sub-bot persistent view {type(_view_cls()).__name__} failed: {e}")
+
+    @sub_bot.event
+    async def on_ready():
+        """Sub-bot on_ready: sync commands and register guilds."""
+        if not getattr(on_ready, "_sub_done", False):
+            on_ready._sub_done = True
+            print(f"[OK] Sub-bot online: {sub_bot.user}")
+            try:
+                synced = await sub_bot.tree.sync()
+                print(f"[OK] Sub-bot synced {len(synced)} slash commands")
+            except Exception as e:
+                print(f"[ERR] Sub-bot sync failed: {e}")
+            for g in sub_bot.guilds:
+                _is_owner = (str(g.id) == ICEA_GUILD_ID)
+                register_server(g.id, g.name, is_owner_server=_is_owner)
+
+    @sub_bot.event
+    async def on_guild_join(guild):
+        _is_owner = (str(guild.id) == ICEA_GUILD_ID)
+        register_server(guild.id, guild.name, is_owner_server=_is_owner)
+        print(f"[INFO] Sub-bot joined guild: {guild.name} ({guild.id})")
+        try:
+            ch = guild.system_channel or next(
+                (c for c in guild.text_channels
+                 if c.permissions_for(guild.me).send_messages), None)
+            if ch:
+                await ch.send(
+                    "\U0001f389 **Entertainment Bot has joined!**\n\n"
+                    "Available features:\n"
+                    "\U0001f3ad Quiz \u2022 \U0001f422 Turtle Soup \u2022 \U0001f43a Werewolf \u2022 \U0001f4c8 Stock \u2022 \U0001f3c7 Horse Racing\n"
+                    "\U0001f3f0 Siege \u2022 \u2694\ufe0f WW1 \u2022 \U0001f3ae Galgame \u2022 \U0001f3a8 Text-to-Image\n"
+                    "\U0001f4ca Poll \u2022 \U0001f4c5 Meeting/Schedule \u2022 \U0001f4b0 Economy\n\n"
+                    "Type `/` to get started!"
+                )
+        except Exception:
+            pass
+
+    @sub_bot.event
+    async def on_guild_remove(guild):
+        unregister_server(guild.id)
+        print(f"[INFO] Sub-bot left guild: {guild.name} ({guild.id})")
+
+    @sub_bot.event
+    async def on_message(message):
+        """Sub-bot on_message: only handle turtle soup."""
+        if message.author.bot or not message.guild:
+            return
+        try:
+            handled = await _handle_turtle_soup_message(message)
+        except Exception as e:
+            print(f"[WARN] Sub-bot turtle soup on_message error: {e}")
+
 
 
 if __name__ == "__main__":
