@@ -1045,11 +1045,29 @@ class GalgameGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="vn", description="🌸 互動小說 — 角色花園")
 
-    @app_commands.command(name="start", description="開啟互動小說面板")
+    @app_commands.command(name="start", description="開啟互動小說面板（僅自己看得到，建議用 /vn set_channel 設定固定看板）")
     async def vn_start(self, interaction: discord.Interaction):
         embed = _build_galgame_embed()
         view = GalgamePanelView()
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @app_commands.command(name="set_channel", description="設定互動小說固定看板頻道（僅擁有者）")
+    @app_commands.describe(channel="要固定顯示看板的頻道")
+    async def vn_set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if str(interaction.user.id) != str(BOT_OWNER_ID):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+
+        galgame_settings["channel_id"] = channel.id
+        galgame_settings["message_id"] = None  # 強制重新發送（清除舊頻道殘留的關聯）
+        save_galgame()
+
+        await interaction.response.send_message(f"⏳ 正在於 {channel.mention} 設定互動小說看板...", ephemeral=True)
+        new_msg = await setup_galgame_panel()
+        if new_msg:
+            await interaction.followup.send(f"✅ 互動小說看板已設定至 {channel.mention}，將即時更新。", ephemeral=True)
+        else:
+            await interaction.followup.send(f"⚠️ 看板設定已儲存，但發送失敗，請確認機器人在 {channel.mention} 有發言權限。", ephemeral=True)
 
     @app_commands.command(name="admin", description="互動小說管理（僅擁有者）")
     async def vn_admin(self, interaction: discord.Interaction):
