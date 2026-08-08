@@ -11108,6 +11108,14 @@ async def on_ready():
         # (Previously skipped if endpoint was in _tools_unsupported_apis, but that meant switching models never re-tested tool support.)
         asyncio.ensure_future(_probe_tools_support(chat_ai_settings, _norm))
 
+    # ── 自動註冊所有伺服器 ──
+    for guild in bot.guilds:
+        _is_owner = (str(guild.id) == ICEA_GUILD_ID)
+        register_server(guild.id, guild.name, is_owner_server=_is_owner)
+        _server_registry[str(guild.id)]["member_count"] = guild.member_count or 0
+    save_server_registry()
+    print(f"📋 伺服器註冊：{len(_server_registry)} 個伺服器（{sum(1 for s in _server_registry.values() if s.get('tier')=='owner')} owner, {sum(1 for s in _server_registry.values() if s.get('tier')=='guest')} guest）")
+
     # ── 啟動時檢查所有伺服器的暱稱 ──
     for guild in bot.guilds:
         await _check_and_fix_nickname(guild)
@@ -11260,11 +11268,36 @@ async def setup_hook():
             except Exception as e:
                 print("⚠️ 靜默例外:", e)
             return False
+
+        # ── 伺服器分級功能檢查 ──
+        # Owner 的 DM / 所有指令一律放行
+        if interaction.user.id == BOT_OWNER_ID:
+            return True
+        # 非主伺服器：檢查指令群組是否允許
+        if interaction.guild and str(interaction.guild.id) != ICEA_GUILD_ID:
+            _cmd = interaction.command
+            _group_name = ""
+            if _cmd and hasattr(_cmd, 'parent') and _cmd.parent:
+                _group_name = _cmd.parent.name or ""
+            elif _cmd and hasattr(_cmd, 'name'):
+                _group_name = _cmd.name or ""
+            if _group_name:
+                _allowed, _reason = check_command_access(interaction.guild.id, _group_name)
+                if not _allowed:
+                    try:
+                        await interaction.response.send_message(
+                            f"🔒 {_reason}",
+                            ephemeral=True,
+                        )
+                    except Exception:
+                        pass
+                    return False
         return True
 
     bot.tree.interaction_check = _tree_interaction_check
     # Load from Google Drive first (if configured), then from local
     await load_from_drive()
+    load_server_registry()
     load_knowledge_base()
     load_corrections()
     load_blacklist()
@@ -11403,6 +11436,48 @@ async def on_thread_create(thread):
 
 
 @bot.event
+@bot.event
+async def on_guild_join(guild):
+    """機器人被加入新伺服器時自動註冊。"""
+    _is_owner = (str(guild.id) == ICEA_GUILD_ID)
+    register_server(guild.id, guild.name, is_owner_server=_is_owner)
+    if str(guild.id) in _server_registry:
+        _server_registry[str(guild.id)]["member_count"] = guild.member_count or 0
+    save_server_registry()
+    print(f"📋 機器人已加入伺服器：{guild.name} ({guild.id}) — tier={'owner' if _is_owner else 'guest'}")
+
+    # 在系統頻道發歡迎訊息
+    try:
+        sys_ch = guild.system_channel
+        if sys_ch:
+            embed = discord.Embed(
+                title="🌍 歡迎安裝 ICEA 機器人！",
+                description=(
+                    "我是 ICEA 的多功能機器人，提供投票、會議、排程等功能。\n\n"
+                    "**免費功能（不需 AI）：**\n"
+                    "• `/poll` — 波達計數法投票\n"
+                    "• `/meeting` — 會議管理\n"
+                    "• `/schedule` — 排程提醒\n\n"
+                    "**⚔️ 賽博一戰（WW1）**\n"
+                    "可跨伺服器參與，所有伺服器的玩家在同一個戰場作戰！\n"
+                    "使用 `/cyber_war channel` 設定戰況頻道即可加入。\n\n"
+                    "**🔒 AI 功能**\n"
+                    "AI 聊天、搶答、海龜湯等功能僅限 ICEA 主伺服器使用。\n"
+                    "如需開放，請聯繫機器人管理員。"
+                ),
+                color=discord.Color.blue(),
+            )
+            await sys_ch.send(embed=embed)
+    except Exception as e:
+        print(f"⚠️ 歡迎訊息發送失敗：{e}")
+
+
+@bot.event
+async def on_guild_remove(guild):
+    """機器人被移除伺服器時標記離開。"""
+    unregister_server(guild.id)
+
+
 async def on_message_edit(before: discord.Message, after: discord.Message):
     """Detect edits to application posts and re-check them."""
     # Only care about non-bot messages in application channels
@@ -11923,10 +11998,15 @@ async def on_message(message):
     if message.content.startswith("/"):
         return
 
+    # ── 伺服器分級：非主伺服器封鎖所有 AI 功能（防止其他伺服器消耗 Token）──
+    _is_guest_server = (message.guild and str(message.guild.id) != ICEA_GUILD_ID
+                        and message.author.id != BOT_OWNER_ID
+                        and not is_ai_enabled(message.guild.id))
+
     # ── AI 網警：非阻塞式自動審查 ──
     # Fire-and-forget — 不等待結果，不影響正常訊息流程。
     # 只有啟用時才建立 task，否則零開銷。
-    if chat_ai_settings.get("ai_mod_enabled") and message.guild:
+    if chat_ai_settings.get("ai_mod_enabled") and message.guild and not _is_guest_server:
         asyncio.create_task(_ai_moderate_message(message))
 
     # Debug: log all human messages
@@ -11935,11 +12015,32 @@ async def on_message(message):
     print(f"📩 on_message: #{message.channel} | {message.author.display_name}: {content_preview}")
     print(f"   enabled={chat_ai_settings.get('enabled')}, key={'✅' if chat_ai_settings.get('api_key') else '❌'}, mentioned={is_mentioned}, filter={chat_ai_settings.get('filter_strength', 'mention')}")
 
+    # ── 非主伺服器：封鎖所有 AI 回覆路徑 ──
+    if _is_guest_server:
+        # AI 聊天室 — 告知不開放
+        if is_ai_chat_room(message.channel.id):
+            return  # AI 聊天室在 guest 伺服器不會存在，但安全起見攔截
+        # 被提及時告知
+        if bot.user in message.mentions and not message.content.startswith("/"):
+            try:
+                await message.reply(
+                    "🔒 AI 功能僅限 ICEA 主伺服器使用。\n"
+                    "免費功能（投票 `/poll`、會議 `/meeting`、排程 `/schedule`）可正常使用。\n"
+                    "⚔️ WW1 賽博一戰可跨伺服器參與，使用 `/cyber_war channel` 設定頻道即可加入！",
+                    mention_author=False,
+                )
+            except Exception:
+                pass
+            return
+        # 不攔截非 AI 的訊息處理（投票、會議等）
+        # 但也不進入後面的 AI 回覆流程
+        # ── 直接跳到非 AI 的訊息處理 ──
+
     # ── 專屬 AI 聊天室處理（在所有 AI 聊天過濾之前）──
     # If this message is in an AI chat room channel, bypass ALL the normal
     # filters (mention, cooldown, whitelist, worthiness, abuse detection)
     # and go straight to AI reply with full channel history.
-    if is_ai_chat_room(message.channel.id):
+    if not _is_guest_server and is_ai_chat_room(message.channel.id):
         print(f"🤖 AI 聊天室訊息：#{message.channel.name} | {message.author.display_name}")
         # Only the room owner can chat here (others can't see the channel anyway,
         # but double-check in case permissions were misconfigured)
@@ -12224,6 +12325,8 @@ async def on_message(message):
                 return
 
     # Generate reply
+    if _is_guest_server:
+        return  # 非主伺服器：不消耗 AI Token，靜默結束（已在前面回覆過提示）
     _user_generating.add(uid_str)
     try:
         # Wait for a concurrency slot (max 5 simultaneous AI calls). This makes
