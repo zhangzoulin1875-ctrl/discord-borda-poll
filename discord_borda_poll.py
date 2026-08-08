@@ -252,6 +252,20 @@ async def keep_alive_server():
     app.router.add_post("/api/guilds/{gid}/global-scan/finish", api_global_scan_finish)
     app.router.add_get("/api/siege-settings", api_get_siege_settings)
     app.router.add_put("/api/siege-settings", api_set_siege_settings)
+    # Galgame API routes (registered by module 190)
+    try:
+        for _path, _method, _handler in _galgame_api_routes:
+            if _method == "GET":
+                app.router.add_get(_path, _handler)
+            elif _method == "PUT":
+                app.router.add_put(_path, _handler)
+            elif _method == "POST":
+                app.router.add_post(_path, _handler)
+            elif _method == "DELETE":
+                app.router.add_delete(_path, _handler)
+        print("💬 Galgame API routes registered")
+    except Exception as e:
+        print(f"⚠️ Galgame API route registration failed: {e}")
     # HOI4 game API routes (registered by module 170, skip when HOI4_ENABLED=false)
     if os.getenv("HOI4_ENABLED", "true").lower() in ("false", "0", "no", "off"):
         print("🚫 HOI4 已停用，API 路由不註冊")
@@ -11321,6 +11335,7 @@ async def setup_hook():
     asyncio.ensure_future(community_chronicle_loop())
     asyncio.ensure_future(token_log_loop())
     asyncio.ensure_future(economy_panel_loop())  # 經濟系統看板
+    asyncio.ensure_future(galgame_panel_loop())  # 互動小說看板
     if os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off"):
         asyncio.ensure_future(hoi4_panel_loop())  # 鋼鐵風暴 戰略遊戲面板（可由 HOI4_ENABLED=false 關閉）
     else:
@@ -14363,6 +14378,7 @@ bot.add_view(AIChatRoomCloseView())
 bot.add_view(TurtleSoupStartView())  # 只有開始按鈕是持久化的
 bot.add_view(WerewolfSignupView())  # 狼人殺報名按鈕持久化
 bot.add_view(EconomyPanelButtonsView())  # 經濟看板下方的股票/公司管理快捷按鈕持久化
+bot.add_view(GalgamePanelView())  # Galgame 互動小說面板按鈕持久化
 bot.add_view(HorseBettingView("persistent"))  # 賽馬下注按鈕持久化（重啟後復原用）
 bot.add_view(_WerewolfResumeView())  # 狼人殺重啟恢復按鈕持久化
 bot.add_view(SiegePanelView())  # 攻城戰按鈕持久化
