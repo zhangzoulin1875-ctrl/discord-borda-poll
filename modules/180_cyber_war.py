@@ -793,12 +793,22 @@ def _build_war_embed():
             f"🛡️戰壕{fort.get('trench',0)} 🏥醫療{fort.get('medical',0)} "
             f"🔫機槍{fort.get('mg_nest',0)} 💥野砲{fort.get('field_gun',0)} 💣迫砲{fort.get('mortar',0)}"
         )
+        # 戰爭巨獸狀態
+        wb = f.get("war_beast")
+        if wb and not wb.get("destroyed"):
+            beast_info = _WAR_BEASTS.get(wb.get("type", ""), {})
+            beast_line = f"{beast_info.get('emoji','🦾')}{beast_info.get('name','巨獸')} HP:{wb.get('hp',0)}/{WAR_BEAST_HP}"
+        elif f.get("war_beast_destroyed"):
+            beast_line = "💀 巨獸已被摧毀"
+        else:
+            beast_line = "🦾 尚未部署"
         return (
             f"{f['flag']} **{f['name']}**{defeated}\n"
             f"```\n推進 [{bar}] {prog}%\n士氣 ❤️ {morale}  補給 📦 {supplies}  補給點數 ⚡{supply_pts}\n"
             f"軍官 {n_off}/{OFFICERS_PER_SIDE} | 小隊長 {n_sl}/{SQUAD_LEADERS_PER_SIDE} | 士兵 {n_sol}\n"
             f"本回合砲擊/空襲：{arty}/{MAX_ARTILLERY_PER_TURN}\n"
-            f"陣地：{fort_line}```"
+            f"陣地：{fort_line}\n"
+            f"戰爭巨獸：{beast_line}```"
         )
 
     embed.add_field(name="陣營 A", value=_faction_field("A", "A"), inline=True)
@@ -1081,7 +1091,7 @@ class CyberWarPanelView(discord.ui.View):
             f"{beast_emoji} **{beast_name}** — HP: {wb_hp}/{WAR_BEAST_HP}\n"
             f"📋 {beast_desc}\n"
         )
-        await interaction.response.send_modal(CyberWarBeastModal(uid, fkey, turn, header))
+        await interaction.response.send_modal(CyberWarBeastModal(uid, fkey, turn, header, use_edit=False))
 
     @discord.ui.button(label="陣地升級", style=discord.ButtonStyle.secondary, emoji="🏗️", custom_id="cw_fortify_btn")
     async def fortify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1627,12 +1637,18 @@ class _CWTestView(discord.ui.View):
 
 # ── 戰爭巨獸 Modal ──
 class CyberWarBeastModal(discord.ui.Modal):
-    def __init__(self, uid, fkey, turn, header):
+    def __init__(self, uid, fkey, turn, header, use_edit=False):
         super().__init__(title="🦾 戰爭巨獸指令")
         self._uid = uid
         self._fkey = fkey
         self._turn = turn
         self._header = header
+        # use_edit=True 只有在此 Modal 是從「覆蓋指令」ephemeral訊息上的按鈕開啟時才使用，
+        # 因為那種情況 edit_message() 編輯的是ephemeral覆蓋確認訊息本身，安全。
+        # 若是直接從公開戰局面板的「戰爭巨獸」按鈕開啟（use_edit=False，預設），
+        # 絕對不能用 edit_message()——那會把私人指令內容直接編輯貼到公開面板上，
+        # 讓另一方看到本方軍官下達的指令內容。一律改用 send_message(ephemeral=True)。
+        self._use_edit = use_edit
         self.action = discord.ui.TextInput(
             label="巨獸行動指令",
             placeholder="例：飛艇升空轟炸敵方補給線，摧毀其後方糧倉",
@@ -1646,7 +1662,11 @@ class CyberWarBeastModal(discord.ui.Modal):
         fac = _cyber_war_state["factions"].get(self._fkey, {})
         wb = fac.get("war_beast")
         if not wb or wb.get("destroyed"):
-            await interaction.response.edit_message(content="❌ 巨獸已不存在或被摧毀。", view=None)
+            fail_msg = "❌ 巨獸已不存在或被摧毀。"
+            if self._use_edit:
+                await interaction.response.edit_message(content=fail_msg, view=None)
+            else:
+                await interaction.response.send_message(fail_msg, ephemeral=True)
             return
         # 記錄軍官名
         officer_name = interaction.user.display_name
@@ -1654,11 +1674,15 @@ class CyberWarBeastModal(discord.ui.Modal):
         wb["ordered_by"] = self._uid
         save_cyber_war()
         beast_name = _WAR_BEASTS.get(wb["type"], {}).get("name", "?")
-        await interaction.response.edit_message(
-            content=f"✅ 已下達 {beast_name} 指令：\n「{self.action.value[:200]}」",
-            view=None,
-        )
-        await refresh_war_panel()
+        confirm_msg = f"✅ 已下達 {beast_name} 指令：\n「{self.action.value[:200]}」\n\n（此訊息僅你可見，敵方看不到此指令內容）"
+        if self._use_edit:
+            await interaction.response.edit_message(content=confirm_msg, view=None)
+        else:
+            await interaction.response.send_message(confirm_msg, ephemeral=True)
+        try:
+            await refresh_war_panel()
+        except Exception as e:
+            print(f"⚠️ 賽博一戰巨獸指令後刷新面板失敗：{e}")
 
 # ── 戰爭巨獸覆蓋確認 ──
 class _WarBeastOverrideView(discord.ui.View):
@@ -1675,7 +1699,7 @@ class _WarBeastOverrideView(discord.ui.View):
     @discord.ui.button(label="覆蓋指令", style=discord.ButtonStyle.danger, emoji="✅", custom_id="cw_wb_override_yes")
     async def override_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(
-            CyberWarBeastModal(self._uid, self._fkey, self._turn, f"覆蓋 {self._beast_emoji} {self._beast_name} 指令")
+            CyberWarBeastModal(self._uid, self._fkey, self._turn, f"覆蓋 {self._beast_emoji} {self._beast_name} 指令", use_edit=True)
         )
 
     @discord.ui.button(label="保留原指令", style=discord.ButtonStyle.secondary, emoji="❌", custom_id="cw_wb_override_no")
