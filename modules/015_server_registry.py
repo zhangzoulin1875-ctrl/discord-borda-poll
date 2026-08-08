@@ -5,13 +5,13 @@
 
 Tier 分級：
   - owner:   ICEA 主伺服器（全部功能，Owner 承擔 Token 費用）
-  - premium: 白名單伺服器（可使用指定 AI 功能）
-  - guest:   預設等級（只可用無 AI 消耗的功能）
+  - premium: 白名單伺服器（可使用指定功能）
+  - guest:   預設等級（娛樂 + 基本功能）
 
 功能分類：
-  - ai_free:    不消耗 AI Token 的功能（投票、會議、基本經濟、排程）
-  - ai_cost:    會消耗 AI Token 的功能（聊天、搶答、海龜湯、狼人殺、文生圖、股市、賽馬、Galgame、提案/入盟 AI）
-  - ww1:       WW1 賽博一戰（AI 裁判是 per-turn 而非 per-player，成本不隨人數增長）
+  - ai_free:        不消耗 AI Token 的功能（投票、會議、排程、經濟）
+  - entertainment:  娛樂功能 — 跨伺服器開放（搶答、海龜湯、狼人殺、文生圖、股市、賽馬、Galgame、攻城戰、WW1）
+  - icea_only:      僅限 ICEA 主伺服器 — AI 聊天、行政功能（提案/入盟、晨報、國家分析、性格分析、計票）
 """
 
 import json
@@ -26,39 +26,42 @@ _server_registry = {}
 _SERVER_REGISTRY_FILE = "data/server_registry.json"
 
 # ── 功能分類 ──
-# 不消耗 AI Token 的指令群組（guest 伺服器可用）
+# 不消耗 AI Token 的指令群組（所有伺服器可用）
 AI_FREE_COMMANDS = {
     "poll",        # 投票
     "meeting",     # 會議
     "schedule",    # 排程
     "system",      # 系統管理
+    "econ",        # 經濟系統（無 AI 消耗）
 }
 
-# 消耗 AI Token 的指令群組（僅 owner / premium 可用）
-AI_COST_COMMANDS = {
-    "chat",           # AI 聊天 + 聊天室
+# 娛樂功能 — 跨伺服器開放（會消耗 AI Token 但頻率可控，不像聊天每訊息都燒）
+ENTERTAINMENT_COMMANDS = {
     "quiz",           # AI 搶答
     "turtle_soup",    # AI 海龜湯
     "werewolf",       # AI 狼人殺
     "stock",          # AI 股市
-    "horse_racing",   # AI 賽馬
+    "horse",          # AI 賽馬
     "galgame",        # AI Galgame
+    "siege",          # 攻城戰
+    "cyber_war",      # WW1 賽博一戰（跨伺服器千人戰場）
+    "draw",           # 文生圖
+}
+
+# 僅限 ICEA 主伺服器的功能（AI 聊天 + 行政功能）
+ICEA_ONLY_COMMANDS = {
+    "chat",           # AI 聊天 + 聊天室（高頻 per-message Token 消耗）
+    "chat_room",       # AI 聊天室管理
     "proposal",       # AI 提案/入盟分析
     "briefing",       # AI 晨報
     "nation",         # AI 國家分析
     "analyze",        # AI 性格分析
     "member_nation",  # AI 會員國分析
     "awareness",      # AI 意識形態分析
-    "tally",          # AI 計票（AI 判讀部分）
-    "siege",          # 攻城戰（含 AI）
-    "data_library",   # 資料庫
+    "tally",          # AI 計票
+    "data_library",   # 資料庫管理
+    "storm",          # HOI4（狀態管理複雜，暫不開放）
 }
-
-# WW1 賽博一戰 — 允許跨伺服器參與（AI 成本是 per-turn 固定值）
-WW1_COMMANDS = {"cyber_war"}
-
-# HOI4 — 暫不開放給 guest 伺服器（狀態管理複雜）
-HOI4_COMMANDS = {"storm"}
 
 
 def _now_iso():
@@ -100,12 +103,10 @@ def register_server(guild_id: int, guild_name: str, owner_id: int = None, is_own
             "ai_enabled": is_owner_server,
             "ww1_channel_id": None,
             "ww1_panel_message_id": None,
-            "premium_features": [],
             "member_count": 0,
         }
         print(f"📋 新伺服器註冊：{guild_name} ({guild_id}) → tier={tier}")
     else:
-        # 更新名稱（伺服器可能改名）
         _server_registry[gid]["name"] = guild_name
         if is_owner_server and _server_registry[gid]["tier"] != "owner":
             _server_registry[gid]["tier"] = "owner"
@@ -132,12 +133,16 @@ def get_server_tier(guild_id) -> str:
     return _server_registry[gid].get("tier", "guest")
 
 
-def is_ai_enabled(guild_id) -> bool:
-    """檢查伺服器是否啟用 AI 功能。"""
-    gid = str(guild_id) if guild_id else None
-    if not gid or gid not in _server_registry:
-        return False
-    return _server_registry[gid].get("ai_enabled", False)
+def is_ai_chat_enabled(guild_id) -> bool:
+    """檢查伺服器是否啟用 AI 聊天功能（僅 owner）。"""
+    tier = get_server_tier(guild_id)
+    return tier == "owner"
+
+
+def is_entertainment_enabled(guild_id) -> bool:
+    """檢查伺服器是否啟用娛樂功能（owner + guest + premium）。"""
+    # 娛樂功能所有伺服器都可使用
+    return True
 
 
 def is_ww1_server(guild_id) -> bool:
@@ -191,7 +196,7 @@ def get_all_ww1_servers() -> list:
     return result
 
 
-def set_server_tier(guild_id: int, tier: str, ai_enabled: bool = None, premium_features: list = None):
+def set_server_tier(guild_id: int, tier: str, ai_enabled: bool = None):
     """設定伺服器等級（僅管理員可透過 dashboard 呼叫）。"""
     gid = str(guild_id)
     if gid not in _server_registry:
@@ -200,9 +205,7 @@ def set_server_tier(guild_id: int, tier: str, ai_enabled: bool = None, premium_f
     if ai_enabled is not None:
         _server_registry[gid]["ai_enabled"] = ai_enabled
     else:
-        _server_registry[gid]["ai_enabled"] = (tier in ("owner", "premium"))
-    if premium_features is not None:
-        _server_registry[gid]["premium_features"] = premium_features
+        _server_registry[gid]["ai_enabled"] = (tier == "owner")
     save_server_registry()
 
 
@@ -212,7 +215,6 @@ def check_command_access(guild_id, command_group: str) -> tuple:
     回傳 (allowed: bool, reason: str)。
     """
     if guild_id is None:
-        # DM context — only owner can use commands (already handled elsewhere)
         return True, ""
 
     tier = get_server_tier(guild_id)
@@ -221,27 +223,21 @@ def check_command_access(guild_id, command_group: str) -> tuple:
     if tier == "owner":
         return True, ""
 
-    # Premium 伺服器：檢查白名單
-    if tier == "premium":
-        gid = str(guild_id)
-        features = _server_registry.get(gid, {}).get("premium_features", [])
-        if command_group in AI_FREE_COMMANDS or command_group in WW1_COMMANDS:
-            return True, ""
-        if command_group in features:
-            return True, ""
-        return False, "此功能未包含在您的伺服器方案中。"
+    # ── 以下為非 owner 伺服器（guest / premium）──
 
-    # Guest 伺服器：只可用無 AI 功能 + WW1
+    # AI-free 功能：所有伺服器可用
     if command_group in AI_FREE_COMMANDS:
         return True, ""
-    if command_group in WW1_COMMANDS:
-        return True, ""
-    if command_group in AI_COST_COMMANDS:
-        return False, "🔒 此 AI 功能僅限 ICEA 主伺服器使用。\n如需開放，請聯繫機器人管理員。"
-    if command_group in HOI4_COMMANDS:
-        return False, "🔒 HOI4 功能暫不開放給其他伺服器。"
 
-    # 預設放行（未知指令群組可能是通用功能）
+    # 娛樂功能：所有伺服器可用（跨伺服器開放）
+    if command_group in ENTERTAINMENT_COMMANDS:
+        return True, ""
+
+    # ICEA 限定功能：僅 owner 伺服器
+    if command_group in ICEA_ONLY_COMMANDS:
+        return False, "🔒 此功能僅限 ICEA 主伺服器使用。\n娛樂功能（搶答、海龜湯、狼人殺、文生圖、股市、賽馬、Galgame、攻城戰、WW1）可正常使用！"
+
+    # 預設放行
     return True, ""
 
 
@@ -258,13 +254,11 @@ def get_registry_summary() -> dict:
             "member_count": info.get("member_count", 0),
             "joined_at": info.get("joined_at", ""),
             "left_at": info.get("left_at"),
-            "premium_features": info.get("premium_features", []),
         })
     return {
         "total": len(servers),
         "active": len([s for s in servers if not s.get("left_at")]),
         "owner": len([s for s in servers if s["tier"] == "owner"]),
-        "premium": len([s for s in servers if s["tier"] == "premium"]),
         "guest": len([s for s in servers if s["tier"] == "guest"]),
         "ww1_servers": len([s for s in servers if s.get("ww1_channel_id") and not s.get("left_at")]),
         "servers": servers,

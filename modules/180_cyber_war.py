@@ -616,13 +616,32 @@ def _time_remaining(end_iso):
 
 # ── 遊戲初始化 ──
 async def _start_new_game(guild):
-    """開始新一局賽博一戰，自動分配陣營、角色、戰場。"""
+    """開始新一局賽博一戰，自動分配陣營、角色、戰場。
+    跨伺服器模式：收集所有已設定 WW1 頻道的伺服器的成員。"""
     global _cyber_war_state
 
-    # 取得所有成員（排除 bot）
+    # ── 收集所有參戰伺服器的成員 ──
+    all_members = []
+    _participating_guilds = []
+
+    # 主伺服器成員
     members = [m for m in guild.members if not m.bot]
-    if len(members) < 4:
-        return False, "伺服器成員太少（至少需要4人），無法開始遊戲。"
+    all_members.extend(members)
+    _participating_guilds.append(guild.name)
+
+    # 跨伺服器：收集其他設定了 WW1 頻道的伺服器成員
+    for _gid, _ch_id in get_all_ww1_servers():
+        if _gid == guild.id:
+            continue  # 跳過主伺服器（已加入）
+        _g = bot.get_guild(_gid)
+        if not _g:
+            continue
+        _g_members = [m for m in _g.members if not m.bot]
+        all_members.extend(_g_members)
+        _participating_guilds.append(_g.name)
+
+    if len(all_members) < 4:
+        return False, f"參戰成員太少（至少需要4人，目前{len(all_members)}人），無法開始遊戲。"
 
     # 隨機選一個歷史正確的戰場+陣營配對
     scenario = _cw_random.choice(_BATTLE_SCENARIOS)
@@ -632,10 +651,10 @@ async def _start_new_game(guild):
     multiplier = _cw_random.randint(50, 75)
 
     # 分配陣營 — 隨機打散，盡量平衡人數
-    _cw_random.shuffle(members)
-    mid = len(members) // 2
-    side_a_members = members[:mid]
-    side_b_members = members[mid:]
+    _cw_random.shuffle(all_members)
+    mid = len(all_members) // 2
+    side_a_members = all_members[:mid]
+    side_b_members = all_members[mid:]
 
     # 活躍度排序：online > idle/dnd > offline
     _status_order = {"online": 0, "idle": 1, "dnd": 2, "offline": 3}
@@ -719,8 +738,9 @@ async def _start_new_game(guild):
         "settlement_done": False,
         "turn_summary": "",
     }
+    _guild_list_str = "、".join(_participating_guilds) if len(_participating_guilds) > 1 else _participating_guilds[0]
     save_cyber_war()
-    return True, f"✅ 第{_cyber_war_state['game_id']}局賽博一戰已開始！\n戰場：{battlefield}\n陣營：{fac_a['flag']} {fac_a['name']} vs {fac_b['flag']} {fac_b['name']}\n參戰人數：{len(all_players)}\n👥 所有人預設為士兵，軍官/小隊長名額（各{OFFICERS_PER_SIDE}/{SQUAD_LEADERS_PER_SIDE}）需自行用「🔄 換身分」按鈕升任\n押金：自由投注（第一回合後鎖定）\n倍率：{multiplier}x\n回合間隔：{TURN_INTERVAL_HOURS}小時（第1回合後鎖定押金，怠職超過{INACTIVITY_DEMOTE_TURNS}回合自動降階）\n結束時間：{_fmt_dt(end.isoformat())}"
+    return True, f"✅ 第{_cyber_war_state['game_id']}局賽博一戰已開始！\n戰場：{battlefield}\n陣營：{fac_a['flag']} {fac_a['name']} vs {fac_b['flag']} {fac_b['name']}\n參戰人數：{len(all_members)}人（來自{len(_participating_guilds)}個伺服器：{_guild_list_str}）\n👥 所有人預設為士兵，軍官/小隊長名額（各{OFFICERS_PER_SIDE}/{SQUAD_LEADERS_PER_SIDE}）需自行用「🔄 換身分」按鈕升任\n押金：自由投注（第一回合後鎖定）\n倍率：{multiplier}x\n回合間隔：{TURN_INTERVAL_HOURS}小時（第1回合後鎖定押金，怠職超過{INACTIVITY_DEMOTE_TURNS}回合自動降階）\n結束時間：{_fmt_dt(end.isoformat())}"
 
 # ── 角色查詢 ──
 def _get_player_role(uid_str: str):
@@ -2304,20 +2324,52 @@ async def setup_war_panel():
     return new_msg
 
 async def refresh_war_panel():
+    """刷新所有伺服器的 WW1 面板（主面板 + 跨伺服器轉播面板）。"""
+    _embed = _build_war_embed()
+    _view = CyberWarPanelView()
+
+    # ── 1. 主面板（ICEA 伺服器）──
     channel = await _get_war_panel_channel()
-    if not channel:
-        return
-    msg_id = _cyber_war_settings.get("panel_message_id")
-    if not msg_id:
-        await setup_war_panel()
-        return
-    try:
-        msg = await channel.fetch_message(int(msg_id))
-        await msg.edit(embed=_build_war_embed(), view=CyberWarPanelView())
-    except discord.NotFound:
-        await setup_war_panel()
-    except Exception as e:
-        print(f"⚠️ 賽博一戰面板更新失敗：{e}")
+    if channel:
+        msg_id = _cyber_war_settings.get("panel_message_id")
+        if not msg_id:
+            await setup_war_panel()
+        else:
+            try:
+                msg = await channel.fetch_message(int(msg_id))
+                await msg.edit(embed=_embed, view=_view)
+            except discord.NotFound:
+                await setup_war_panel()
+            except Exception as e:
+                print(f"⚠️ 賽博一戰主面板更新失敗：{e}")
+
+    # ── 2. 跨伺服器轉播面板 ──
+    for _gid, _ch_id in get_all_ww1_servers():
+        # 跳過主伺服器（已在上面處理）
+        if str(_gid) == str(channel.id if channel else 0):
+            continue
+        try:
+            _guild = bot.get_guild(_gid)
+            if not _guild:
+                continue
+            _ch = _guild.get_channel(_ch_id)
+            if not _ch:
+                continue
+            _panel_msg_id = get_ww1_panel_message(_gid)
+            if _panel_msg_id:
+                try:
+                    _old_msg = await _ch.fetch_message(int(_panel_msg_id))
+                    await _old_msg.edit(embed=_embed, view=_view)
+                except discord.NotFound:
+                    _new_msg = await _ch.send(embed=_embed, view=_view)
+                    set_ww1_panel_message(_gid, _new_msg.id)
+                except Exception as e:
+                    print(f"⚠️ 跨伺服器面板更新失敗 ({_guild.name}): {e}")
+            else:
+                _new_msg = await _ch.send(embed=_embed, view=_view)
+                set_ww1_panel_message(_gid, _new_msg.id)
+        except Exception as e:
+            print(f"⚠️ 跨伺服器 WW1 面板處理失敗 (guild {_gid}): {e}")
 
 # ── 凌晨宵禁常量 ──
 NIGHT_CURFEW_START = 2   # 02:00 開始宵禁
@@ -3375,7 +3427,7 @@ class CyberWarGroup(app_commands.Group):
         else:
             await interaction.followup.send(f"❌ {msg}", ephemeral=True)
 
-    @app_commands.command(name="set_channel", description="設定賽博一戰面板頻道（機器人擁有者限定）")
+    @app_commands.command(name="set_channel", description="設定賽博一戰主面板頻道（機器人擁有者限定）")
     async def cw_set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if str(interaction.user.id) != str(BOT_OWNER_ID):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
@@ -3385,7 +3437,36 @@ class CyberWarGroup(app_commands.Group):
         save_cyber_war()
         if _cyber_war_state.get("active"):
             await setup_war_panel()
-        await interaction.response.send_message(f"✅ 賽博一戰面板頻道已設為 {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ 賽博一戰主面板頻道已設為 {channel.mention}", ephemeral=True)
+
+    @app_commands.command(name="channel", description="設定本伺服器的 WW1 戰況轉播頻道")
+    async def cw_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """任何伺服器都可設定 WW1 戰況轉播頻道，參與跨伺服器大戰。"""
+        # 需要伺服器管理員權限
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("❌ 需要「管理伺服器」權限才能設定 WW1 頻道。", ephemeral=True)
+            return
+
+        set_ww1_channel(interaction.guild.id, channel.id)
+        _guild_name = interaction.guild.name
+        _ch_id = channel.id
+
+        # 如果戰局正在進行，立即設置面板
+        if _cyber_war_state.get("active"):
+            try:
+                _embed = _build_war_embed()
+                _view = CyberWarPanelView()
+                _msg = await channel.send(embed=_embed, view=_view)
+                set_ww1_panel_message(interaction.guild.id, _msg.id)
+            except Exception as e:
+                print(f"⚠️ 跨伺服器 WW1 面板初始化失敗 ({_guild_name}): {e}")
+
+        await interaction.response.send_message(
+            f"✅ 已設定 {channel.mention} 為本伺服器的 WW1 戰況頻道！\n"
+            f"⚔️ 當有戰局進行時，戰況面板會自動在此頻道更新。\n"
+            f"🌐 你將與其他伺服器的玩家一起參與同一場大戰！",
+            ephemeral=True,
+        )
 
     @app_commands.command(name="end", description="手動結束當前戰局（機器人擁有者限定）")
     async def cw_end(self, interaction: discord.Interaction):

@@ -6956,6 +6956,22 @@ def _record_t2i_usage(user_id: str):
     today = datetime.now(GMT8).strftime("%Y-%m-%d")
     _t2i_daily_usage.setdefault(user_id, {})[today] = _t2i_daily_usage.get(user_id, {}).get(today, 0) + 1
 
+def _detect_t2i_keyword(text: str) -> bool:
+    """快速關鍵字檢測——判斷訊息是否可能為文生圖請求（不需 AI 呼叫）。"""
+    if not text:
+        return False
+    _t2i_keywords = [
+        "畫", "生圖", "生成圖", "文生圖", "draw", "畫一張", "畫個",
+        "幫我畫", "畫圖", "生成一張", "畫一下", "create image",
+        "generate image", "make image", "繪製",
+    ]
+    text_lower = text.lower()
+    for kw in _t2i_keywords:
+        if kw in text_lower:
+            return True
+    return False
+
+
 async def _detect_t2i_request_ai(text: str, settings: dict) -> str | None:
     """Use AI to determine if a user's message is requesting image generation.
     Returns the image prompt to use if yes, None if no.
@@ -11453,17 +11469,20 @@ async def on_guild_join(guild):
             embed = discord.Embed(
                 title="🌍 歡迎安裝 ICEA 機器人！",
                 description=(
-                    "我是 ICEA 的多功能機器人，提供投票、會議、排程等功能。\n\n"
-                    "**免費功能（不需 AI）：**\n"
+                    "我是 ICEA 的多功能機器人，提供豐富的娛樂與實用功能。\n\n"
+                    "**🎮 娛樂功能（可用！）：**\n"
+                    "• `/quiz` — AI 搶答 • `/turtle_soup` — AI 海龜湯\n"
+                    "• `/werewolf` — AI 狼人殺 • `/galgame` — AI 互動小說\n"
+                    "• `/draw` — AI 文生圖 • `/siege` — 攻城戰\n"
+                    "• `/stock` — AI 股市 • `/horse` — 賽馬\n"
+                    "• `/cyber_war` — ⚔️ 跨伺服器 WW1 千人大戰場！\n\n"
+                    "**📋 基本功能（可用！）：**\n"
                     "• `/poll` — 波達計數法投票\n"
                     "• `/meeting` — 會議管理\n"
-                    "• `/schedule` — 排程提醒\n\n"
-                    "**⚔️ 賽博一戰（WW1）**\n"
-                    "可跨伺服器參與，所有伺服器的玩家在同一個戰場作戰！\n"
-                    "使用 `/cyber_war channel` 設定戰況頻道即可加入。\n\n"
-                    "**🔒 AI 功能**\n"
-                    "AI 聊天、搶答、海龜湯等功能僅限 ICEA 主伺服器使用。\n"
-                    "如需開放，請聯繫機器人管理員。"
+                    "• `/schedule` — 排程提醒\n"
+                    "• `/econ` — 經濟系統\n\n"
+                    "**🔒 僅限 ICEA 主伺服器：**\n"
+                    "AI 聊天、提案/入盟分析、晨報、計票等功能。"
                 ),
                 color=discord.Color.blue(),
             )
@@ -11828,7 +11847,7 @@ async def on_message(message):
     # regardless of chat AI settings. This runs BEFORE the bot-message
     # check so forum thread starter messages (which are from the author)
     # are also caught here.
-    if proposal_settings.get("enabled") and message.guild:
+    if proposal_settings.get("enabled") and message.guild and str(message.guild.id) == ICEA_GUILD_ID:
         proposal_channels = proposal_settings.get("proposal_channels", [])
         ch_id = message.channel.id
         parent_id = getattr(message.channel, 'parent_id', None)
@@ -11840,7 +11859,7 @@ async def on_message(message):
                     print(f"⚠️ 提案處理錯誤：{e}")
 
     # ── 入盟申請區偵測（秘書處 + 理事國 分開）──
-    if application_settings.get("enabled") and message.guild:
+    if application_settings.get("enabled") and message.guild and str(message.guild.id) == ICEA_GUILD_ID:
         sec_channels = application_settings.get("application_channels", [])
         council_channels = application_settings.get("council_channels", [])
         ch_id = message.channel.id
@@ -11998,10 +12017,10 @@ async def on_message(message):
     if message.content.startswith("/"):
         return
 
-    # ── 伺服器分級：非主伺服器封鎖所有 AI 功能（防止其他伺服器消耗 Token）──
+    # ── 伺服器分級：非主伺服器封鎖聊天+行政 AI（防止其他伺服器消耗高頻 Token）──
+    # 娛樂功能（搶答、海龜湯、狼人殺、文生圖、股市、賽馬、Galgame、攻城戰、WW1）不受此旗標影響
     _is_guest_server = (message.guild and str(message.guild.id) != ICEA_GUILD_ID
-                        and message.author.id != BOT_OWNER_ID
-                        and not is_ai_enabled(message.guild.id))
+                        and message.author.id != BOT_OWNER_ID)
 
     # ── AI 網警：非阻塞式自動審查 ──
     # Fire-and-forget — 不等待結果，不影響正常訊息流程。
@@ -12015,26 +12034,33 @@ async def on_message(message):
     print(f"📩 on_message: #{message.channel} | {message.author.display_name}: {content_preview}")
     print(f"   enabled={chat_ai_settings.get('enabled')}, key={'✅' if chat_ai_settings.get('api_key') else '❌'}, mentioned={is_mentioned}, filter={chat_ai_settings.get('filter_strength', 'mention')}")
 
-    # ── 非主伺服器：封鎖所有 AI 回覆路徑 ──
+    # ── 非主伺服器：封鎖聊天 + 行政 AI，但允許娛樂功能 ──
     if _is_guest_server:
-        # AI 聊天室 — 告知不開放
+        # AI 聊天室 — 不存在於 guest 伺服器，安全攔截
         if is_ai_chat_room(message.channel.id):
-            return  # AI 聊天室在 guest 伺服器不會存在，但安全起見攔截
-        # 被提及時告知
-        if bot.user in message.mentions and not message.content.startswith("/"):
-            try:
-                await message.reply(
-                    "🔒 AI 功能僅限 ICEA 主伺服器使用。\n"
-                    "免費功能（投票 `/poll`、會議 `/meeting`、排程 `/schedule`）可正常使用。\n"
-                    "⚔️ WW1 賽博一戰可跨伺服器參與，使用 `/cyber_war channel` 設定頻道即可加入！",
-                    mention_author=False,
-                )
-            except Exception:
-                pass
             return
-        # 不攔截非 AI 的訊息處理（投票、會議等）
-        # 但也不進入後面的 AI 回覆流程
-        # ── 直接跳到非 AI 的訊息處理 ──
+        # 被提及時告知可用功能
+        if bot.user in message.mentions and not message.content.startswith("/"):
+            # 檢查是否為文生圖請求（娛樂功能，允許）
+            _t2i_quick = _detect_t2i_keyword(message.content)
+            if _t2i_quick:
+                pass  # 讓文生圖流程繼續，不攔截
+            else:
+                try:
+                    await message.reply(
+                        "🔒 AI 聊天僅限 ICEA 主伺服器使用。\n\n"
+                        "**✅ 可用功能：**\n"
+                        "🎮 `/quiz` `/turtle_soup` `/werewolf` `/galgame` `/siege`\n"
+                        "🎨 `/draw` — 文生圖\n"
+                        "📈 `/stock` `/horse` — 股市 & 賽馬\n"
+                        "⚔️ `/cyber_war` — 跨伺服器 WW1 大戰\n"
+                        "📊 `/poll` `/meeting` `/schedule`\n"
+                        "💰 `/econ` — 經濟系統",
+                        mention_author=False,
+                    )
+                except Exception:
+                    pass
+                return
 
     # ── 專屬 AI 聊天室處理（在所有 AI 聊天過濾之前）──
     # If this message is in an AI chat room channel, bypass ALL the normal
@@ -12325,8 +12351,6 @@ async def on_message(message):
                 return
 
     # Generate reply
-    if _is_guest_server:
-        return  # 非主伺服器：不消耗 AI Token，靜默結束（已在前面回覆過提示）
     _user_generating.add(uid_str)
     try:
         # Wait for a concurrency slot (max 5 simultaneous AI calls). This makes
@@ -12355,6 +12379,12 @@ async def on_message(message):
             else:
                 await _send_t2i_result(message, _t2i_prompt, _t2i_result, chat_ai_settings, is_command=False)
             _user_generating.discard(_uid)
+            return
+
+        # ── 非主伺服器：封鎖 AI 聊天回覆（防止高頻 Token 消耗）──
+        # 娛樂功能（T2I 等）已在上方處理完畢，以下僅為 AI 聊天回覆路徑
+        if _is_guest_server:
+            _user_generating.discard(uid_str)
             return
 
         async with sem:
