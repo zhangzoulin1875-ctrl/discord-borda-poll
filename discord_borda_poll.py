@@ -272,6 +272,18 @@ async def keep_alive_server():
         print("💬 Galgame API routes registered")
     except Exception as e:
         print(f"⚠️ Galgame API route registration failed: {e}")
+    # Miner API routes (registered by module 200)
+    try:
+        for _path, _method, _handler in _miner_api_routes:
+            if _method == "GET":
+                app.router.add_get(_path, _handler)
+            elif _method == "PUT":
+                app.router.add_put(_path, _handler)
+            elif _method == "POST":
+                app.router.add_post(_path, _handler)
+        print("⛏️ Miner API routes registered")
+    except Exception as e:
+        print(f"⚠️ Miner API route registration failed: {e}")
     # HOI4 game API routes (registered by module 170, skip when HOI4_ENABLED=false)
     if os.getenv("HOI4_ENABLED", "true").lower() in ("false", "0", "no", "off"):
         print("🚫 HOI4 已停用，API 路由不註冊")

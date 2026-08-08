@@ -679,3 +679,51 @@ class MinerGroup(app_commands.Group):
 
 load_miner()
 print(f"⛏️ 礦工遊戲模組已載入：{len(miner_players)} 位玩家")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Dashboard API
+# ═══════════════════════════════════════════════════════════════════════
+
+async def api_get_miner_settings(request):
+    """取得礦工遊戲設定 + 統計。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    total_miners = sum(sh.get("miners", 0) for p in miner_players.values() for sh in p.get("shafts", {}).values())
+    total_unlocked = sum(1 for p in miner_players.values() for sh in p.get("shafts", {}).values() if sh.get("unlocked"))
+    return web.json_response({
+        "enabled": miner_settings.get("enabled", True),
+        "channel_id": miner_settings.get("channel_id"),
+        "guild_channels": miner_settings.get("guild_channels", {}),
+        "player_count": len(miner_players),
+        "total_miners": total_miners,
+        "total_unlocked": total_unlocked,
+        "shaft_defs": [{"id": s["id"], "name": s["name"], "unlock_cost": s["unlock_cost"],
+                        "base_output": s["base_output"], "recruit_base": s["recruit_base"],
+                        "upgrade_base": s["upgrade_base"], "manager_cost": s["manager_cost"]}
+                       for s in SHAFT_DEFS],
+        "cap_hours": MINER_CAP_HOURS,
+    })
+
+
+async def api_set_miner_settings(request):
+    """更新礦工遊戲設定。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await request.json()
+    if "enabled" in body:
+        miner_settings["enabled"] = body["enabled"]
+    if "channel_id" in body:
+        miner_settings["channel_id"] = body["channel_id"] if body["channel_id"] else None
+    save_miner()
+    if "channel_id" in body:
+        asyncio.ensure_future(setup_miner_panel())
+    return web.json_response({"ok": True})
+
+
+_miner_api_routes = [
+    ("/api/miner-settings", "GET", api_get_miner_settings),
+    ("/api/miner-settings", "PUT", api_set_miner_settings),
+]

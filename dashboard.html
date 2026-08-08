@@ -42,6 +42,7 @@
       <div class="nav-tab" data-tab="schedule" onclick="showSchedulePanel()">📅 排程通知</div>
       <div class="nav-tab" data-tab="siege" onclick="showSiegePanel()">⚔️ 攻城戰</div>
       <div class="nav-tab" data-tab="galgame" onclick="showGalgamePanel()">💬 Galgame</div>
+      <div class="nav-tab" data-tab="miner" onclick="showMinerPanel()">⛏️ 礦工</div>
       <div class="nav-tab" data-tab="cross-server" onclick="showCrossServerPanel()">🌍 跨伺服器</div>
       <div class="nav-tab" onclick="window.open('/hoi4', '_blank')">🎮 HOI4</div>
     </div>
@@ -930,6 +931,28 @@
       </div>
 
     </div>
+  </div>
+
+  <!-- 礦工遊戲設定 -->
+  <div id="miner-section" class="bg-[#2b2d31] rounded-lg p-5 mt-4">
+    <h3 class="font-semibold mb-1">⛏️ 琉璃幣礦工 · 掘金之旅設定</h3>
+    <p class="text-xs text-gray-400 mb-4">放置型礦業大亨小遊戲。玩家招募礦工、升級礦坑、雇用經理掛機賺琉璃幣。</p>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">啟用礦工遊戲</label>
+        <select id="miner-enabled" class="w-full bg-[#1e1f22] rounded-lg px-3 py-2 text-sm">
+          <option value="true">✅ 開啟</option>
+          <option value="false">❌ 關閉</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-gray-400 block mb-1">主面板頻道 ID（留空 = 未設定）</label>
+        <input id="miner-channel-id" type="text" placeholder="頻道 ID" class="w-full bg-[#1e1f22] rounded-lg px-3 py-2 text-sm">
+      </div>
+    </div>
+    <div id="miner-stats" class="mt-4 space-y-1 text-sm text-gray-300"></div>
+    <div id="miner-shaft-list" class="mt-4 space-y-2"></div>
+    <button onclick="saveMinerSettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm mt-4">💾 儲存礦工設定</button>
   </div>
 
   <!-- Meeting AI Settings Panel -->
@@ -2621,6 +2644,55 @@ function showScanTab(tab) {
   document.getElementById('scan-' + tab).classList.remove('hidden');
   document.getElementById('scan-tab-' + tab).classList.add('bg-[#5865f2]');
   document.getElementById('scan-tab-' + tab).classList.remove('bg-[#4e5058]');
+}
+
+// ═══ 礦工遊戲 ═══
+function showMinerPanel() {
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  document.getElementById('chat-ai-view').classList.remove('hidden');
+  showOnly('main-view');
+  setActiveTab('miner');
+  setTimeout(() => { const el = document.getElementById('miner-section'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 100);
+  loadMinerSettings();
+}
+
+async function loadMinerSettings() {
+  const s = await api('/api/miner-settings');
+  if (s.error) { console.error('礦工設定載入失敗', s.error); return; }
+  document.getElementById('miner-enabled').value = s.enabled ? 'true' : 'false';
+  document.getElementById('miner-channel-id').value = s.channel_id || '';
+  const stats = document.getElementById('miner-stats');
+  stats.innerHTML = `
+    <p>👥 投入玩家數：<span class="font-semibold">${s.player_count}</span></p>
+    <p>👷 礦工總數：<span class="font-semibold">${s.total_miners}</span> 人</p>
+    <p>🔓 已解鎖礦坑數：<span class="font-semibold">${s.total_unlocked}</span></p>
+    <p>📦 未雇經理庫存上限：<span class="font-semibold">${s.cap_hours}</span> 小時</p>
+  `;
+  const shaftList = document.getElementById('miner-shaft-list');
+  if (s.shaft_defs && s.shaft_defs.length > 0) {
+    let html = '<h4 class="text-sm font-semibold text-gray-300 mt-3 mb-2">礦坑定義（唯讀）</h4>';
+    for (const sh of s.shaft_defs) {
+      html += `<div class="bg-[#1e1f22] rounded-lg p-3 text-sm">
+        <span class="font-semibold">${sh.name}</span>
+        <span class="text-gray-400 ml-2">基礎產量 ${sh.base_output}/分</span>
+        <span class="text-gray-400 ml-2">解鎖 ${sh.unlock_cost.toLocaleString()}</span>
+        <span class="text-gray-400 ml-2">招募基價 ${sh.recruit_base.toLocaleString()}</span>
+        <span class="text-gray-400 ml-2">升級基價 ${sh.upgrade_base.toLocaleString()}</span>
+        <span class="text-gray-400 ml-2">經理 ${sh.manager_cost.toLocaleString()}</span>
+      </div>`;
+    }
+    shaftList.innerHTML = html;
+  }
+}
+
+async function saveMinerSettings() {
+  const data = {
+    enabled: document.getElementById('miner-enabled').value === 'true',
+    channel_id: document.getElementById('miner-channel-id').value || null,
+  };
+  const r = await api('/api/miner-settings', 'PUT', data);
+  if (r.ok) alert('✅ 礦工設定已儲存');
+  else alert('❌ 儲存失敗：' + (r.error || ''));
 }
 
 // ═══ 跨伺服器管理 ═══
