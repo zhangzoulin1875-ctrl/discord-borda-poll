@@ -1317,7 +1317,8 @@ class CyberWarPanelView(discord.ui.View):
             "• **🧪 WW1 AI測試** — 測試AI裁判是否能成功調用，回報結果或錯誤\n"
             "• **查看巨獸狀態** — 查看雙方戰爭巨獸HP與指令\n"
             "• **立刻部署巨獸** — 直接給弱勢方部署一台巨獸\n"
-            "• **🎲 特殊事件** — 投放天災或陣營事件（52種）",
+            "• **🎲 特殊事件** — 投放天災或陣營事件（52種）\n"
+            "• **🔒 鎖定獎池** — 手動鎖定押金，不再接受下注/追加/撤回",
             view=view, ephemeral=True
         )
 
@@ -1819,6 +1820,46 @@ class _CWTestView(discord.ui.View):
             "• 🔵 **B方事件** — 影響B方（18種）\n"
             f"共 {len(_SPECIAL_EVENTS)} 種固定事件，陣營專屬事件數量平均",
             view=_EventCategoryView(), ephemeral=True,
+        )
+
+    @discord.ui.button(label="鎖定獎池", style=discord.ButtonStyle.secondary, emoji="🔒", custom_id="cw_test_lock_pool")
+    async def lock_pool(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """手動鎖定押金池——鎖定後玩家無法再下注/追加/撤回。"""
+        s = _cyber_war_state
+        if not s.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        if str(interaction.user.id) != str(BOT_OWNER_ID):
+            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
+            return
+
+        already_locked = s.get("deposits_locked", False)
+        if already_locked:
+            await interaction.response.send_message("🔒 獎池已經是鎖定狀態，無需重複操作。", ephemeral=True)
+            return
+
+        # 統計目前獎池資訊
+        deposits = s.get("deposits", {})
+        total_pool = sum(d.get("amount", 0) for d in deposits.values())
+        multiplier = s.get("prize_multiplier", 0)
+        bettor_count = sum(1 for d in deposits.values() if d.get("amount", 0) > 0)
+
+        s["deposits_locked"] = True
+        save_cyber_war()
+
+        # 刷新公開面板讓所有人看到鎖定狀態
+        try:
+            await refresh_war_panel()
+        except Exception as e:
+            print(f"⚠️ 賽博一戰鎖定獎池後刷新面板失敗：{e}")
+
+        await interaction.response.send_message(
+            f"🔒 **獎池已手動鎖定！**\n"
+            f"📊 目前獎池：{total_pool:,} {currency_name()} ×{multiplier}\n"
+            f"👥 已下注人數：{bettor_count}\n"
+            f"⛔ 玩家已無法下注、追加或撤回押金。\n"
+            f"回合結束後自動結算分配獎金。",
+            ephemeral=True,
         )
 
 # ── 戰爭巨獸 Modal ──
