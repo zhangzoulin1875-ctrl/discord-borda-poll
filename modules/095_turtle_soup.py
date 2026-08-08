@@ -1101,7 +1101,7 @@ class TurtleSoupGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="soup", description="AI 海龜湯遊戲")
 
-    @app_commands.command(name="toggle", description="開啟/關閉 AI 海龜湯功能（機器人擁有者限定）")
+    @app_commands.command(name="toggle", description="開啟/關閉 AI 海龜湯功能（管理員限定）")
     async def soup_toggle(self, interaction: discord.Interaction):
         if not is_admin(interaction):
             await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
@@ -1111,7 +1111,7 @@ class TurtleSoupGroup(app_commands.Group):
         status = "開啟" if chat_ai_settings["turtle_soup_enabled"] else "關閉"
         await interaction.response.send_message(f"✅ AI 海龜湯已{status}。", ephemeral=True)
 
-    @app_commands.command(name="channel", description="設定海龜湯頻道（機器人擁有者限定）")
+    @app_commands.command(name="channel", description="設定海龜湯頻道（管理員限定）")
     @app_commands.describe(channel="要設為海龜湯頻道的頻道")
     async def soup_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not is_admin(interaction):
@@ -1125,7 +1125,7 @@ class TurtleSoupGroup(app_commands.Group):
             ephemeral=True,
         )
 
-    @app_commands.command(name="difficulty", description="設定海龜湯難度（機器人擁有者限定）")
+    @app_commands.command(name="difficulty", description="設定海龜湯難度（管理員限定）")
     @app_commands.describe(level="easy / medium / hard")
     @app_commands.choices(level=[
         app_commands.Choice(name="簡單", value="easy"),
@@ -1142,7 +1142,7 @@ class TurtleSoupGroup(app_commands.Group):
             f"✅ 海龜湯難度已設為 **{level.name}**。", ephemeral=True,
         )
 
-    @app_commands.command(name="end", description="強制結束當前海龜湯遊戲（機器人擁有者限定）")
+    @app_commands.command(name="end", description="強制結束當前海龜湯遊戲（管理員限定）")
     async def soup_end(self, interaction: discord.Interaction):
         if not is_admin(interaction):
             await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)

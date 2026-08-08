@@ -14714,7 +14714,7 @@ _SUB_BOT_TRUE_OWNER_ONLY_KEYS = {
     "ww.toggle", "ww.channel", "ww.end", "ww.test",          # modules/010_werewolf.py: is_owner()
     "horse.set_channel", "horse.start_now",                   # modules/140_horse_racing.py: is_owner()
     "siege.start", "siege.settle", "siege.setup", "siege.toggle",  # modules/160_siege.py: 寫死 BOT_OWNER_ID
-    "cyber_war.start", "cyber_war.set_channel", "cyber_war.end",   # modules/180_cyber_war.py: 寫死 BOT_OWNER_ID
+    "cyber_war.start", "cyber_war.end",   # modules/180_cyber_war.py: 寫死 BOT_OWNER_ID（set_channel 已改為 is_admin() 管理員限定，見上方 quiz/soup 註解邏輯）
     "vn.set_channel", "vn.admin",                              # modules/190_galgame.py: 寫死 BOT_OWNER_ID
 }
 

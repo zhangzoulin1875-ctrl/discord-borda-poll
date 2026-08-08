@@ -3427,10 +3427,10 @@ class CyberWarGroup(app_commands.Group):
         else:
             await interaction.followup.send(f"❌ {msg}", ephemeral=True)
 
-    @app_commands.command(name="set_channel", description="設定賽博一戰主面板頻道（機器人擁有者限定）")
+    @app_commands.command(name="set_channel", description="設定賽博一戰主面板頻道（管理員限定）")
     async def cw_set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if str(interaction.user.id) != str(BOT_OWNER_ID):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         _cyber_war_settings["channel_id"] = str(channel.id)
         _cyber_war_settings["panel_message_id"] = None

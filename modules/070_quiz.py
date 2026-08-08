@@ -651,7 +651,7 @@ class QuizGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="quiz", description="AI 問答系統")
 
-    @app_commands.command(name="toggle", description="開啟/關閉 AI 問答功能（機器人擁有者限定）")
+    @app_commands.command(name="toggle", description="開啟/關閉 AI 問答功能（管理員限定）")
     async def quiz_toggle(self, interaction: discord.Interaction):
         if not is_admin(interaction):
             await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
@@ -661,7 +661,7 @@ class QuizGroup(app_commands.Group):
         status = "開啟" if quiz_settings["enabled"] else "關閉"
         await interaction.response.send_message(f"✅ AI 問答已{status}。", ephemeral=True)
 
-    @app_commands.command(name="channel", description="設定 AI 問答頻道（機器人擁有者限定）")
+    @app_commands.command(name="channel", description="設定 AI 問答頻道（管理員限定）")
     @app_commands.describe(channel="要設為問答頻道的頻道")
     async def quiz_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not is_admin(interaction):
@@ -676,7 +676,7 @@ class QuizGroup(app_commands.Group):
             ephemeral=True
         )
 
-    @app_commands.command(name="interval", description="設定出題間隔分鐘數（機器人擁有者限定）")
+    @app_commands.command(name="interval", description="設定出題間隔分鐘數（管理員限定）")
     @app_commands.describe(minutes="間隔分鐘數（預設 30）")
     async def quiz_interval(self, interaction: discord.Interaction, minutes: int):
         if not is_admin(interaction):
