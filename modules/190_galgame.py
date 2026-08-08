@@ -27,7 +27,9 @@ galgame_settings = {
     "channel_id": None,           # Galgame 面板頻道
     "message_id": None,           # 面板訊息 ID
     "interaction_cooldown": 300,  # 每次互動冷卻（秒）
-    "daily_interact_limit": 20,   # 每日互動次數上限
+    "chat_annoyance_threshold": 15,  # 同日對話達此次數後角色開始不耐煩
+    "chat_annoyance_severe": 25,      # 同日對話達此次數後角色明�不耐煩、好感度不再增長
+    "chat_annoyance_max": 35,         # 同日對話達此次數後角色拒絕再聊、好感度微降
     "gift_min_cost": 50,          # 最低送禮金額
     "gift_max_cost": 5000,        # 最高送禮金額
     "affection_per_gift_base": 5, # 基礎好感度增加
@@ -77,6 +79,29 @@ def _next_threshold(affection: int) -> int:
             return threshold
     return AFFECTION_LEVELS[-1][0]  # 已達最高
 
+
+# ── 不耐煩系統 ──
+# 同一天對同一角色講太多次話，角色會逐漸不耐煩：
+#   0 ~ threshold-1：正常（好感度 +1/次）
+#   threshold ~ severe-1：微不耐煩（好感度 +0/次，AI 語氣略煩）
+#   severe ~ max-1：明顯不耐煩（好感度 -1/次，AI 語氣很不耐煩）
+#   max+：角色不想再聊了（好感度 -2/次，AI 直接敷衍/拒絕）
+def _get_annoyance_state(daily_count: int) -> tuple:
+    """回傳 (state_key, label, affection_delta, prompt_hint)。"""
+    th = galgame_settings.get("chat_annoyance_threshold", 15)
+    severe = galgame_settings.get("chat_annoyance_severe", 25)
+    mx = galgame_settings.get("chat_annoyance_max", 35)
+    if daily_count < th:
+        return ("normal", "😊 正常", 0, "")
+    elif daily_count < severe:
+        return ("slight", "😤 稍微不耐煩", 0,
+                f"你今天已經跟玩家聊了{daily_count}次了，開始覺得有點煩，回應會比平時更短、更敷衍一些，但還是會回答。")
+    elif daily_count < mx:
+        return ("annoyed", "😡 不耐煩", -1,
+                f"你今天已經跟玩家聊了{daily_count}次了，真的很煩，回應要明顯不耐煩，可能會抱怨「你怎麼又來了」「夠了沒」，想趕快結束對話。")
+    else:
+        return ("refusing", "🚫 不想再聊", -2,
+                f"你今天已經跟玩家聊了{daily_count}次了，你完全不想再理這個人了，回應極度敷衍甚至直接拒絕對話（例：「……」「我很忙」「你能不能別來了」），最多一兩句話。")
 
 # ── 持久化 ──
 def save_galgame():
@@ -169,7 +194,7 @@ def _build_galgame_embed() -> "discord.Embed":
         value=(
             "點擊下方按鈕開始互動。對話不消耗琉璃幣，送禮需要消耗。\n"
             f"冷卻時間：{galgame_settings['interaction_cooldown']} 秒｜"
-            f"每日互動上限：{galgame_settings['daily_interact_limit']} 次"
+            f"同日對話過多角色會不耐煩，好感度會遞減甚至倒退"
         ),
         inline=False,
     )
@@ -276,7 +301,7 @@ def _build_galgame_admin_embed() -> "discord.Embed":
         description=(
             f"頻道 ID：{galgame_settings.get('channel_id', '未設定')}\n"
             f"冷卻時間：{galgame_settings.get('interaction_cooldown', 300)} 秒\n"
-            f"每日上限：{galgame_settings.get('daily_interact_limit', 20)} 次\n"
+            f"不耐煩門檻：{galgame_settings.get('chat_annoyance_threshold', 15)}/{galgame_settings.get('chat_annoyance_severe', 25)}/{galgame_settings.get('chat_annoyance_max', 35)} 次\n"
             f"送禮範圍：{galgame_settings.get('gift_min_cost', 50)}-{galgame_settings.get('gift_max_cost', 5000)} {currency_name()}\n"
             f"角色數量：{len(galgame_characters)}\n"
             f"玩家數量：{len(galgame_progress)}\n\n"
@@ -400,17 +425,11 @@ class CharacterSelectView(discord.ui.View):
             )
             return
 
-        # 每日上限檢查
+        # 每日計數重置（不再硬性擋，交由不耐煩系統處理）
         today = datetime.now(GMT8).strftime("%Y-%m-%d")
         if prog.get("daily_date") != today:
             prog["daily_date"] = today
             prog["daily_count"] = 0
-        daily_limit = galgame_settings["daily_interact_limit"]
-        if prog.get("daily_count", 0) >= daily_limit:
-            await interaction.response.send_message(
-                f"📅 今日與 {ch['name']} 的互動次數已達上限（{daily_limit} 次）。明天再來吧～", ephemeral=True
-            )
-            return
 
         # 顯示互動面板
         embed = _build_interaction_embed(char_id, prog)
@@ -443,9 +462,10 @@ def _build_interaction_embed(char_id: str, prog: dict) -> "discord.Embed":
 
     today = datetime.now(GMT8).strftime("%Y-%m-%d")
     daily_count = prog.get("daily_count", 0) if prog.get("daily_date") == today else 0
+    _annoy_state, _annoy_label, _, _ = _get_annoyance_state(daily_count)
     embed.add_field(
         name="互動資訊",
-        value=f"今日已互動 {daily_count} / {galgame_settings['daily_interact_limit']} 次\n"
+        value=f"今日已對話 {daily_count} 次　{_annoy_label}\n"
               f"已送禮 {prog.get('gifts_given', 0)} 次",
         inline=False,
     )
@@ -516,10 +536,10 @@ class InteractionView(discord.ui.View):
         if prog.get("daily_date") != today:
             prog["daily_date"] = today
             prog["daily_count"] = 0
-        if prog.get("daily_count", 0) >= galgame_settings["daily_interact_limit"]:
-            await interaction.response.send_message("📅 今日互動次數已達上限。", ephemeral=True)
-            return
 
+        # 不再硬性擋每日上限，改為不耐煩系統：
+        # 達到 max 後角色會在對話中表現出拒絕態度（AI 語氣 + 好感度懲罰），
+        # 但玩家仍可強行傳訊——不像舊版直接擋掉。
         # 開啟 Modal 讓玩家輸入對話
         modal = ChatModal(uid, cid)
         await interaction.response.send_modal(modal)
@@ -601,8 +621,12 @@ class ChatModal(discord.ui.Modal):
         )
 
         try:
-            # 建構 AI prompt
+            # 建構 AI prompt（含不耐煩提示注入）
+            _daily_cnt = prog.get("daily_count", 0) if prog.get("daily_date") == datetime.now(GMT8).strftime("%Y-%m-%d") else 0
+            _annoy_state, _, _, _annoy_hint = _get_annoyance_state(_daily_cnt)
             system_prompt = _build_chat_system_prompt(ch, affection, lvl_name, prog)
+            if _annoy_hint:
+                system_prompt += f"\n\n== 今日情緒狀態 ==\n{_annoy_hint}"
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
@@ -623,11 +647,19 @@ class ChatModal(discord.ui.Modal):
             if not reply:
                 reply = "（沉默了一會兒，似乎不知道該說什麼…）"
 
-            # 更新好感度
-            affection_gain = galgame_settings["affection_per_chat"]
-            prog["affection"] = prog.get("affection", 0) + affection_gain
+            # 更新好感度（不耐煩系統：同日對話過多時遞減/懲罰）
+            _daily = prog.get("daily_count", 0)
+            _annoy_state, _annoy_label, _annoy_delta, _ = _get_annoyance_state(_daily)
+            base_gain = galgame_settings["affection_per_chat"]
+            if _annoy_delta == 0:
+                # normal: 正常增長；slight: 不增不減
+                affection_gain = base_gain if _annoy_state == "normal" else 0
+            else:
+                # annoyed/refusing: 好感度倒退
+                affection_gain = _annoy_delta
+            prog["affection"] = max(0, prog.get("affection", 0) + affection_gain)
             prog["last_interact"] = _time.time()
-            prog["daily_count"] = prog.get("daily_count", 0) + 1
+            prog["daily_count"] = _daily + 1
             prog["daily_date"] = datetime.now(GMT8).strftime("%Y-%m-%d")
 
             # 檢查好感度升級
@@ -647,9 +679,15 @@ class ChatModal(discord.ui.Modal):
                 description=reply[:2000],
                 color=discord.Color.pink(),
             )
+            _aff_str = f"{new_lvl_name}（{prog['affection']}）"
+            if affection_gain > 0:
+                _aff_str += f" +{affection_gain}"
+            elif affection_gain < 0:
+                _annoy_state2, _annoy_label2, _, _ = _get_annoyance_state(prog.get("daily_count", 1) - 1)
+                _aff_str += f" {affection_gain}（{_annoy_label2}）"
             embed.add_field(
                 name="好感度",
-                value=f"{new_lvl_name}（{prog['affection']}）{'+'+str(affection_gain) if affection_gain else ''}",
+                value=_aff_str,
                 inline=True,
             )
             if level_up_msg or story_msg:
