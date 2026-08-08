@@ -11299,6 +11299,7 @@ async def setup_hook():
     load_graceful_restart()
     load_siege_data()
     load_cyber_war()
+    load_galgame()  # 必須在 load_from_drive() 之後重新載入（模組 exec 時的 load_galgame 用的是舊本地檔）
     load_refine_settings()
     load_refine_knowledge()
     save_quiz_data()  # Create files if not exists
