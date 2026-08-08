@@ -41,6 +41,7 @@
       <div class="nav-tab" data-tab="t2i" onclick="showChatAIPanel(); setTimeout(() => { const el = document.getElementById('ai-t2i-enabled'); if (el) el.closest('.bg-\\[\\#2b2d31\\]').scrollIntoView({behavior: 'smooth', block: 'start'}); }, 300);">🎨 文生圖</div>
       <div class="nav-tab" data-tab="schedule" onclick="showSchedulePanel()">📅 排程通知</div>
       <div class="nav-tab" data-tab="siege" onclick="showSiegePanel()">⚔️ 攻城戰</div>
+      <div class="nav-tab" data-tab="galgame" onclick="showGalgamePanel()">💬 Galgame</div>
       <div class="nav-tab" onclick="window.open('/hoi4', '_blank')">🎮 HOI4</div>
     </div>
   </div>
@@ -824,7 +825,99 @@
         <div id="siege-status" class="mt-4 bg-[#1e1f22] rounded-lg p-4 hidden">
           <h4 class="text-sm font-semibold mb-2">📊 當前戰況</h4>
           <div id="siege-status-content" class="text-sm text-gray-300 space-y-1"></div>
+        
+      <!-- Galgame 互動小說設定 -->
+      <div id="galgame-section" class="hidden bg-[#2b2d31] rounded-lg p-5 mt-4">
+        <h3 class="font-semibold mb-1">💬 互動小說（Galgame）設定</h3>
+        <p class="text-xs text-gray-400 mb-3">設定互動小說面板頻道與遊戲參數。角色管理在下方。</p>
+
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">面板頻道 ID</label>
+            <input id="galgame-channel-id" type="text" class="w-full bg-[#1e1f22] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="Discord 頻道 ID">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">互動冷卻（秒）</label>
+            <input id="galgame-cooldown" type="number" class="w-full bg-[#1e1f22] border border-[#3f4147] rounded px-3 py-2 text-sm" value="300">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">每日互動上限</label>
+            <input id="galgame-daily-limit" type="number" class="w-full bg-[#1e1f22] border border-[#3f4147] rounded px-3 py-2 text-sm" value="20">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">每次對話好感度</label>
+            <input id="galgame-affection-chat" type="number" class="w-full bg-[#1e1f22] border border-[#3f4147] rounded px-3 py-2 text-sm" value="1">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">送禮最低金額</label>
+            <input id="galgame-gift-min" type="number" class="w-full bg-[#1e1f22] border border-[#3f4147] rounded px-3 py-2 text-sm" value="50">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">送禮最高金額</label>
+            <input id="galgame-gift-max" type="number" class="w-full bg-[#1e1f22] border border-[#3f4147] rounded px-3 py-2 text-sm" value="5000">
+          </div>
+          <div>
+            <label class="text-xs text-gray-400 block mb-1">送禮基礎好感度</label>
+            <input id="galgame-affection-gift" type="number" class="w-full bg-[#1e1f22] border border-[#3f4147] rounded px-3 py-2 text-sm" value="5">
+          </div>
         </div>
+
+        <button onclick="saveGalgameSettings()" class="w-full bg-[#5865f2] hover:bg-[#4752c4] px-4 py-3 rounded-lg font-semibold text-sm mb-4">💾 儲存 Galgame 設定</button>
+
+        <!-- 角色管理 -->
+        <div class="border-t border-[#3f4147] pt-4 mt-4">
+          <h4 class="text-sm font-semibold mb-2">🎭 角色管理</h4>
+          <p class="text-xs text-gray-400 mb-3">新增、編輯或刪除角色。只有擁有者可以操作。</p>
+
+          <!-- 新增/編輯角色表單 -->
+          <div class="bg-[#1e1f22] rounded-lg p-4 mb-3">
+            <input id="galgame-char-id" type="hidden">
+            <div class="grid grid-cols-2 gap-3 mb-2">
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">角色名稱 *</label>
+                <input id="galgame-char-name" type="text" class="w-full bg-[#2b2d31] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="角色名">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 block mb-1">標語（一句話簡介）</label>
+                <input id="galgame-char-tagline" type="text" class="w-full bg-[#2b2d31] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="例：溫柔的圖書館管理員">
+              </div>
+            </div>
+            <div class="mb-2">
+              <label class="text-xs text-gray-400 block mb-1">性格描述</label>
+              <input id="galgame-char-personality" type="text" class="w-full bg-[#2b2d31] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="例：溫柔、內向、喜歡閱讀、不善言辭但很體貼">
+            </div>
+            <div class="mb-2">
+              <label class="text-xs text-gray-400 block mb-1">背景故事</label>
+              <textarea id="galgame-char-background" rows="3" class="w-full bg-[#2b2d31] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="角色的過去、身世、經歷…"></textarea>
+            </div>
+            <div class="mb-2">
+              <label class="text-xs text-gray-400 block mb-1">外貌描述</label>
+              <input id="galgame-char-appearance" type="text" class="w-full bg-[#2b2d31] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="例：長髮、藍眼、常穿白色連衣裙">
+            </div>
+            <div class="mb-2">
+              <label class="text-xs text-gray-400 block mb-1">說話風格</label>
+              <input id="galgame-char-speech" type="text" class="w-full bg-[#2b2d31] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="例：說話輕柔，常用敬語，偶爾會害羞地結巴">
+            </div>
+            <div class="mb-2">
+              <label class="text-xs text-gray-400 block mb-1">禮物偏好（會獲得1.5倍好感度加成）</label>
+              <input id="galgame-char-gift-pref" type="text" class="w-full bg-[#2b2d31] border border-[#3f4147] rounded px-3 py-2 text-sm" placeholder="例：花朵、書籍">
+            </div>
+            <div class="mb-2">
+              <label class="text-xs text-gray-400 block mb-1">劇情事件（JSON 陣列，選填）</label>
+              <textarea id="galgame-char-events" rows="3" class="w-full bg-[#2b2d31] border border-[#3f4147] rounded px-3 py-2 text-xs font-mono" placeholder='[{"affection_threshold":50,"flag":"first_secret","title":"第一次告白","description":"…"}]'></textarea>
+            </div>
+            <div class="flex gap-2 mt-3">
+              <button onclick="saveGalgameCharacter()" class="flex-1 bg-[#5865f2] hover:bg-[#4752c4] px-4 py-2 rounded-lg font-semibold text-sm">➕ 新增/更新角色</button>
+              <button onclick="resetGalgameCharForm()" class="bg-[#3f4147] hover:bg-[#4f5158] px-4 py-2 rounded-lg text-sm">🔄 清空表單</button>
+            </div>
+          </div>
+
+          <!-- 角色清單 -->
+          <div id="galgame-char-list" class="space-y-2"></div>
+        </div>
+      </div>
+
+</div>
       </div>
 
     </div>
@@ -1292,6 +1385,140 @@ async function saveSiegeSettings() {
   const r = await api('/api/siege-settings', 'PUT', data);
   if (r.ok) alert('✅ 攻城戰設定已儲存');
   else alert('❌ 儲存失敗');
+}
+
+// ═══ Galgame 互動小說 ═══
+function showGalgamePanel() {
+  ['polls-view','detail-view','chat-ai-view','meeting-ai-view','nations-view','scan-view'].forEach(v => document.getElementById(v).classList.add('hidden'));
+  document.getElementById('chat-ai-view').classList.remove('hidden');
+  showOnly('main-view');
+  setActiveTab('galgame');
+  setTimeout(() => { const el = document.getElementById('galgame-section'); if (el) el.scrollIntoView({behavior: 'smooth', block: 'start'}); }, 100);
+  loadGalgameSettings();
+}
+
+async function loadGalgameSettings() {
+  const s = await api('/api/galgame-settings');
+  if (s.error) { console.error('Galgame 設定載入失敗', s.error); return; }
+  document.getElementById('galgame-channel-id').value = s.channel_id || '';
+  document.getElementById('galgame-cooldown').value = s.interaction_cooldown ?? 300;
+  document.getElementById('galgame-daily-limit').value = s.daily_interact_limit ?? 20;
+  document.getElementById('galgame-affection-chat').value = s.affection_per_chat ?? 1;
+  document.getElementById('galgame-gift-min').value = s.gift_min_cost ?? 50;
+  document.getElementById('galgame-gift-max').value = s.gift_max_cost ?? 5000;
+  document.getElementById('galgame-affection-gift').value = s.affection_per_gift_base ?? 5;
+  renderGalgameCharList(s.characters || {});
+}
+
+async function saveGalgameSettings() {
+  const data = {
+    channel_id: document.getElementById('galgame-channel-id').value || null,
+    interaction_cooldown: parseInt(document.getElementById('galgame-cooldown').value) || 300,
+    daily_interact_limit: parseInt(document.getElementById('galgame-daily-limit').value) || 20,
+    affection_per_chat: parseInt(document.getElementById('galgame-affection-chat').value) || 1,
+    gift_min_cost: parseInt(document.getElementById('galgame-gift-min').value) || 50,
+    gift_max_cost: parseInt(document.getElementById('galgame-gift-max').value) || 5000,
+    affection_per_gift_base: parseInt(document.getElementById('galgame-affection-gift').value) || 5,
+  };
+  const r = await api('/api/galgame-settings', 'PUT', data);
+  if (r.ok) alert('✅ Galgame 設定已儲存');
+  else alert('❌ 儲存失敗：' + (r.error || ''));
+}
+
+function renderGalgameCharList(chars) {
+  const container = document.getElementById('galgame-char-list');
+  if (!chars || Object.keys(chars).length === 0) {
+    container.innerHTML = '<p class="text-gray-500 text-sm">目前沒有角色。使用上方表單新增。</p>';
+    return;
+  }
+  let html = '';
+  for (const [cid, ch] of Object.entries(chars)) {
+    html += `<div class="bg-[#1e1f22] rounded-lg p-3 flex items-start justify-between gap-3">
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-sm">${escapeHtml(ch.name)}</p>
+        <p class="text-xs text-gray-400">${escapeHtml(ch.tagline || ch.personality?.slice(0,30) || '')}</p>
+        <p class="text-xs text-gray-500 mt-1">ID: <code>${cid}</code></p>
+      </div>
+      <div class="flex gap-2 flex-shrink-0">
+        <button onclick="editGalgameCharacter('${cid}')" class="bg-[#3f4147] hover:bg-[#4f5158] px-3 py-1.5 rounded text-xs">✏️ 編輯</button>
+        <button onclick="deleteGalgameCharacter('${cid}', '${escapeHtml(ch.name)}')" class="bg-red-600/80 hover:bg-red-700 px-3 py-1.5 rounded text-xs">🗑️ 刪除</button>
+      </div>
+    </div>`;
+  }
+  container.innerHTML = html;
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+let _galgameCharsCache = {};
+async function saveGalgameCharacter() {
+  const name = document.getElementById('galgame-char-name').value.trim();
+  if (!name) { alert('❌ 角色名稱為必填'); return; }
+  const cid = document.getElementById('galgame-char-id').value.trim();
+  let events = [];
+  const eventsRaw = document.getElementById('galgame-char-events').value.trim();
+  if (eventsRaw) {
+    try { events = JSON.parse(eventsRaw); }
+    catch(e) { alert('❌ 劇情事件 JSON 格式錯誤：' + e.message); return; }
+  }
+  const data = {
+    name,
+    tagline: document.getElementById('galgame-char-tagline').value.trim(),
+    personality: document.getElementById('galgame-char-personality').value.trim(),
+    background: document.getElementById('galgame-char-background').value.trim(),
+    appearance: document.getElementById('galgame-char-appearance').value.trim(),
+    speech_style: document.getElementById('galgame-char-speech').value.trim(),
+    gift_preferences: document.getElementById('galgame-char-gift-pref').value.trim(),
+    story_events: events,
+  };
+  if (cid) {
+    data.id = cid;
+    const r = await api('/api/galgame/character', 'PUT', data);
+    if (r.ok) { alert('✅ 角色已更新'); resetGalgameCharForm(); loadGalgameSettings(); }
+    else alert('❌ 更新失敗：' + (r.error || ''));
+  } else {
+    const r = await api('/api/galgame/character', 'POST', data);
+    if (r.ok) { alert('✅ 角色已新增'); resetGalgameCharForm(); loadGalgameSettings(); }
+    else alert('❌ 新增失敗：' + (r.error || ''));
+  }
+}
+
+async function editGalgameCharacter(cid) {
+  const s = await api('/api/galgame-settings');
+  if (!s.characters || !s.characters[cid]) { alert('❌ 找不到角色'); return; }
+  const ch = s.characters[cid];
+  document.getElementById('galgame-char-id').value = cid;
+  document.getElementById('galgame-char-name').value = ch.name || '';
+  document.getElementById('galgame-char-tagline').value = ch.tagline || '';
+  document.getElementById('galgame-char-personality').value = ch.personality || '';
+  document.getElementById('galgame-char-background').value = ch.background || '';
+  document.getElementById('galgame-char-appearance').value = ch.appearance || '';
+  document.getElementById('galgame-char-speech').value = ch.speech_style || '';
+  document.getElementById('galgame-char-gift-pref').value = ch.gift_preferences || '';
+  document.getElementById('galgame-char-events').value = ch.story_events ? JSON.stringify(ch.story_events, null, 2) : '';
+  document.getElementById('galgame-section').scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+async function deleteGalgameCharacter(cid, name) {
+  if (!confirm(`確定要刪除角色「${name}」嗎？所有玩家的該角色進度也會被清除。`)) return;
+  const r = await api('/api/galgame/character', 'DELETE', {id: cid});
+  if (r.ok) { alert('✅ 角色已刪除'); resetGalgameCharForm(); loadGalgameSettings(); }
+  else alert('❌ 刪除失敗：' + (r.error || ''));
+}
+
+function resetGalgameCharForm() {
+  document.getElementById('galgame-char-id').value = '';
+  document.getElementById('galgame-char-name').value = '';
+  document.getElementById('galgame-char-tagline').value = '';
+  document.getElementById('galgame-char-personality').value = '';
+  document.getElementById('galgame-char-background').value = '';
+  document.getElementById('galgame-char-appearance').value = '';
+  document.getElementById('galgame-char-speech').value = '';
+  document.getElementById('galgame-char-gift-pref').value = '';
+  document.getElementById('galgame-char-events').value = '';
 }
 
 async function showChatAIPanel() {

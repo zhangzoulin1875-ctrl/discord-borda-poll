@@ -80,23 +80,13 @@ def _next_threshold(affection: int) -> int:
 
 # ── 持久化 ──
 def save_galgame():
-    """儲存 Galgame 狀態到本地 + Drive。"""
+    """儲存 Galgame 狀態到本地 JSON。
+    Drive 同步由全域 drive_sync_loop 自動處理（每 60 秒掃描 data/*.json）。"""
     _save_json_file(GALGAME_FILE, {
         "settings": galgame_settings,
         "characters": galgame_characters,
         "progress": galgame_progress,
     })
-    # Drive 同步
-    try:
-        if os.path.exists(GALGAME_FILE):
-            asyncio.ensure_future(_drive_upload("galgame.json", 
-                json_module.dumps({
-                    "settings": galgame_settings,
-                    "characters": galgame_characters,
-                    "progress": galgame_progress,
-                }, ensure_ascii=False), ))
-    except Exception:
-        pass
     _schedule_galgame_panel_refresh()
 
 
@@ -936,7 +926,7 @@ async def api_galgame_add_character(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    if str(user.get("id", "")) != str(BOT_OWNER_ID):
+    if str(user.get("user_id", "")) != str(BOT_OWNER_ID):
         return web.json_response({"error": "forbidden — 只有擁有者可以新增角色"}, status=403)
 
     body = await request.json()
@@ -970,7 +960,7 @@ async def api_galgame_update_character(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    if str(user.get("id", "")) != str(BOT_OWNER_ID):
+    if str(user.get("user_id", "")) != str(BOT_OWNER_ID):
         return web.json_response({"error": "forbidden — 只有擁有者可以編輯角色"}, status=403)
 
     body = await request.json()
@@ -993,7 +983,7 @@ async def api_galgame_delete_character(request):
     user = await _get_session_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
-    if str(user.get("id", "")) != str(BOT_OWNER_ID):
+    if str(user.get("user_id", "")) != str(BOT_OWNER_ID):
         return web.json_response({"error": "forbidden — 只有擁有者可以刪除角色"}, status=403)
 
     body = await request.json()
