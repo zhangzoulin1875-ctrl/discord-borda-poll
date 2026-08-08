@@ -2631,6 +2631,70 @@ function showCrossServerPanel() {
   document.querySelector('[data-tab="cross-server"]').classList.add('active');
   loadServerRegistry();
   loadWW1Settings();
+  loadSubBotCommands();
+}
+
+// ═══ 子機器人指令逐一開關 ═══
+async function loadSubBotCommands() {
+  const r = await api('/api/sub-bot-commands');
+  const container = document.getElementById('sub-bot-commands-list');
+  const badge = document.getElementById('sub-bot-online-badge');
+  if (r.error) {
+    container.innerHTML = '<p class="text-center text-red-400 py-4">載入失敗：' + r.error + '</p>';
+    if (badge) { badge.textContent = '⚪ 無法取得狀態'; badge.className = 'text-xs px-2 py-1 rounded bg-gray-600'; }
+    return;
+  }
+  if (badge) {
+    badge.textContent = r.sub_bot_online ? '🟢 已連線' : '⚪ 未連線（SUB_BOT_TOKEN 未設定或尚未啟動）';
+    badge.className = 'text-xs px-2 py-1 rounded ' + (r.sub_bot_online ? 'bg-green-700 text-white' : 'bg-gray-600 text-gray-300');
+  }
+
+  const groups = {};
+  const standalone = [];
+  (r.commands || []).forEach(c => {
+    if (c.group) {
+      if (!groups[c.group]) groups[c.group] = { description: c.group_description, items: [] };
+      groups[c.group].items.push(c);
+    } else {
+      standalone.push(c);
+    }
+  });
+
+  let html = '';
+  Object.keys(groups).forEach(gname => {
+    const g = groups[gname];
+    html += '<div class="border border-[#3a3d44] rounded-lg p-3">';
+    html += '<div class="text-sm font-semibold text-[#8a93f5] mb-2">/' + gname + (g.description ? ' — ' + g.description : '') + '</div>';
+    html += '<div class="grid grid-cols-2 gap-2">';
+    g.items.forEach(c => { html += _subBotToggleRow(c); });
+    html += '</div></div>';
+  });
+  if (standalone.length) {
+    html += '<div class="border border-[#3a3d44] rounded-lg p-3">';
+    html += '<div class="text-sm font-semibold text-[#8a93f5] mb-2">其他頂層指令</div>';
+    html += '<div class="grid grid-cols-2 gap-2">';
+    standalone.forEach(c => { html += _subBotToggleRow(c); });
+    html += '</div></div>';
+  }
+  container.innerHTML = html || '<p class="text-center text-gray-400 py-4">無可用指令</p>';
+}
+
+function _subBotToggleRow(c) {
+  const cmdLabel = c.group ? ('/' + c.group + ' ' + c.name) : ('/' + c.name);
+  return '<label class="flex items-start gap-2 bg-[#1e1f22] rounded-lg px-3 py-2 cursor-pointer hover:bg-[#26282c]">' +
+    '<input type="checkbox" ' + (c.enabled ? 'checked' : '') + ' onchange="toggleSubBotCommand(\'' + c.key + '\', this.checked)" class="mt-1">' +
+    '<span class="text-xs"><span class="text-white font-medium">' + cmdLabel + '</span><br><span class="text-gray-400">' + (c.description || '') + '</span></span>' +
+  '</label>';
+}
+
+async function toggleSubBotCommand(key, enabled) {
+  const data = { commands: {} };
+  data.commands[key] = enabled;
+  const r = await api('/api/sub-bot-commands', 'PUT', data);
+  if (!r.ok) {
+    alert('更新失敗：' + (r.error || '未知錯誤'));
+    loadSubBotCommands();
+  }
 }
 
 async function loadServerRegistry() {
@@ -2804,6 +2868,18 @@ init();
     <div id="ww1-status" class="mt-4 bg-[#1e1f22] rounded-lg p-4 hidden">
       <h4 class="text-sm font-semibold mb-2">當前戰況</h4>
       <div id="ww1-status-content" class="text-sm text-gray-300 space-y-1"></div>
+    </div>
+  </div>
+
+  <!-- 子機器人（娛樂）指令逐一開關 -->
+  <div class="bg-[#2b2d31] rounded-xl p-5 mt-4">
+    <div class="flex items-center justify-between mb-1">
+      <h3 class="font-semibold">🎮 子機器人指令管理</h3>
+      <span id="sub-bot-online-badge" class="text-xs px-2 py-1 rounded bg-gray-600">檢查中…</span>
+    </div>
+    <p class="text-xs text-gray-400 mb-4">逐一開關「娛樂子機器人」的每個指令。切換後立即同步到所有已加入的伺服器，不需要重啟。管理員/擁有者限定的指令預設關閉。</p>
+    <div id="sub-bot-commands-list" class="space-y-4">
+      <p class="text-center text-gray-400 py-4">載入中…</p>
     </div>
   </div>
 </div>

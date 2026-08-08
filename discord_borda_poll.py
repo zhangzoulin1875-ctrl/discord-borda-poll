@@ -254,6 +254,8 @@ async def keep_alive_server():
     app.router.add_put("/api/siege-settings", api_set_siege_settings)
     app.router.add_get("/api/server-registry", api_get_server_registry)
     app.router.add_put("/api/server-registry", api_set_server_registry)
+    app.router.add_get("/api/sub-bot-commands", api_get_sub_bot_commands)
+    app.router.add_put("/api/sub-bot-commands", api_set_sub_bot_commands)
     app.router.add_get("/api/ww1-settings", api_get_ww1_settings)
     app.router.add_put("/api/ww1-settings", api_set_ww1_settings)
     # Galgame API routes (registered by module 190)
@@ -977,6 +979,54 @@ async def api_set_server_registry(request):
     save_server_registry()
     print(f"📋 Dashboard 更新伺服器 {gid}: tier={_server_registry[gid].get('tier')}, ww1_ch={_server_registry[gid].get('ww1_channel_id')}")
     return web.json_response({"ok": True})
+
+
+async def api_get_sub_bot_commands(request):
+    """取得子機器人（娛樂機器人）所有候選指令的目錄與開關狀態，供 Dashboard 逐指令開關 UI 使用。"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    uid_str = user.get("user_id", "")
+    if str(uid_str) != str(BOT_OWNER_ID):
+        return web.json_response({"error": "forbidden — bot owner only"}, status=403)
+    try:
+        catalog = _get_sub_bot_command_catalog()
+    except Exception as e:
+        print(f"⚠️ 取得子機器人指令目錄失敗：{e}")
+        return web.json_response({"error": str(e)}, status=500)
+    return web.json_response({
+        "commands": catalog,
+        "sub_bot_online": sub_bot is not None and sub_bot.user is not None,
+    })
+
+
+async def api_set_sub_bot_commands(request):
+    """更新子機器人指令開關設定並即時同步到 Discord（若子機器人已連線）。
+    body: {"commands": {"quiz.toggle": false, "draw": true, ...}}"""
+    user = await _get_session_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    uid_str = user.get("user_id", "")
+    if str(uid_str) != str(BOT_OWNER_ID):
+        return web.json_response({"error": "forbidden — bot owner only"}, status=403)
+    try:
+        body = await request.json()
+        updates = body.get("commands", {})
+        if not isinstance(updates, dict):
+            return web.json_response({"error": "commands 必須是物件"}, status=400)
+        for key, enabled in updates.items():
+            _sub_bot_cmd_config[str(key)] = bool(enabled)
+        _save_sub_bot_cmd_config()
+        print(f"📋 Dashboard 更新子機器人指令開關：{updates}")
+        if sub_bot is not None:
+            try:
+                await _sync_sub_bot_tree()
+            except Exception as e:
+                print(f"⚠️ 子機器人指令即時同步失敗（設定已儲存，重啟後仍會生效）：{e}")
+        return web.json_response({"ok": True, "catalog": _get_sub_bot_command_catalog()})
+    except Exception as e:
+        print(f"⚠️ 更新子機器人指令開關失敗：{e}")
+        return web.json_response({"error": str(e)}, status=500)
 
 
 async def api_get_ww1_settings(request):
@@ -14640,6 +14690,136 @@ print(f"📦 Loaded {_loaded_mods} feature modules from modules/")
 sub_bot = None
 SUB_BOT_TOKEN_ENV = os.getenv("SUB_BOT_TOKEN")
 
+# ================================================================
+# Sub-bot command catalog & per-command dashboard toggle
+# ================================================================
+# 只有這些「純娛樂」指令群組才是子機器人的候選指令——不像先前版本整包
+# 複製全部群組（含 /schedule /system /economy 這種行政指令）。
+# 對照 modules/015_server_registry.py 的 ENTERTAINMENT_COMMANDS 分類。
+_SUB_BOT_GROUP_CLASSES = [
+    QuizGroup, TurtleSoupGroup, WerewolfGroup, StockGroup,
+    HorseRacingGroup, SiegeGroup, CyberWarGroup, GalgameGroup,
+]
+_SUB_BOT_ADMIN_MARKERS = ("管理員", "擁有者", "限定")
+_SUB_BOT_CMD_CONFIG_FILE = "data/sub_bot_commands.json"
+_sub_bot_cmd_config = {}
+
+
+def _sub_bot_cmd_default_enabled(description: str) -> bool:
+    """管理員/擁有者限定的子指令預設關閉；一般玩家可用的預設開啟。"""
+    desc = description or ""
+    return not any(marker in desc for marker in _SUB_BOT_ADMIN_MARKERS)
+
+
+def _load_sub_bot_cmd_config():
+    global _sub_bot_cmd_config
+    try:
+        if os.path.exists(_SUB_BOT_CMD_CONFIG_FILE):
+            with open(_SUB_BOT_CMD_CONFIG_FILE, "r", encoding="utf-8") as f:
+                _sub_bot_cmd_config = json.load(f)
+            print(f"[INFO] 子機器人指令設定：已載入 {len(_sub_bot_cmd_config)} 條覆寫設定")
+    except Exception as e:
+        print(f"[WARN] 子機器人指令設定載入失敗：{e}")
+        _sub_bot_cmd_config = {}
+
+
+def _save_sub_bot_cmd_config():
+    try:
+        os.makedirs("data", exist_ok=True)
+        with open(_SUB_BOT_CMD_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(_sub_bot_cmd_config, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] 子機器人指令設定儲存失敗：{e}")
+
+
+def _get_sub_bot_command_catalog():
+    """列出子機器人所有「候選」指令（含群組子指令 + 頂層 /draw），
+    附上目前有效的開關狀態，供 Dashboard 渲染逐指令開關 UI。"""
+    catalog = []
+    for cls in _SUB_BOT_GROUP_CLASSES:
+        try:
+            inst = cls()
+        except Exception as e:
+            print(f"[WARN] 指令目錄：無法建立 {cls.__name__} 實例：{e}")
+            continue
+        for cmd in inst.commands:
+            key = f"{inst.name}.{cmd.name}"
+            default_enabled = _sub_bot_cmd_default_enabled(cmd.description)
+            catalog.append({
+                "key": key,
+                "group": inst.name,
+                "group_description": inst.description,
+                "name": cmd.name,
+                "description": cmd.description,
+                "default_enabled": default_enabled,
+                "enabled": _sub_bot_cmd_config.get(key, default_enabled),
+            })
+    catalog.append({
+        "key": "draw",
+        "group": None,
+        "group_description": None,
+        "name": "draw",
+        "description": getattr(draw_command, "description", "文生圖"),
+        "default_enabled": True,
+        "enabled": _sub_bot_cmd_config.get("draw", True),
+    })
+    return catalog
+
+
+def _register_sub_bot_commands():
+    """依目前的開關設定，重建子機器人的指令樹（僅記憶體內，尚未 sync）。
+    群組若被關到剩 0 個子指令則整組跳過（Discord 規定群組至少要有 1 個子指令）。"""
+    if sub_bot is None:
+        return 0
+    sub_bot.tree.clear_commands(guild=None)
+    registered = 0
+    for cls in _SUB_BOT_GROUP_CLASSES:
+        try:
+            grp = cls()
+        except Exception as e:
+            print(f"[WARN] Sub-bot 無法建立群組 {cls.__name__}: {e}")
+            continue
+        for cmd in list(grp.commands):
+            key = f"{grp.name}.{cmd.name}"
+            default_enabled = _sub_bot_cmd_default_enabled(cmd.description)
+            if not _sub_bot_cmd_config.get(key, default_enabled):
+                grp.remove_command(cmd.name)
+        if len(grp.commands) == 0:
+            continue
+        try:
+            sub_bot.tree.add_command(grp)
+            registered += len(grp.commands)
+        except Exception as e:
+            print(f"[WARN] Sub-bot 無法註冊群組 {cls.__name__}: {e}")
+    if _sub_bot_cmd_config.get("draw", True):
+        try:
+            sub_bot.tree.add_command(draw_command)
+            registered += 1
+        except Exception as e:
+            print(f"[WARN] Sub-bot 無法註冊 /draw: {e}")
+    print(f"[INFO] Sub-bot 指令樹重建完成：{registered} 個已啟用指令")
+    return registered
+
+
+async def _sync_sub_bot_tree():
+    """重建 + 同步子機器人指令樹到 Discord（每個伺服器各別 sync 即時生效，
+    全域 sync 當備援）。可在啟動時或 Dashboard 更新設定後呼叫。"""
+    if sub_bot is None:
+        return
+    _register_sub_bot_commands()
+    for g in sub_bot.guilds:
+        try:
+            synced = await sub_bot.tree.sync(guild=g)
+            print(f"[OK] Sub-bot 已同步 {len(synced)} 個指令到伺服器 {g.name} ({g.id})")
+        except Exception as e:
+            print(f"[ERR] Sub-bot 伺服器同步失敗 {g.name}: {e}")
+    try:
+        synced_global = await sub_bot.tree.sync()
+        print(f"[OK] Sub-bot 全域同步：{len(synced_global)} 個指令")
+    except Exception as e:
+        print(f"[ERR] Sub-bot 全域同步失敗: {e}")
+
+
 # Helper: cross-bot channel/guild lookup
 def get_channel_any(ch_id):
     """Look up a channel across both bots (main + sub)."""
@@ -14662,21 +14842,8 @@ if SUB_BOT_TOKEN_ENV:
     sub_bot = commands.Bot(command_prefix="!", intents=_sub_intents)
 
     async def _sub_setup_hook():
-        _sub_groups = [
-            PollGroup(), MeetingGroup(), ScheduleGroup(), SystemGroup(), EconomyGroup(),
-            QuizGroup(), TurtleSoupGroup(), WerewolfGroup(), StockGroup(),
-            HorseRacingGroup(), SiegeGroup(), CyberWarGroup(), GalgameGroup(),
-        ]
-        for grp in _sub_groups:
-            try:
-                sub_bot.tree.add_command(grp)
-            except Exception as e:
-                print(f"[WARN] Sub-bot cannot register group {type(grp).__name__}: {e}")
-        try:
-            sub_bot.tree.add_command(draw_command)
-        except Exception as e:
-            print(f"[WARN] Sub-bot cannot register /draw: {e}")
-        print(f"[INFO] Sub-bot registered {len(_sub_groups)} command groups + /draw")
+        _load_sub_bot_cmd_config()
+        _register_sub_bot_commands()
 
     async def _sub_tree_interaction_check(interaction: discord.Interaction) -> bool:
         if interaction.user and is_blacklisted(interaction.user.id):
@@ -14732,24 +14899,14 @@ if sub_bot is not None:
 
     @sub_bot.event
     async def on_ready():
-        """Sub-bot on_ready: sync commands and register guilds."""
+        """Sub-bot on_ready: register guilds and sync the (already-filtered) command tree."""
         if not getattr(on_ready, "_sub_done", False):
             on_ready._sub_done = True
             print(f"[OK] Sub-bot online: {sub_bot.user}")
-            # Guild-specific sync (instant) + global sync (backup)
             for g in sub_bot.guilds:
                 _is_owner = (str(g.id) == ICEA_GUILD_ID)
                 register_server(g.id, g.name, is_owner_server=_is_owner)
-                try:
-                    synced = await sub_bot.tree.sync(guild=g)
-                    print(f"[OK] Sub-bot synced {len(synced)} commands to guild {g.name} ({g.id})")
-                except Exception as e:
-                    print(f"[ERR] Sub-bot guild sync failed for {g.name}: {e}")
-            try:
-                synced_global = await sub_bot.tree.sync()
-                print(f"[OK] Sub-bot global sync: {len(synced_global)} commands")
-            except Exception as e:
-                print(f"[ERR] Sub-bot global sync failed: {e}")
+            await _sync_sub_bot_tree()
 
     @sub_bot.event
     async def on_guild_join(guild):
