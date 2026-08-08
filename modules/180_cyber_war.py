@@ -29,6 +29,34 @@ _SUPPORT_TYPES = {
     "recon":       {"name": "空中偵查", "emoji": "🔭", "cost": 2, "desc": "偵察敵方陣地佈防與兵力部署"},
 }
 
+# ── 戰略資源（消耗補給點數購買，AI依照真實一戰戰場判斷消耗量） ──
+_RESOURCES = {
+    "bullets": {
+        "name": "子彈",
+        "emoji": "🔫",
+        "cost": 1,
+        "unit": "萬枚",
+        "amount_per_point": 1000,   # 1補給點數 → 1000萬枚子彈
+        "desc": "步兵彈藥補充。沒子彈時步兵無法進攻，只能拼刺刀（進攻加成大減）",
+    },
+    "shells": {
+        "name": "砲彈",
+        "emoji": "💥",
+        "cost": 1,
+        "unit": "萬發",
+        "amount_per_point": 100,    # 1補給點數 → 100萬發砲彈
+        "desc": "火砲彈藥補充。沒砲彈時野戰砲和迫擊砲無法使用（砲擊加成歸零）",
+    },
+    "iodine": {
+        "name": "碘酒",
+        "emoji": "🏥",
+        "cost": 1,
+        "unit": "公升",
+        "amount_per_point": 100,    # 1補給點數 → 100公升碘酒
+        "desc": "醫療消毒物資。沒碘酒時醫療設備停擺（醫療回血加成歸零）",
+    },
+}
+
 # ═════════════════════════════════════════════════════════════════
 # 特殊事件系統 — 52種固定事件（16天災 + 18陣營A + 18陣營B）
 # ═════════════════════════════════════════════════════════════════
@@ -370,6 +398,12 @@ def load_cyber_war():
                     fac["fortifications"] = {"trench": 0, "medical": 0, "mg_nest": 0, "field_gun": 0, "mortar": 0}
                 if "supply_points" not in fac:
                     fac["supply_points"] = 0
+                if "resources" not in fac:
+                    fac["resources"] = {
+                        "bullets": 10000000,
+                        "shells": 1000000,
+                        "iodine": 100,
+                    }
             print(f"⚔️ 賽博一戰資料已載入（active={_cyber_war_state.get('active')}）")
     except Exception as e:
         print(f"⚠️ 載入賽博一戰資料失敗：{e}")
@@ -622,6 +656,11 @@ async def _start_new_game(guild):
                 "field_gun": 0, "mortar": 0,
             },
             "supply_points": 0,
+            "resources": {
+                "bullets": 10000000,   # 1000萬枚子彈（初始值=10點）
+                "shells": 1000000,     # 100萬發砲彈（初始值=10點）
+                "iodine": 100,         # 100公升碘酒（初始值=10點）
+            },
         }
 
     fac_a = _build_faction("A", fac_a_info, side_a_members)
@@ -802,12 +841,32 @@ def _build_war_embed():
             beast_line = "💀 巨獸已被摧毀"
         else:
             beast_line = "🦾 尚未部署"
+        # 戰略資源
+        res = f.get("resources", {})
+        bullets = res.get("bullets", 0)
+        shells = res.get("shells", 0)
+        iodine = res.get("iodine", 0)
+        # 格式化數字（萬/百萬）
+        def _fmt_res(val, unit):
+            if unit == "萬枚":
+                if val >= 10000:
+                    return f"{val/10000:.0f}億枚"
+                return f"{val}萬枚"
+            elif unit == "萬發":
+                if val >= 10000:
+                    return f"{val/10000:.0f}億發"
+                return f"{val}萬發"
+            elif unit == "公升":
+                return f"{val}L"
+            return str(val)
+        res_line = f"🔫子彈{_fmt_res(bullets,'萬枚')} 💥砲彈{_fmt_res(shells,'萬發')} 🏥碘酒{_fmt_res(iodine,'公升')}"
         return (
             f"{f['flag']} **{f['name']}**{defeated}\n"
             f"```\n推進 [{bar}] {prog}%\n士氣 ❤️ {morale}  補給 📦 {supplies}  補給點數 ⚡{supply_pts}\n"
             f"軍官 {n_off}/{OFFICERS_PER_SIDE} | 小隊長 {n_sl}/{SQUAD_LEADERS_PER_SIDE} | 士兵 {n_sol}\n"
             f"本回合砲擊/空襲：{arty}/{MAX_ARTILLERY_PER_TURN}\n"
             f"陣地：{fort_line}\n"
+            f"資源：{res_line}\n"
             f"戰爭巨獸：{beast_line}```"
         )
 
@@ -1115,6 +1174,33 @@ class CyberWarPanelView(discord.ui.View):
             view=view, ephemeral=True
         )
 
+    @discord.ui.button(label="請求資源", style=discord.ButtonStyle.primary, emoji="📦", custom_id="cw_resource_btn")
+    async def resource_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _cyber_war_state.get("active"):
+            await interaction.response.send_message("⚔️ 目前沒有進行中的戰局。", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        info = _get_player_role(uid)
+        if not info:
+            await interaction.response.send_message("❌ 你不在本局參戰名單中。", ephemeral=True)
+            return
+        fkey, role, fac = info
+        if role != "officer":
+            await interaction.response.send_message("❌ 只有軍官可以請求戰略資源。", ephemeral=True)
+            return
+        view = _ResourceView(uid, fkey)
+        res = fac.get("resources", {})
+        await interaction.response.send_message(
+            f"📦 **戰略資源面板** — {fac['flag']} {fac['name']}\n"
+            f"⚡ 可用補給點數：**{fac.get('supply_points', 0)}**\n\n"
+            f" current庫存：\n"
+            f"  🔫 子彈：{_fmt_res(res.get('bullets',0),'萬枚')}\n"
+            f"  💥 砲彈：{_fmt_res(res.get('shells',0),'萬發')}\n"
+            f"  🏥 碘酒：{_fmt_res(res.get('iodine',0),'公升')}\n\n"
+            f"點擊下方按鈕消耗1補給點數補充對應資源：",
+            view=view, ephemeral=True
+        )
+
     @discord.ui.button(label="遊戲規則", style=discord.ButtonStyle.success, emoji="📖", custom_id="cw_rules_btn")
     async def rules_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         rules_text = (
@@ -1157,6 +1243,11 @@ class CyberWarPanelView(discord.ui.View):
             "  • 💥 野戰砲（5點）— 遠程砲擊，增加推進力\n"
             "  • 💣 迫擊砲（4點）— 曲射攻擊，越過戰壕\n"
             "  補給點數由每回合AI根據支援兵數量與後勤行動判定（最低8點，最高15點）。\n\n"
+            "📦 **戰略資源**（軍官專屬，消耗1補給點數購買）\n"
+            "  • 🔫 子彈（1點→1000萬枚）— 步兵彈藥，沒子彈只能拼刺刀（進攻×0.3）\n"
+            "  • 💥 砲彈（1點→100萬發）— 火砲彈藥，沒砲彈野砲/迫擊砲停用\n"
+            "  • 🏥 碘酒（1點→100公升）— 醫療物資，沒碘酒醫療設備停擺\n"
+            "  AI裁判每回合根據戰鬥規模自動判定消耗量，資源耗盡會大幅削弱對應能力。\n\n"
             "⚠️ **禁止事項 — 濫用會受罰！**\n"
             "以下行為會被AI裁判判定為「濫用」，該方**全陣營**遭受debuff：\n"
             "  ❌ 使用核彈、原子彈、飛彈、火箭等二戰後武器\n"
@@ -1210,6 +1301,80 @@ class CyberWarPanelView(discord.ui.View):
         )
 
 # ── WW1測試 View ──
+def _fmt_res(val, unit):
+    """格式化資源數量顯示。"""
+    if unit == "萬枚":
+        if val >= 10000:
+            return f"{val/10000:.0f}億枚"
+        return f"{val}萬枚"
+    elif unit == "萬發":
+        if val >= 10000:
+            return f"{val/10000:.0f}億發"
+        return f"{val}萬發"
+    elif unit == "公升":
+        return f"{val}L"
+    return str(val)
+
+
+class _ResourceView(discord.ui.View):
+    """戰略資源面板 — 消耗1補給點數購買資源。"""
+    def __init__(self, uid, fkey):
+        super().__init__(timeout=300)
+        self.uid = uid
+        self.fkey = fkey
+
+    def _get_fac(self):
+        return _cyber_war_state.get("factions", {}).get(self.fkey, {})
+
+    async def _buy_resource(self, interaction, res_key):
+        fac = self._get_fac()
+        supply_pts = fac.get("supply_points", 0)
+        res_info = _RESOURCES.get(res_key, {})
+        cost = res_info.get("cost", 1)
+        if supply_pts < cost:
+            await interaction.response.edit_message(
+                content=f"❌ 補給點數不足。{res_info['emoji']} {res_info['name']}需要{cost}點，你只有{supply_pts}點。",
+                view=self,
+            )
+            return
+        # 扣點 + 加資源
+        fac["supply_points"] = supply_pts - cost
+        amount = res_info.get("amount_per_point", 0)
+        fac.setdefault("resources", {})
+        fac["resources"][res_key] = fac["resources"].get(res_key, 0) + amount
+        save_cyber_war()
+        try:
+            await refresh_war_panel()
+        except Exception:
+            pass
+        # 顯示結果
+        res = fac["resources"]
+        await interaction.response.edit_message(
+            content=(
+                f"✅ 已購買 **{res_info['emoji']} {res_info['name']}** +{amount}{res_info['unit']}\n"
+                f"消耗補給點數：{cost}點（剩餘{fac.get('supply_points',0)}點）\n\n"
+                f"📊 當前庫存：\n"
+                f"  🔫 子彈：{_fmt_res(res.get('bullets',0),'萬枚')}\n"
+                f"  💥 砲彈：{_fmt_res(res.get('shells',0),'萬發')}\n"
+                f"  🏥 碘酒：{_fmt_res(res.get('iodine',0),'公升')}\n\n"
+                f"可繼續購買其他資源："
+            ),
+            view=_ResourceView(self.uid, self.fkey),
+        )
+
+    @discord.ui.button(label="買子彈(1點)", style=discord.ButtonStyle.primary, emoji="🔫", custom_id="cw_res_bullets")
+    async def buy_bullets(self, interaction, button):
+        await self._buy_resource(interaction, "bullets")
+
+    @discord.ui.button(label="買砲彈(1點)", style=discord.ButtonStyle.danger, emoji="💥", custom_id="cw_res_shells")
+    async def buy_shells(self, interaction, button):
+        await self._buy_resource(interaction, "shells")
+
+    @discord.ui.button(label="買碘酒(1點)", style=discord.ButtonStyle.success, emoji="🏥", custom_id="cw_res_iodine")
+    async def buy_iodine(self, interaction, button):
+        await self._buy_resource(interaction, "iodine")
+
+
 class _FortifyView(discord.ui.View):
     """陣地升級面板 — 5個按鈕，每個消耗補給點數。"""
     def __init__(self, uid, fkey):
@@ -2244,6 +2409,10 @@ async def _ai_evaluate_turn(turn: int):
                 lines.append(f"    → [{sup_name}] 目標：{at['target']}（{at.get('strategy', '')[:80]}）")
         if not lines:
             lines.append("  （無行動）")
+        # 資源狀態
+        res = fac.get("resources", {})
+        if res:
+            lines.append(f"  資源庫存：🔫子彈{res.get('bullets',0)}萬枚 💥砲彈{res.get('shells',0)}萬發 🏥碘酒{res.get('iodine',0)}L")
         return "\n".join(lines)
 
     side_a_text = _collect_side("A", fac_a)
@@ -2255,8 +2424,10 @@ async def _ai_evaluate_turn(turn: int):
         f"當前狀態：\n"
         f"  {fac_a.get('flag','')} {fac_a.get('name','')} — 推進{fac_a.get('progress',0)}%，士氣{fac_a.get('morale',100)}，補給{fac_a.get('supplies',100)}\n"
         f"  陣地：🛡️戰壕{fac_a.get('fortifications',{}).get('trench',0)} 🏥醫療{fac_a.get('fortifications',{}).get('medical',0)} 🔫機槍{fac_a.get('fortifications',{}).get('mg_nest',0)} 💥野砲{fac_a.get('fortifications',{}).get('field_gun',0)} 💣迫砲{fac_a.get('fortifications',{}).get('mortar',0)}\n"
+        f"  資源：🔫子彈{fac_a.get('resources',{}).get('bullets',0)}萬枚 💥砲彈{fac_a.get('resources',{}).get('shells',0)}萬發 🏥碘酒{fac_a.get('resources',{}).get('iodine',0)}L\n"
         f"  {fac_b.get('flag','')} {fac_b.get('name','')} — 推進{fac_b.get('progress',0)}%，士氣{fac_b.get('morale',100)}，補給{fac_b.get('supplies',100)}\n"
-        f"  陣地：🛡️戰壕{fac_b.get('fortifications',{}).get('trench',0)} 🏥醫療{fac_b.get('fortifications',{}).get('medical',0)} 🔫機槍{fac_b.get('fortifications',{}).get('mg_nest',0)} 💥野砲{fac_b.get('fortifications',{}).get('field_gun',0)} 💣迫砲{fac_b.get('fortifications',{}).get('mortar',0)}\n\n"
+        f"  陣地：🛡️戰壕{fac_b.get('fortifications',{}).get('trench',0)} 🏥醫療{fac_b.get('fortifications',{}).get('medical',0)} 🔫機槍{fac_b.get('fortifications',{}).get('mg_nest',0)} 💥野砲{fac_b.get('fortifications',{}).get('field_gun',0)} 💣迫砲{fac_b.get('fortifications',{}).get('mortar',0)}\n"
+        f"  資源：🔫子彈{fac_b.get('resources',{}).get('bullets',0)}萬枚 💥砲彈{fac_b.get('resources',{}).get('shells',0)}萬發 🏥碘酒{fac_b.get('resources',{}).get('iodine',0)}L\n\n"
         f"{fac_a.get('name','A')}方行動：\n{side_a_text}\n\n"
         f"{fac_b.get('name','B')}方行動：\n{side_b_text}\n\n"
         "【最重要規則 — 歷史背景強制檢查】\n"
@@ -2289,6 +2460,17 @@ async def _ai_evaluate_turn(turn: int):
         "  判定時必須將雙方陣地等級納入考量，陣地等級高的一方在防禦/進攻上有顯著優勢。\n"
         "戰爭巨獸：標註[WAR_BEAST]的行動為戰爭巨獸（齊柏林飛艇/裝甲列車/無畏艦），具有強大戰力但有限血量。巨獸行動可顯著影響戰局，但若該方戰況不佳巨獸會受損甚至被摧毀。\n"
         "補給點數判定：根據雙方支援兵數量、支援兵/軍官/小隊長的後勤相關行動（運送補給、後勤調度、維修裝備等）的質量與數量，判定本回合各方獲得的補給點數（最低8，最高15）。即使沒有支援兵或後勤行動，每回合仍至少恢復8點補給點數。支援兵人數多且行動品質佳的一方獲得較多補給點數。\n"
+        "戰略資源消耗判定：雙方擁有子彈、砲彈、碘酒三種戰略資源。請根據雙方行動的規模、兵種數量、戰鬥強度，依照真實一戰戰場消耗量判定本回合各方消耗的資源量。\n"
+        "  🔫子彈：每名士兵一次衝鋒約消耗100-300發子彈，防禦戰消耗較少。子彈歸零時步兵無法開槍只能拼刺刀，進攻效果大減（進攻分數×0.3）。\n"
+        "  💥砲彈：每門火砲一輪齊射約消耗數千發砲彈。砲彈歸零時野戰砲和迫擊砲的進攻加成歸零。\n"
+        "  🏥碘酒：每次救治傷兵約消耗數公升碘酒。碘酒歸零時醫療設備停擺，醫療回血加成歸零、傷亡增加。\n"
+        "請用以下格式回覆資源消耗（正數表示消耗量）：\n"
+        "===A_BULLETS_USED===\n數字（萬枚）\n"
+        "===B_BULLETS_USED===\n數字（萬枚）\n"
+        "===A_SHELLS_USED===\n數字（萬發）\n"
+        "===B_SHELLS_USED===\n數字（萬發）\n"
+        "===A_IODINE_USED===\n數字（公升）\n"
+        "===B_IODINE_USED===\n數字（公升）\n"
         "推進進度變化範圍：-10到+15，士氣變化：-20到+10，補給變化：-15到+5。\n"
         "若一方有濫用行為，該方進度/士氣可超出上述下限（最多-20/-25）。\n\n"
         "請用以下格式回覆（不要加其他文字）：\n"
@@ -2380,6 +2562,12 @@ async def _ai_evaluate_turn(turn: int):
         b_sup = _extract("B_SUPPLIES_DELTA", 0)
         a_sp = _extract("A_SUPPLY_POINTS", 0)
         b_sp = _extract("B_SUPPLY_POINTS", 0)
+        a_bul = _extract("A_BULLETS_USED", 0)
+        b_bul = _extract("B_BULLETS_USED", 0)
+        a_shl = _extract("A_SHELLS_USED", 0)
+        b_shl = _extract("B_SHELLS_USED", 0)
+        a_iod = _extract("A_IODINE_USED", 0)
+        b_iod = _extract("B_IODINE_USED", 0)
 
         summary = ""
         for tag in ("===SUMMARY===", "=== SUMMARY ==="):
@@ -2400,6 +2588,12 @@ async def _ai_evaluate_turn(turn: int):
             "b_supplies": max(-15, min(5, b_sup)),
             "a_supply_points": max(8, min(15, a_sp)),
             "b_supply_points": max(8, min(15, b_sp)),
+            "a_bullets_used": max(0, a_bul),
+            "b_bullets_used": max(0, b_bul),
+            "a_shells_used": max(0, a_shl),
+            "b_shells_used": max(0, b_shl),
+            "a_iodine_used": max(0, a_iod),
+            "b_iodine_used": max(0, b_iod),
             "summary": summary,
         }
     except Exception as e:
@@ -2603,15 +2797,29 @@ def _algo_evaluate_turn(turn):
         # 補給點數：支援兵貢獻 + 基礎值（最低恢復8點）
         supply_pts = max(8, int(support_supply_points + _cw_random.randint(0, 3)))
 
+        # 資源消耗估算（基於行動人數 + 兵種 + 砲擊）
+        total_personnel = len(soldiers) + len(fac.get("squad_leaders", [])) + len(fac.get("officers", []))
+        # 子彈：每活躍士兵消耗50-200萬枚
+        bullets_used = active_soldiers * _cw_random.randint(50, 200)
+        if any(kw in " ".join(a.values()) for kw in _OFFENSE_KEYWORDS):
+            bullets_used = int(bullets_used * 1.5)  # 進攻戰消耗更多
+        # 砲彈：每門野砲/迫砲/支援消耗5000-20000發(=0.5-2萬)
+        shells_used = (fg_lvl + mortar_lvl) * _cw_random.randint(5, 20)
+        for at in arty_list:
+            shells_used += _cw_random.randint(10, 30)  # 每次支援呼叫消耗大量砲彈
+        # 碘酒：每活躍士兵消耗0.1-0.5L
+        iodine_used = int(active_soldiers * _cw_random.randint(1, 5) / 10)
+
         return (offense_score, defense_score, supply_delta, morale_delta,
                 abuse_prog, abuse_mor, summary_parts, action_count, supply_pts,
-                trench_lvl, medical_lvl, mg_lvl, fg_lvl, mortar_lvl)
+                trench_lvl, medical_lvl, mg_lvl, fg_lvl, mortar_lvl,
+                bullets_used, shells_used, iodine_used)
 
     fac_a = s["factions"].get("A", {})
     fac_b = s["factions"].get("B", {})
 
-    a_off, a_def, a_sup, a_mor, a_abuse_p, a_abuse_m, a_parts, a_count, a_spts, a_trench, a_med, a_mg, a_fg, a_mor_b = _eval_side("A", fac_a)
-    b_off, b_def, b_sup, b_mor, b_abuse_p, b_abuse_m, b_parts, b_count, b_spts, b_trench, b_med, b_mg, b_fg, b_mor_b = _eval_side("B", fac_b)
+    a_off, a_def, a_sup, a_mor, a_abuse_p, a_abuse_m, a_parts, a_count, a_spts, a_trench, a_med, a_mg, a_fg, a_mor_b, a_bul, a_shl, a_iod = _eval_side("A", fac_a)
+    b_off, b_def, b_sup, b_mor, b_abuse_p, b_abuse_m, b_parts, b_count, b_spts, b_trench, b_med, b_mg, b_fg, b_mor_b, b_bul, b_shl, b_iod = _eval_side("B", fac_b)
 
     # ── 陣地機槍壓制效果 ──
     # 敵方機槍每級降低我方進攻效果3%
@@ -2620,6 +2828,25 @@ def _algo_evaluate_turn(turn):
     # 敵方戰壕每級額外降低我方進攻效果2%
     a_off_final = a_off_after_mg * max(0.5, 1 - b_trench * 0.02)
     b_off_final = b_off_after_mg * max(0.5, 1 - a_trench * 0.02)
+
+    # ── 戰略資源耗盡懲罰 ──
+    a_res = fac_a.get("resources", {})
+    b_res = fac_b.get("resources", {})
+    # 子彈耗盡 → 進攻力×0.3（只能拼刺刀）
+    if a_res.get("bullets", 0) <= 0:
+        a_off_final *= 0.3
+    if b_res.get("bullets", 0) <= 0:
+        b_off_final *= 0.3
+    # 砲彈耗盡 → 野砲+迫砲加成歸零
+    if a_res.get("shells", 0) <= 0:
+        a_off_final -= a_fg * 1.2 + a_mor_b * 0.8
+    if b_res.get("shells", 0) <= 0:
+        b_off_final -= b_fg * 1.2 + b_mor_b * 0.8
+    # 碘酒耗盡 → 醫療回血歸零 + 額外士氣下降
+    if a_res.get("iodine", 0) <= 0:
+        a_mor -= 3
+    if b_res.get("iodine", 0) <= 0:
+        b_mor -= 3
 
     # ── 計算進度變化 ──
     a_net_offense = a_off_final - b_def
@@ -2691,6 +2918,12 @@ def _algo_evaluate_turn(turn):
         "b_supplies": b_supplies,
         "a_supply_points": max(8, min(15, a_spts)),
         "b_supply_points": max(8, min(15, b_spts)),
+        "a_bullets_used": a_bul,
+        "b_bullets_used": b_bul,
+        "a_shells_used": a_shl,
+        "b_shells_used": b_shl,
+        "a_iodine_used": a_iod,
+        "b_iodine_used": b_iod,
         "summary": summary[:500],
     }
 
@@ -2710,6 +2943,12 @@ def _default_turn_result():
             "b_supplies": _cw_random.randint(-5, 0),
             "a_supply_points": _cw_random.randint(8, 12),
             "b_supply_points": _cw_random.randint(8, 12),
+            "a_bullets_used": _cw_random.randint(100, 500),
+            "b_bullets_used": _cw_random.randint(100, 500),
+            "a_shells_used": _cw_random.randint(5, 20),
+            "b_shells_used": _cw_random.randint(5, 20),
+            "a_iodine_used": _cw_random.randint(1, 10),
+            "b_iodine_used": _cw_random.randint(1, 10),
             "summary": "本回合戰況膠著，雙方各有小幅推進。",
         }
 
@@ -2798,6 +3037,38 @@ async def _process_turn_end():
             fac_a["supply_points"] = 50
         if fac_b["supply_points"] > 50:
             fac_b["supply_points"] = 50
+
+        # 戰略資源消耗（每回合由AI根據戰況判定消耗量）
+        a_res = fac_a.setdefault("resources", {})
+        b_res = fac_b.setdefault("resources", {})
+        a_bul_used = result.get("a_bullets_used", 0)
+        b_bul_used = result.get("b_bullets_used", 0)
+        a_shl_used = result.get("a_shells_used", 0)
+        b_shl_used = result.get("b_shells_used", 0)
+        a_iod_used = result.get("a_iodine_used", 0)
+        b_iod_used = result.get("b_iodine_used", 0)
+        a_res["bullets"] = max(0, a_res.get("bullets", 0) - a_bul_used)
+        b_res["bullets"] = max(0, b_res.get("bullets", 0) - b_bul_used)
+        a_res["shells"] = max(0, a_res.get("shells", 0) - a_shl_used)
+        b_res["shells"] = max(0, b_res.get("shells", 0) - b_shl_used)
+        a_res["iodine"] = max(0, a_res.get("iodine", 0) - a_iod_used)
+        b_res["iodine"] = max(0, b_res.get("iodine", 0) - b_iod_used)
+        # 資源耗盡提示
+        res_msgs = []
+        if a_res["bullets"] == 0 and a_bul_used > 0:
+            res_msgs.append(f"{fac_a['flag']}{fac_a['name']}子彈耗盡，步兵只能拼刺刀")
+        if b_res["bullets"] == 0 and b_bul_used > 0:
+            res_msgs.append(f"{fac_b['flag']}{fac_b['name']}子彈耗盡，步兵只能拼刺刀")
+        if a_res["shells"] == 0 and a_shl_used > 0:
+            res_msgs.append(f"{fac_a['flag']}{fac_a['name']}砲彈耗盡，火砲無法使用")
+        if b_res["shells"] == 0 and b_shl_used > 0:
+            res_msgs.append(f"{fac_b['flag']}{fac_b['name']}砲彈耗盡，火砲無法使用")
+        if a_res["iodine"] == 0 and a_iod_used > 0:
+            res_msgs.append(f"{fac_a['flag']}{fac_a['name']}碘酒耗盡，醫療停擺")
+        if b_res["iodine"] == 0 and b_iod_used > 0:
+            res_msgs.append(f"{fac_b['flag']}{fac_b['name']}碘酒耗盡，醫療停擺")
+        if res_msgs:
+            s["turn_summary"] += "\n⚠️ " + "、".join(res_msgs)
 
         # 醫療設備每級回復士氣
         a_med = fac_a.get("fortifications", {}).get("medical", 0)
