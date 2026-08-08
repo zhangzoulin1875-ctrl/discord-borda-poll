@@ -1001,53 +1001,47 @@ async def api_galgame_delete_character(request):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Discord 指令
+# Discord 指令（使用 app_commands.Group，與其他模組一致）
 # ═══════════════════════════════════════════════════════════════════════
 
-@bot.slash_command(name="galgame", description="互動小說系統")
-class GalgameGroup(discord.app_commands.Group):
-    pass
+class GalgameGroup(app_commands.Group):
+    """互動小說系統指令群組。"""
+    def __init__(self):
+        super().__init__(name="vn", description="🌸 互動小說 — 角色花園")
 
-# 因為模組用 exec 注入，Group 指令需要特殊處理
-# 改用獨立的 slash command
+    @app_commands.command(name="start", description="開啟互動小說面板")
+    async def vn_start(self, interaction: discord.Interaction):
+        embed = _build_galgame_embed()
+        view = GalgamePanelView()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-@bot.slash_command(name="vn", description="🌸 互動小說 — 角色花園入口")
-async def vn_cmd(interaction: discord.Interaction):
-    """互動小說入口指令。"""
-    embed = _build_galgame_embed()
-    view = GalgamePanelView()
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    @app_commands.command(name="admin", description="互動小說管理（僅擁有者）")
+    async def vn_admin(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != str(BOT_OWNER_ID):
+            await interaction.response.send_message("❌ 只有擁有者可以使用此指令。", ephemeral=True)
+            return
 
+        embed = discord.Embed(
+            title="🌸 Galgame 管理面板",
+            description=(
+                f"頻道 ID：{galgame_settings.get('channel_id', '未設定')}\n"
+                f"冷卻時間：{galgame_settings.get('interaction_cooldown', 300)} 秒\n"
+                f"每日上限：{galgame_settings.get('daily_interact_limit', 20)} 次\n"
+                f"送禮範圍：{galgame_settings.get('gift_min_cost', 50)}-{galgame_settings.get('gift_max_cost', 5000)} {currency_name()}\n"
+                f"角色數量：{len(galgame_characters)}\n"
+                f"玩家數量：{len(galgame_progress)}\n\n"
+                "角色管理請至 Dashboard 操作。"
+            ),
+            color=discord.Color.pink(),
+        )
 
-@bot.slash_command(name="vn_admin", description="🌸 互動小說管理（僅擁有者）")
-async def vn_admin_cmd(interaction: discord.Interaction):
-    """管理員指令：設定 Galgame 頻道。"""
-    if str(interaction.user.id) != str(BOT_OWNER_ID):
-        await interaction.response.send_message("❌ 只有擁有者可以使用此指令。", ephemeral=True)
-        return
+        if galgame_characters:
+            char_list = []
+            for cid, ch in galgame_characters.items():
+                char_list.append(f"• **{ch['name']}** — {ch.get('tagline', '')[:30]} (ID: `{cid}`)")
+            embed.add_field(name="角色清單", value="\n".join(char_list[:10]), inline=False)
 
-    # 顯示設定面板
-    embed = discord.Embed(
-        title="🌸 Galgame 管理面板",
-        description=(
-            f"頻道 ID：{galgame_settings.get('channel_id', '未設定')}\n"
-            f"冷卻時間：{galgame_settings.get('interaction_cooldown', 300)} 秒\n"
-            f"每日上限：{galgame_settings.get('daily_interact_limit', 20)} 次\n"
-            f"送禮範圍：{galgame_settings.get('gift_min_cost', 50)}-{galgame_settings.get('gift_max_cost', 5000)} {currency_name()}\n"
-            f"角色數量：{len(galgame_characters)}\n"
-            f"玩家數量：{len(galgame_progress)}\n\n"
-            "角色管理請至 Dashboard 操作。"
-        ),
-        color=discord.Color.pink(),
-    )
-
-    if galgame_characters:
-        char_list = []
-        for cid, ch in galgame_characters.items():
-            char_list.append(f"• **{ch['name']}** — {ch.get('tagline', '')[:30]} (ID: `{cid}`)")
-        embed.add_field(name="角色清單", value="\n".join(char_list[:10]), inline=False)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════
