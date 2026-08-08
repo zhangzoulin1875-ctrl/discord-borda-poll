@@ -400,10 +400,21 @@ def load_cyber_war():
                     fac["supply_points"] = 0
                 if "resources" not in fac:
                     fac["resources"] = {
-                        "bullets": 10000000,
-                        "shells": 1000000,
-                        "iodine": 100,
+                        "bullets": 3000,
+                        "shells": 300,
+                        "iodine": 500,
                     }
+                else:
+                    # 修正曾經出現的單位錯誤：舊版預設值誤把「萬」當基準單位存入
+                    # 原始數字（10000000/1000000/100），若偵測到還是舊預設值
+                    # （代表玩家尚未購買過資源），直接校正為新的正確預設值。
+                    res = fac["resources"]
+                    if res.get("bullets") == 10000000:
+                        res["bullets"] = 3000
+                    if res.get("shells") == 1000000:
+                        res["shells"] = 300
+                    if res.get("iodine") == 100:
+                        res["iodine"] = 500
             print(f"⚔️ 賽博一戰資料已載入（active={_cyber_war_state.get('active')}）")
     except Exception as e:
         print(f"⚠️ 載入賽博一戰資料失敗：{e}")
@@ -657,9 +668,9 @@ async def _start_new_game(guild):
             },
             "supply_points": 0,
             "resources": {
-                "bullets": 10000000,   # 1000萬枚子彈（初始值=10點）
-                "shells": 1000000,     # 100萬發砲彈（初始值=10點）
-                "iodine": 100,         # 100公升碘酒（初始值=10點）
+                "bullets": 3000,   # 3000萬枚子彈（單位：萬）
+                "shells": 300,     # 300萬發砲彈（單位：萬）
+                "iodine": 500,     # 500公升碘酒（單位：公升）
             },
         }
 
@@ -1193,7 +1204,7 @@ class CyberWarPanelView(discord.ui.View):
         await interaction.response.send_message(
             f"📦 **戰略資源面板** — {fac['flag']} {fac['name']}\n"
             f"⚡ 可用補給點數：**{fac.get('supply_points', 0)}**\n\n"
-            f" current庫存：\n"
+            f"目前庫存：\n"
             f"  🔫 子彈：{_fmt_res(res.get('bullets',0),'萬枚')}\n"
             f"  💥 砲彈：{_fmt_res(res.get('shells',0),'萬發')}\n"
             f"  🏥 碘酒：{_fmt_res(res.get('iodine',0),'公升')}\n\n"
