@@ -430,9 +430,9 @@ class QuizAnswerView(discord.ui.View):
 
         # Try to edit the message with the answer
         try:
-            channel_id = quiz_settings.get("channel_id")
-            if channel_id:
-                channel = get_channel_any(int(channel_id))
+            ch_id = self.question_data.get("channel_id") or quiz_settings.get("channel_id")
+            if ch_id:
+                channel = get_channel_any(int(ch_id))
                 if channel:
                     correct_idx = self.question_data["correct_index"]
                     embed = discord.Embed(
@@ -506,12 +506,6 @@ async def quiz_question_loop():
                 await asyncio.sleep(15)
                 continue
 
-            channel = get_channel_any(int(channel_id))
-            if not channel:
-                print(f"⚠️ Quiz: Cannot find channel {channel_id}")
-                await asyncio.sleep(15)
-                continue
-
             # Generate the question (with dedup — won't repeat previously asked questions)
             print("📝 Quiz: Generating new question...")
             quiz_data = await _generate_quiz_question_with_dedup()
@@ -530,25 +524,30 @@ async def quiz_question_loop():
             )
             embed.set_footer(text="⏱️ 10 分鐘內搶答 | 最先答對得 5 分")
 
-            # Send the question
-            msg = await channel.send(embed=embed)
-            view = QuizAnswerView(quiz_data, msg.id)
-            await msg.edit(view=view)
+            # Send the question to ALL configured channels
+            for channel in all_channels:
+                try:
+                    msg = await channel.send(embed=embed)
+                    view = QuizAnswerView(quiz_data, msg.id)
+                    await msg.edit(view=view)
 
-            # Store the active question
-            quiz_active_questions[str(msg.id)] = {
-                "question": quiz_data["question"],
-                "options": quiz_data["options"],
-                "correct_index": quiz_data["correct_index"],
-                "source_title": quiz_data.get("source_title", ""),
-                "source_url": quiz_data.get("source_url", ""),
-                "answered_by": None,
-                "created_at": _time.time(),
-            }
+                    # Store the active question
+                    quiz_active_questions[str(msg.id)] = {
+                        "question": quiz_data["question"],
+                        "options": quiz_data["options"],
+                        "correct_index": quiz_data["correct_index"],
+                        "source_title": quiz_data.get("source_title", ""),
+                        "source_url": quiz_data.get("source_url", ""),
+                        "answered_by": None,
+                        "created_at": _time.time(),
+                        "channel_id": str(channel.id),
+                    }
+                    print(f"✅ Quiz: Question posted in #{channel.name} (msg_id={msg.id})")
+                except Exception as e:
+                    print(f"⚠️ Quiz: Failed to post in channel {channel.id}: {e}")
 
             _quiz_last_question_time = _time.time()
             save_quiz_data()
-            print(f"✅ Quiz: Question posted in #{channel.name} (msg_id={msg.id})")
         except Exception as e:
             print(f"⚠️ Quiz loop error: {e}")
 
@@ -571,11 +570,10 @@ async def quiz_settlement_loop():
                     if entry.get("date") == today and entry.get("daily_score", 0) > 0:
                         today_scores.append((uid, entry["username"], entry["daily_score"]))
 
-                channel_id = quiz_settings.get("channel_id")
-                channel = get_channel_any(int(channel_id)) if channel_id else None
+                all_channels = _get_all_quiz_channels()
 
                 if not today_scores:
-                    if channel:
+                    for channel in all_channels:
                         embed = discord.Embed(
                             title="📊 今日問答結算",
                             description="今天沒有人得分，再接再厲！明天 22:00 再結算～",
@@ -609,42 +607,45 @@ async def quiz_settlement_loop():
                             "runner_up_score": runner_up_score,
                         })
 
-                    if channel:
-                        if len(tied) > 1:
-                            embed = discord.Embed(
-                                title="🏆 今日問答結算 — 共同冠軍！",
-                                color=discord.Color.gold(),
-                                timestamp=discord.utils.utcnow(),
-                            )
-                            champ_text = "\n".join(f"👑 **{name}** — {score} 分" for _, name, score in tied)
-                            embed.add_field(name="共同冠軍", value=champ_text, inline=False)
-                        else:
-                            embed = discord.Embed(
-                                title="🏆 今日問答結算",
-                                color=discord.Color.gold(),
-                                timestamp=discord.utils.utcnow(),
-                            )
-                            embed.add_field(
-                                name="🥇 冠軍",
-                                value=f"**{champion_name}** — {champion_score} 分",
-                                inline=False
-                            )
-                            if len(today_scores) > 1:
+                    for channel in all_channels:
+                        try:
+                            if len(tied) > 1:
+                                embed = discord.Embed(
+                                    title="🏆 今日問答結算 — 共同冠軍！",
+                                    color=discord.Color.gold(),
+                                    timestamp=discord.utils.utcnow(),
+                                )
+                                champ_text = "\n".join(f"👑 **{name}** — {score} 分" for _, name, score in tied)
+                                embed.add_field(name="共同冠軍", value=champ_text, inline=False)
+                            else:
+                                embed = discord.Embed(
+                                    title="🏆 今日問答結算",
+                                    color=discord.Color.gold(),
+                                    timestamp=discord.utils.utcnow(),
+                                )
                                 embed.add_field(
-                                    name="🥈 亞軍",
-                                    value=f"**{runner_up_name}** — {runner_up_score} 分",
+                                    name="🥇 冠軍",
+                                    value=f"**{champion_name}** — {champion_score} 分",
                                     inline=False
                                 )
-                            embed.add_field(
-                                name="📊 完整排名",
-                                value="\n".join(
-                                    f"{i+1}. {name} — {score} 分"
-                                    for i, (_, name, score) in enumerate(today_scores[:10])
-                                ),
-                                inline=False
-                            )
-                        embed.set_footer(text="每日 22:00 自動結算 | 明日重新計分")
-                        await channel.send(embed=embed)
+                                if len(today_scores) > 1:
+                                    embed.add_field(
+                                        name="🥈 亞軍",
+                                        value=f"**{runner_up_name}** — {runner_up_score} 分",
+                                        inline=False
+                                    )
+                                embed.add_field(
+                                    name="📊 完整排名",
+                                    value="\n".join(
+                                        f"{i+1}. {name} — {score} 分"
+                                        for i, (_, name, score) in enumerate(today_scores[:10])
+                                    ),
+                                    inline=False
+                                )
+                            embed.set_footer(text="每日 22:00 自動結算 | 明日重新計分")
+                            await channel.send(embed=embed)
+                        except Exception as e:
+                            print(f"⚠️ Quiz settlement send failed for channel {channel.id}: {e}")
 
                     # Reset daily scores for the new day
                     for uid, entry in quiz_scores.items():
@@ -683,12 +684,17 @@ class QuizGroup(app_commands.Group):
         if not is_admin(interaction):
             await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
-        quiz_settings["channel_id"] = str(channel.id)
-        quiz_settings["guild_id"] = str(interaction.guild.id) if interaction.guild else None
+        guild_id_str = str(interaction.guild.id) if interaction.guild else None
+        if guild_id_str == ICEA_GUILD_ID:
+            quiz_settings["channel_id"] = str(channel.id)
+            quiz_settings["guild_id"] = guild_id_str
+            msg = f"✅ AI 問答主面板頻道已設為 {channel.mention}。"
+        elif guild_id_str:
+            quiz_settings.setdefault("guild_channels", {})[guild_id_str] = str(channel.id)
+            msg = f"✅ 本伺服器的 AI 問答子面板頻道已設為 {channel.mention}。"
         save_quiz_data()
         await interaction.response.send_message(
-            f"✅ AI 問答頻道已設為 {channel.mention}。\n"
-            f"每 30 分鐘會自動出題，最先答對得 5 分，每晚 22:00 結算冠軍。",
+            f"{msg}\n每 30 分鐘會自動出題，最先答對得 5 分，每晚 22:00 結算冠軍。",
             ephemeral=True
         )
 

@@ -34,6 +34,7 @@ def _save_turtle_soup():
         ts_settings = {
             "enabled": chat_ai_settings.get("turtle_soup_enabled", False),
             "channel_id": chat_ai_settings.get("turtle_soup_channel_id"),
+            "guild_channels": chat_ai_settings.get("turtle_soup_guild_channels", {}),
             "difficulty": chat_ai_settings.get("turtle_soup_difficulty", "medium"),
         }
         _save_json_file(TURTLE_SOUP_FILE, ts_settings)
@@ -48,6 +49,7 @@ def _load_turtle_soup():
                 data = json_module.load(f)
             chat_ai_settings["turtle_soup_enabled"] = data.get("enabled", False)
             chat_ai_settings["turtle_soup_channel_id"] = data.get("channel_id")
+            chat_ai_settings["turtle_soup_guild_channels"] = data.get("guild_channels", {})
             chat_ai_settings["turtle_soup_difficulty"] = data.get("difficulty", "medium")
     except Exception as e:
         print(f"⚠️ Turtle soup load failed: {e}")
@@ -807,6 +809,31 @@ async def _post_turtle_soup_invite(channel):
 
 # ── 海龜湯背景循環 ──
 async def turtle_soup_loop():
+
+def _get_all_soup_channels() -> list:
+    """Return all configured turtle soup channels (main + guest guild sub-panels)."""
+    channels = []
+    seen = set()
+    main_id = chat_ai_settings.get("turtle_soup_channel_id")
+    if main_id:
+        try:
+            ch = get_channel_any(int(main_id))
+            if ch:
+                channels.append(ch)
+                seen.add(str(main_id))
+        except Exception:
+            pass
+    for g_id, ch_id in chat_ai_settings.get("turtle_soup_guild_channels", {}).items():
+        if ch_id and str(ch_id) not in seen:
+            try:
+                ch = get_channel_any(int(ch_id))
+                if ch:
+                    channels.append(ch)
+                    seen.add(str(ch_id))
+            except Exception:
+                pass
+    return channels
+
     """背景任務：管理海龜湯邀請面板，遊戲結束後自動重發。"""
     global _turtle_soup_invite_msg_id
     await asyncio.sleep(30)  # 等待 bot 就緒
@@ -816,33 +843,29 @@ async def turtle_soup_loop():
                 await asyncio.sleep(15)
                 continue
 
-            channel_id = chat_ai_settings.get("turtle_soup_channel_id")
-            if not channel_id:
+            all_channels = _get_all_soup_channels()
+            if not all_channels:
                 await asyncio.sleep(15)
                 continue
 
-            channel = get_channel_any(int(channel_id))
-            if not channel:
-                await asyncio.sleep(15)
-                continue
-
-            # 如果沒有遊戲進行中，確保有邀請面板
+            # 如果沒有遊戲進行中，確保每個頻道都有邀請面板
             if not _turtle_soup_state["active"]:
-                # 檢查現有面板是否還在
-                needs_post = True
-                if _turtle_soup_invite_msg_id:
+                for channel in all_channels:
                     try:
-                        msg = await channel.fetch_message(_turtle_soup_invite_msg_id)
-                        # 面板還在，不需要重發
-                        needs_post = False
-                    except discord.NotFound:
-                        # 面板已過期/被刪除，需要重發
-                        _turtle_soup_invite_msg_id = None
-                    except Exception:
-                        _turtle_soup_invite_msg_id = None
+                        needs_post = True
+                        if _turtle_soup_invite_msg_id:
+                            try:
+                                msg = await channel.fetch_message(_turtle_soup_invite_msg_id)
+                                needs_post = False
+                            except discord.NotFound:
+                                _turtle_soup_invite_msg_id = None
+                            except Exception:
+                                _turtle_soup_invite_msg_id = None
 
-                if needs_post:
-                    await _post_turtle_soup_invite(channel)
+                        if needs_post:
+                            await _post_turtle_soup_invite(channel)
+                    except Exception as e:
+                        print(f"⚠️ Turtle soup invite panel failed for channel {channel.id}: {e}")
 
             await asyncio.sleep(30)  # 每30秒檢查一次
         except Exception as e:
@@ -857,8 +880,19 @@ async def _handle_turtle_soup_message(message):
     if not chat_ai_settings.get("turtle_soup_enabled"):
         return False
 
-    channel_id = chat_ai_settings.get("turtle_soup_channel_id")
-    if not channel_id or message.channel.id != int(channel_id):
+    # Check if message is in any configured soup channel (main + guild sub-panels)
+    main_ch_id = chat_ai_settings.get("turtle_soup_channel_id")
+    guild_ch_ids = chat_ai_settings.get("turtle_soup_guild_channels", {})
+    all_ch_ids = set()
+    if main_ch_id:
+        all_ch_ids.add(int(main_ch_id))
+    for g_id, ch_id in guild_ch_ids.items():
+        if ch_id:
+            try:
+                all_ch_ids.add(int(ch_id))
+            except Exception:
+                pass
+    if message.channel.id not in all_ch_ids:
         return False
 
     if message.author.bot:
@@ -1117,10 +1151,16 @@ class TurtleSoupGroup(app_commands.Group):
         if not is_admin(interaction):
             await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
-        chat_ai_settings["turtle_soup_channel_id"] = str(channel.id)
+        guild_id_str = str(interaction.guild.id) if interaction.guild else None
+        if guild_id_str == ICEA_GUILD_ID:
+            chat_ai_settings["turtle_soup_channel_id"] = str(channel.id)
+            msg = "✅ 海龜湯主面板頻道已設為"
+        elif guild_id_str:
+            chat_ai_settings.setdefault("turtle_soup_guild_channels", {})[guild_id_str] = str(channel.id)
+            msg = "✅ 本伺服器的海龜湯子面板頻道已設為"
         _save_turtle_soup()
         await interaction.response.send_message(
-            f"✅ 海龜湯頻道已設為 {channel.mention}。\n"
+            f"{msg} {channel.mention}。\n"
             f"啟用後，沒有遊戲進行時會自動發送邀請面板。",
             ephemeral=True,
         )
@@ -1160,7 +1200,11 @@ class TurtleSoupGroup(app_commands.Group):
         embed = discord.Embed(title="🍜 AI 海龜湯狀態", color=discord.Color.teal())
         embed.add_field(name="功能狀態", value="開啟" if chat_ai_settings.get("turtle_soup_enabled") else "關閉", inline=True)
         ch_id = chat_ai_settings.get("turtle_soup_channel_id")
-        embed.add_field(name="頻道", value=f"<#{ch_id}>" if ch_id else "未設定", inline=True)
+        guild_chs = chat_ai_settings.get("turtle_soup_guild_channels", {})
+        ch_text = f"<#{ch_id}>" if ch_id else "未設定"
+        if guild_chs:
+            ch_text += f" (+{len(guild_chs)} 個子面板)"
+        embed.add_field(name="頻道", value=ch_text, inline=True)
         embed.add_field(name="難度", value=chat_ai_settings.get("turtle_soup_difficulty", "medium"), inline=True)
 
         if _turtle_soup_state["active"]:
