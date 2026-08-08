@@ -1218,13 +1218,19 @@ async def api_galgame_import_micropedia(request):
 load_galgame()
 
 # 註冊 API 路由（在模組載入時透過全域變數註冊，主程式會收集）
+# 格式：(path, method, handler) — 與主程式 discord_borda_poll.py 的註冊迴圈
+# 解包順序一致（該迴圈用 `for _path, _method, _handler in ...`）。
+# 注意：先前這裡誤寫成 (method, path, handler)，導致 _method 變數實際拿到的是
+# path 字串、永遠不等於 "GET"/"PUT"/"POST"/"DELETE"，所有 galgame API 路由
+# 從模組建立以來就從未被 app.router 真正註冊過（迴圈本身不拋例外，靜默失敗），
+# 造成 dashboard 呼叫全部回傳 aiohttp 預設的 404 頁面。已修正順序。
 _galgame_api_routes = [
-    ("GET",  "/api/galgame-settings",       api_get_galgame_settings),
-    ("PUT",  "/api/galgame-settings",       api_set_galgame_settings),
-    ("POST", "/api/galgame/character",      api_galgame_add_character),
-    ("PUT",  "/api/galgame/character",      api_galgame_update_character),
-    ("DELETE", "/api/galgame/character",    api_galgame_delete_character),
-    ("POST",  "/api/galgame/import-micropedia", api_galgame_import_micropedia),
+    ("/api/galgame-settings",       "GET",    api_get_galgame_settings),
+    ("/api/galgame-settings",       "PUT",    api_set_galgame_settings),
+    ("/api/galgame/character",      "POST",   api_galgame_add_character),
+    ("/api/galgame/character",      "PUT",    api_galgame_update_character),
+    ("/api/galgame/character",      "DELETE", api_galgame_delete_character),
+    ("/api/galgame/import-micropedia", "POST", api_galgame_import_micropedia),
 ]
 
 # 持久化 View 由主程式統一註冊（bot.add_view），這裡不重複
