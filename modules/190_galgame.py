@@ -211,7 +211,7 @@ def _get_galgame_panel_channel():
     ch_id = galgame_settings.get("channel_id")
     if not ch_id:
         return None
-    return bot.get_channel(int(ch_id))
+    return get_channel_any(int(ch_id))
 
 
 async def setup_galgame_panel():

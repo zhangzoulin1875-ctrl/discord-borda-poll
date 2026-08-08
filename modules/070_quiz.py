@@ -416,7 +416,7 @@ class QuizAnswerView(discord.ui.View):
         try:
             channel_id = quiz_settings.get("channel_id")
             if channel_id:
-                channel = bot.get_channel(int(channel_id))
+                channel = get_channel_any(int(channel_id))
                 if channel:
                     correct_idx = self.question_data["correct_index"]
                     embed = discord.Embed(
@@ -490,7 +490,7 @@ async def quiz_question_loop():
                 await asyncio.sleep(15)
                 continue
 
-            channel = bot.get_channel(int(channel_id))
+            channel = get_channel_any(int(channel_id))
             if not channel:
                 print(f"⚠️ Quiz: Cannot find channel {channel_id}")
                 await asyncio.sleep(15)
@@ -556,7 +556,7 @@ async def quiz_settlement_loop():
                         today_scores.append((uid, entry["username"], entry["daily_score"]))
 
                 channel_id = quiz_settings.get("channel_id")
-                channel = bot.get_channel(int(channel_id)) if channel_id else None
+                channel = get_channel_any(int(channel_id)) if channel_id else None
 
                 if not today_scores:
                     if channel:
@@ -773,10 +773,10 @@ class QuizGroup(app_commands.Group):
         if not quiz_data:
             await interaction.followup.send("❌ 出題失敗，請稍後再試。", ephemeral=True)
             return
-        channel = bot.get_channel(int(channel_id))
+        channel = get_channel_any(int(channel_id))
         if not channel:
             try:
-                channel = await bot.fetch_channel(int(channel_id))
+                channel = await sub_bot.fetch_channel(int(channel_id)) if sub_bot else await bot.fetch_channel(int(channel_id))
             except Exception as e:
                 print("⚠️ 靜默例外:", e)
         if not channel:

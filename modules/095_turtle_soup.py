@@ -821,7 +821,7 @@ async def turtle_soup_loop():
                 await asyncio.sleep(15)
                 continue
 
-            channel = bot.get_channel(int(channel_id))
+            channel = get_channel_any(int(channel_id))
             if not channel:
                 await asyncio.sleep(15)
                 continue

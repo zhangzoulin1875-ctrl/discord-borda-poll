@@ -633,7 +633,7 @@ async def _start_new_game(guild):
     for _gid, _ch_id in get_all_ww1_servers():
         if _gid == guild.id:
             continue  # 跳過主伺服器（已加入）
-        _g = bot.get_guild(_gid)
+        _g = get_guild_any(_gid)
         if not _g:
             continue
         _g_members = [m for m in _g.members if not m.bot]
@@ -2305,7 +2305,7 @@ async def _get_war_panel_channel():
     ch_id = _cyber_war_settings.get("channel_id")
     if not ch_id:
         return None
-    return bot.get_channel(int(ch_id))
+    return get_channel_any(int(ch_id))
 
 async def setup_war_panel():
     channel = await _get_war_panel_channel()
@@ -2349,7 +2349,7 @@ async def refresh_war_panel():
         if str(_gid) == str(GUILD_ID):
             continue
         try:
-            _guild = bot.get_guild(_gid)
+            _guild = get_guild_any(_gid)
             if not _guild:
                 continue
             _ch = _guild.get_channel(_ch_id)
