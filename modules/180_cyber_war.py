@@ -1156,7 +1156,7 @@ class CyberWarPanelView(discord.ui.View):
             "  • 🔫 定點機槍（4點）— 壓制敵方步兵衝鋒\n"
             "  • 💥 野戰砲（5點）— 遠程砲擊，增加推進力\n"
             "  • 💣 迫擊砲（4點）— 曲射攻擊，越過戰壕\n"
-            "  補給點數由每回合AI根據支援兵數量與後勤行動判定（0-15點）。\n\n"
+            "  補給點數由每回合AI根據支援兵數量與後勤行動判定（最低8點，最高15點）。\n\n"
             "⚠️ **禁止事項 — 濫用會受罰！**\n"
             "以下行為會被AI裁判判定為「濫用」，該方**全陣營**遭受debuff：\n"
             "  ❌ 使用核彈、原子彈、飛彈、火箭等二戰後武器\n"
@@ -2288,7 +2288,7 @@ async def _ai_evaluate_turn(turn: int):
         "  迫擊砲💣：每級增加我方推進效果1.5%（可越過戰溝攻擊）。\n"
         "  判定時必須將雙方陣地等級納入考量，陣地等級高的一方在防禦/進攻上有顯著優勢。\n"
         "戰爭巨獸：標註[WAR_BEAST]的行動為戰爭巨獸（齊柏林飛艇/裝甲列車/無畏艦），具有強大戰力但有限血量。巨獸行動可顯著影響戰局，但若該方戰況不佳巨獸會受損甚至被摧毀。\n"
-        "補給點數判定：根據雙方支援兵數量、支援兵/軍官/小隊長的後勤相關行動（運送補給、後勤調度、維修裝備等）的質量與數量，判定本回合各方獲得的補給點數（0-15）。支援兵人數多且行動品質佳的一方獲得較多補給點數。\n"
+        "補給點數判定：根據雙方支援兵數量、支援兵/軍官/小隊長的後勤相關行動（運送補給、後勤調度、維修裝備等）的質量與數量，判定本回合各方獲得的補給點數（最低8，最高15）。即使沒有支援兵或後勤行動，每回合仍至少恢復8點補給點數。支援兵人數多且行動品質佳的一方獲得較多補給點數。\n"
         "推進進度變化範圍：-10到+15，士氣變化：-20到+10，補給變化：-15到+5。\n"
         "若一方有濫用行為，該方進度/士氣可超出上述下限（最多-20/-25）。\n\n"
         "請用以下格式回覆（不要加其他文字）：\n"
@@ -2298,8 +2298,8 @@ async def _ai_evaluate_turn(turn: int):
         "===B_MORALE_DELTA===\n數字\n"
         "===A_SUPPLIES_DELTA===\n數字\n"
         "===B_SUPPLIES_DELTA===\n數字\n"
-        "===A_SUPPLY_POINTS===\n數字(0-15)\n"
-        "===B_SUPPLY_POINTS===\n數字(0-15)\n"
+        "===A_SUPPLY_POINTS===\n數字(8-15)\n"
+        "===B_SUPPLY_POINTS===\n數字(8-15)\n"
         "===SUMMARY===\n一段100字以內的戰況描述（繁體中文）"
     )
 
@@ -2398,8 +2398,8 @@ async def _ai_evaluate_turn(turn: int):
             "b_morale": max(-25, min(10, b_mor)),
             "a_supplies": max(-15, min(5, a_sup)),
             "b_supplies": max(-15, min(5, b_sup)),
-            "a_supply_points": max(0, min(15, a_sp)),
-            "b_supply_points": max(0, min(15, b_sp)),
+            "a_supply_points": max(8, min(15, a_sp)),
+            "b_supply_points": max(8, min(15, b_sp)),
             "summary": summary,
         }
     except Exception as e:
@@ -2600,8 +2600,8 @@ def _algo_evaluate_turn(turn):
         offense_score += fg_lvl * 1.2
         offense_score += mortar_lvl * 0.8
 
-        # 補給點數：支援兵貢獻 + 基礎值
-        supply_pts = int(support_supply_points + _cw_random.randint(0, 3))
+        # 補給點數：支援兵貢獻 + 基礎值（最低恢復8點）
+        supply_pts = max(8, int(support_supply_points + _cw_random.randint(0, 3)))
 
         return (offense_score, defense_score, supply_delta, morale_delta,
                 abuse_prog, abuse_mor, summary_parts, action_count, supply_pts,
@@ -2689,8 +2689,8 @@ def _algo_evaluate_turn(turn):
         "b_morale": b_morale,
         "a_supplies": a_supplies,
         "b_supplies": b_supplies,
-        "a_supply_points": max(0, min(15, a_spts)),
-        "b_supply_points": max(0, min(15, b_spts)),
+        "a_supply_points": max(8, min(15, a_spts)),
+        "b_supply_points": max(8, min(15, b_spts)),
         "summary": summary[:500],
     }
 
@@ -2708,8 +2708,8 @@ def _default_turn_result():
             "b_morale": _cw_random.randint(-5, 2),
             "a_supplies": _cw_random.randint(-5, 0),
             "b_supplies": _cw_random.randint(-5, 0),
-            "a_supply_points": _cw_random.randint(0, 8),
-            "b_supply_points": _cw_random.randint(0, 8),
+            "a_supply_points": _cw_random.randint(8, 12),
+            "b_supply_points": _cw_random.randint(8, 12),
             "summary": "本回合戰況膠著，雙方各有小幅推進。",
         }
 
