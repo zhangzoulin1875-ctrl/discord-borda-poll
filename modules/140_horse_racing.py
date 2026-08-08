@@ -7,6 +7,11 @@
 import random as _hr_random
 import time as _hr_time
 
+try:
+    from discord_borda_poll import is_admin, ICEA_GUILD_ID, get_channel_any
+except ImportError:
+    pass
+
 # ── 設定常數 ──
 HORSE_FILE = os.path.join(DATA_DIR, "horse_racing.json")
 HORSE_RACE_INTERVAL_SEC = 30 * 60   # 每局間隔 30 分鐘（冷卻）
@@ -25,7 +30,7 @@ HORSE_NAME_POOL = [
 ]
 
 # 全域狀態（皆持久化到 HORSE_FILE）
-horse_racing_settings = {"channel_id": None, "last_race_end_time": 0, "force_next": False}
+horse_racing_settings = {"channel_id": None, "guild_channels": {}, "last_race_end_time": 0, "force_next": False}
 current_race = None  # None 或 dict，見 _generate_race() 結構
 
 
@@ -58,15 +63,26 @@ load_horse_racing()
 
 
 # ── 核心邏輯 ──
+def _get_all_horse_channels():
+    channels = []
+    main_ch_id = horse_racing_settings.get("channel_id")
+    if main_ch_id:
+        ch = get_channel_any(int(main_ch_id))
+        if ch and ch not in channels:
+            channels.append(ch)
+
+    guild_channels = horse_racing_settings.get("guild_channels", {})
+    for g_id, ch_id in guild_channels.items():
+        if ch_id:
+            ch = get_channel_any(int(ch_id))
+            if ch and ch not in channels:
+                channels.append(ch)
+
+    return channels
+
+
 def _get_horse_racing_channel():
-    ch_id = horse_racing_settings.get("channel_id")
-    if not ch_id:
-        return None
-    for guild in bot.guilds:
-        ch = guild.get_channel(int(ch_id))
-        if ch:
-            return ch
-    return None
+    return _get_all_horse_channels()
 
 
 def _generate_race() -> dict:
@@ -163,17 +179,34 @@ def _build_race_betting_embed(race: dict) -> "discord.Embed":
     return embed
 
 
-async def _start_new_race(channel):
+async def _start_new_race(channels=None):
     global current_race
+    if channels is None:
+        channels = _get_all_horse_channels()
+    elif isinstance(channels, discord.TextChannel):
+        channels = [channels]
+
     race = _generate_race()
-    race["channel_id"] = channel.id
     embed = _build_race_betting_embed(race)
     view = HorseBettingView(race["race_id"])
-    try:
-        msg = await channel.send(embed=embed, view=view)
-        race["message_id"] = msg.id
-    except Exception as e:
-        print(f"⚠️ 賽馬公告發送失敗：{e}")
+
+    channel_ids = []
+    messages = {}
+
+    for channel in channels:
+        try:
+            msg = await channel.send(embed=embed, view=view)
+            channel_ids.append(channel.id)
+            messages[str(channel.id)] = msg.id
+        except Exception as e:
+            print(f"⚠️ 賽馬公告發送至頻道 {channel.id} 失敗：{e}")
+
+    race["channel_ids"] = channel_ids
+    race["messages"] = messages
+    if channel_ids:
+        race["channel_id"] = channel_ids[0]
+        race["message_id"] = messages.get(str(channel_ids[0]))
+
     current_race = race
     save_horse_racing()
     print(f"🏇 新賽事開始：{race['race_id']}，{len(race['horses'])} 匹馬參賽，投注截止於 {int(race['betting_end_time'])}")
@@ -183,25 +216,24 @@ async def _reattach_betting_view():
     """機器人重啟後，若賽事仍在投注階段，重新掛載按鈕面板（舊面板按鈕在重啟後會失效）。"""
     if not current_race or current_race.get("status") != "betting":
         return
-    ch_id = current_race.get("channel_id")
-    msg_id = current_race.get("message_id")
-    if not ch_id or not msg_id:
-        return
-    channel = None
-    for guild in bot.guilds:
-        ch = guild.get_channel(int(ch_id))
-        if ch:
-            channel = ch
-            break
-    if not channel:
-        return
-    try:
-        msg = await channel.fetch_message(int(msg_id))
-        view = HorseBettingView(current_race["race_id"])
-        await msg.edit(view=view)
-        print(f"🔄 賽馬投注面板已在重啟後重新掛載：{current_race['race_id']}")
-    except Exception as e:
-        print(f"⚠️ 賽馬投注面板重新掛載失敗：{e}")
+
+    msg_map = current_race.get("messages", {})
+    if not msg_map and current_race.get("channel_id") and current_race.get("message_id"):
+        msg_map = {str(current_race["channel_id"]): current_race["message_id"]}
+
+    for ch_id_str, msg_id in msg_map.items():
+        if not ch_id_str or not msg_id:
+            continue
+        channel = get_channel_any(int(ch_id_str))
+        if not channel:
+            continue
+        try:
+            msg = await channel.fetch_message(int(msg_id))
+            view = HorseBettingView(current_race["race_id"])
+            await msg.edit(view=view)
+            print(f"🔄 賽馬投注面板已在頻道 {ch_id_str} 重新掛載：{current_race['race_id']}")
+        except Exception as e:
+            print(f"⚠️ 賽馬投注面板在頻道 {ch_id_str} 重新掛載失敗：{e}")
 
 
 async def _resolve_race():
@@ -298,17 +330,22 @@ async def _resolve_race():
             winner_lines.append(f"**{bet.get('username', '?')}** +{payout} {currency_name()}")
 
     # 找公告頻道
-    channel = None
-    try:
-        ch_id = race.get("channel_id") or horse_racing_settings.get("channel_id")
-        if ch_id:
-            for guild in bot.guilds:
-                ch = guild.get_channel(int(ch_id))
-                if ch:
-                    channel = ch
-                    break
-    except Exception:
-        pass
+    target_channels = []
+    ch_ids = race.get("channel_ids") or []
+    if not ch_ids and race.get("channel_id"):
+        ch_ids = [race["channel_id"]]
+
+    if ch_ids:
+        for cid in ch_ids:
+            ch = get_channel_any(int(cid))
+            if ch and ch not in target_channels:
+                target_channels.append(ch)
+    else:
+        target_channels = _get_all_horse_channels()
+
+    msg_map = race.get("messages", {})
+    if not msg_map and race.get("channel_id") and race.get("message_id"):
+        msg_map = {str(race["channel_id"]): race["message_id"]}
 
     horse_by_num = {h["num"]: h for h in horses}
     medal = ["🥇", "🥈", "🥉"]
@@ -336,9 +373,8 @@ async def _resolve_race():
         result_embed.add_field(name="🏆 中獎名單", value="\n".join(winner_lines[:15]), inline=False)
     result_embed.set_footer(text=f"下一場賽事將於約 {HORSE_RACE_INTERVAL_MIN} 分鐘後開放（頻道有設定才會自動開賭）")
 
-    if channel:
-        # 移除舊投注面板按鈕，避免結算後還能點
-        msg_id = race.get("message_id")
+    for channel in target_channels:
+        msg_id = msg_map.get(str(channel.id))
         if msg_id:
             try:
                 old_msg = await channel.fetch_message(int(msg_id))
@@ -348,7 +384,7 @@ async def _resolve_race():
         try:
             await channel.send(embed=result_embed)
         except Exception as e:
-            print(f"⚠️ 賽馬結果發送失敗：{e}")
+            print(f"⚠️ 賽馬結果發送至頻道 {channel.id} 失敗：{e}")
 
     print(f"🏇 賽馬完賽：{race['race_id']}，{winner_count} 人中獎，共派彩 {total_paid} {currency_name()}")
 
@@ -591,14 +627,14 @@ async def horse_racing_loop():
         try:
             now = _hr_time.time()
             if current_race is None:
-                channel = _get_horse_racing_channel()
-                if channel:
+                channels = _get_all_horse_channels()
+                if channels:
                     last_end = horse_racing_settings.get("last_race_end_time", 0)
                     force = horse_racing_settings.get("force_next", False)
                     if force or (now - last_end >= HORSE_RACE_INTERVAL_SEC):
                         horse_racing_settings["force_next"] = False
                         save_horse_racing()
-                        await _start_new_race(channel)
+                        await _start_new_race(channels)
             elif current_race.get("status") == "betting":
                 if now >= current_race.get("betting_end_time", 0):
                     await _resolve_race()
@@ -613,35 +649,41 @@ class HorseRacingGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="horse", description="賽馬賭博系統")
 
-    @app_commands.command(name="set_channel", description="設定賽馬新場次公告的頻道（僅擁有者）")
+    @app_commands.command(name="set_channel", description="設定賽馬新場次公告的頻道（管理員限定）")
     @app_commands.describe(channel="要公告賽事的頻道")
     async def horse_set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
-        horse_racing_settings["channel_id"] = channel.id
+
+        guild_id_str = str(interaction.guild.id) if interaction.guild else None
+        if guild_id_str == ICEA_GUILD_ID:
+            horse_racing_settings["channel_id"] = channel.id
+        elif guild_id_str:
+            horse_racing_settings.setdefault("guild_channels", {})[guild_id_str] = str(channel.id)
+
         save_horse_racing()
         await interaction.response.send_message(
             f"✅ 賽馬公告頻道已設定為 {channel.mention}，將每 {HORSE_RACE_INTERVAL_MIN} 分鐘自動開一場賽事。",
             ephemeral=True
         )
 
-    @app_commands.command(name="start_now", description="跳過冷卻，立即開始一場賽馬（僅擁有者）")
+    @app_commands.command(name="start_now", description="跳過冷卻，立即開始一場賽馬（管理員限定）")
     async def horse_start_now(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 此指令僅限管理員使用。", ephemeral=True)
             return
         if current_race:
             await interaction.response.send_message("❌ 目前已有一場賽事正在進行（投注中或結算中），無法開始新的一場。", ephemeral=True)
             return
-        channel = _get_horse_racing_channel()
-        if not channel:
+        channels = _get_all_horse_channels()
+        if not channels:
             await interaction.response.send_message("❌ 尚未設定賽馬公告頻道，請先用 `/horse set_channel` 設定。", ephemeral=True)
             return
 
-        await interaction.response.send_message(f"⏳ 正在於 {channel.mention} 開始新賽事…", ephemeral=True)
-        await _start_new_race(channel)
-        await interaction.followup.send(f"✅ 新賽事已在 {channel.mention} 開始！", ephemeral=True)
+        await interaction.response.send_message("⏳ 正在開始新賽事…", ephemeral=True)
+        await _start_new_race(channels)
+        await interaction.followup.send("✅ 新賽事已開始！", ephemeral=True)
 
     @app_commands.command(name="status", description="查看目前賽馬狀態")
     async def horse_status(self, interaction: discord.Interaction):
@@ -661,15 +703,15 @@ class HorseRacingGroup(app_commands.Group):
             return
 
         last_end = horse_racing_settings.get("last_race_end_time", 0)
-        channel = _get_horse_racing_channel()
-        if not channel:
+        channels = _get_all_horse_channels()
+        if not channels:
             await interaction.response.send_message("❌ 尚未設定賽馬公告頻道。", ephemeral=True)
             return
         remaining = int(HORSE_RACE_INTERVAL_SEC - (_hr_time.time() - last_end))
         if remaining <= 0:
             desc = "下一場賽事即將開始（下個檢查週期內），請留意公告頻道。"
         else:
-            desc = f"距離下一場賽事還有約 **{remaining // 60}** 分鐘，屆時將自動在 {channel.mention} 公告。"
+            desc = f"距離下一場賽事還有約 **{remaining // 60}** 分鐘，屆時將自動在設定的頻道公告。"
         embed = discord.Embed(title="🏇 賽馬冷卻中", description=desc, color=discord.Color.blue())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
