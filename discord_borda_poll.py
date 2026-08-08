@@ -11414,7 +11414,7 @@ async def setup_hook():
 
     # Register slash command groups (runs once, before bot connects)
     _hoi4_on = os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off")
-    _all_groups = [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), ProposalGroup(), CyberWarGroup(), GalgameGroup()]
+    _all_groups = [PollGroup(), MeetingGroup(), BriefingGroup(), ChatGroup(), ChatRoomGroup(), SystemGroup(), QuizGroup(), NationGroup(), AnalyzeGroup(), MemberNationGroup(), AwarenessGroup(), ScheduleGroup(), TallyGroup(), TurtleSoupGroup(), WerewolfGroup(), EconomyGroup(), StockGroup(), HorseRacingGroup(), SiegeGroup(), ProposalGroup(), CyberWarGroup(), GalgameGroup(), MinerGroup()]
     if _hoi4_on:
         _all_groups.append(StormGroup())
     for grp in _all_groups:
@@ -11519,6 +11519,7 @@ async def setup_hook():
     load_siege_data()
     load_cyber_war()
     load_galgame()  # 必須在 load_from_drive() 之後重新載入（模組 exec 時的 load_galgame 用的是舊本地檔）
+    load_miner()  # 礦工遊戲：同樣必須在 load_from_drive() 之後重新載入
     load_refine_settings()
     load_refine_knowledge()
     save_quiz_data()  # Create files if not exists
@@ -11556,6 +11557,7 @@ async def setup_hook():
     asyncio.ensure_future(token_log_loop())
     asyncio.ensure_future(economy_panel_loop())  # 經濟系統看板
     asyncio.ensure_future(galgame_panel_loop())  # 互動小說看板
+    asyncio.ensure_future(miner_loop())  # 琉璃幣礦工看板（僅主機器人，暫不推子機器人）
     if os.getenv("HOI4_ENABLED", "true").lower() not in ("false", "0", "no", "off"):
         asyncio.ensure_future(hoi4_panel_loop())  # 鋼鐵風暴 戰略遊戲面板（可由 HOI4_ENABLED=false 關閉）
     else:
@@ -14886,6 +14888,7 @@ bot.add_view(TurtleSoupStartView())  # 只有開始按鈕是持久化的
 bot.add_view(WerewolfSignupView())  # 狼人殺報名按鈕持久化
 bot.add_view(EconomyPanelButtonsView())  # 經濟看板下方的股票/公司管理快捷按鈕持久化
 bot.add_view(GalgamePanelView())  # Galgame 互動小說面板按鈕持久化
+bot.add_view(MinerPanelView())  # 琉璃幣礦工面板按鈕持久化（僅主機器人）
 bot.add_view(HorseBettingView("persistent"))  # 賽馬下注按鈕持久化（重啟後復原用）
 bot.add_view(_WerewolfResumeView())  # 狼人殺重啟恢復按鈕持久化
 bot.add_view(SiegePanelView())  # 攻城戰按鈕持久化
