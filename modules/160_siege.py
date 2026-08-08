@@ -638,13 +638,14 @@ async def siege_loop():
     await asyncio.sleep(8)  # 等待其他初始化完成
 
     # 重啟時重建面板（如果有進行中的攻城戰）
-    if _siege_state.get("active") and _siege_settings.get("channel_id"):
+    _has_any_channel = _siege_settings.get("channel_id") or _siege_settings.get("guild_channels")
+    if _siege_state.get("active") and _has_any_channel:
         try:
             await _siege_setup_panel()
             print("⚔️ 攻城戰面板已重建")
         except Exception as e:
             print(f"⚠️ 攻城戰面板重建失敗：{e}")
-    elif _siege_settings.get("channel_id"):
+    elif _has_any_channel:
         # 沒有進行中的攻城戰也發一個「等待開城」面板
         try:
             await _siege_setup_panel()
