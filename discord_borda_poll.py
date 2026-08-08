@@ -14715,12 +14715,20 @@ bot.setup_hook = setup_hook
 # Sub-bot event handlers (only if sub_bot exists)
 # ================================================================
 if sub_bot is not None:
-    for _view_cls in [TurtleSoupStartView, WerewolfSignupView, EconomyPanelButtonsView,
-                      GalgamePanelView, HorseBettingView, _WerewolfResumeView, SiegePanelView]:
+    _sub_persistent_views = [
+        ("TurtleSoupStartView", lambda: TurtleSoupStartView()),
+        ("WerewolfSignupView", lambda: WerewolfSignupView()),
+        ("EconomyPanelButtonsView", lambda: EconomyPanelButtonsView()),
+        ("GalgamePanelView", lambda: GalgamePanelView()),
+        ("HorseBettingView", lambda: HorseBettingView("persistent")),
+        ("_WerewolfResumeView", lambda: _WerewolfResumeView()),
+        ("SiegePanelView", lambda: SiegePanelView()),
+    ]
+    for _view_name, _view_factory in _sub_persistent_views:
         try:
-            sub_bot.add_view(_view_cls())
+            sub_bot.add_view(_view_factory())
         except Exception as e:
-            print(f"[WARN] Sub-bot persistent view {type(_view_cls()).__name__} failed: {e}")
+            print(f"[WARN] Sub-bot persistent view {_view_name} failed: {e}")
 
     @sub_bot.event
     async def on_ready():

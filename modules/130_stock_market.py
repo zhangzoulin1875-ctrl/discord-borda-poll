@@ -132,7 +132,7 @@ _INJECTION_PATTERNS = [
     "system prompt", "system message", "系統提示",
     "不要回傳json", "不要返回json", "do not return json",
     "return only", "只回傳", "只返回", "always return", "永遠回傳",
-    "price_change.*60", "price_change.*\+", "bankrupt.*false.*always",
+    "price_change.*60", r"price_change.*\+", "bankrupt.*false.*always",
     "股價永遠", "永遠上漲", "永遠不跌", "always up", "never down",
     "直接回傳", "直接輸出", "output exactly",
 ]
