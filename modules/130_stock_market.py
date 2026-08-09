@@ -776,17 +776,7 @@ class StockSelectView(discord.ui.View):
         self.user_id_str = user_id_str
         self.trade_type = trade_type
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
-        import traceback
-        traceback.print_exc()
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
-            else:
-                await interaction.response.send_message("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
-        except Exception:
-            pass
-
+        # 建構公司下拉選單（必須在 __init__ 裡建，不能放在 on_error）
         active = get_active_companies()
         options = []
         for cid, co in list(active.items())[:25]:  # Discord select 最多 25 個
@@ -803,6 +793,17 @@ class StockSelectView(discord.ui.View):
             self.add_item(select)
         else:
             # 沒有公司可選
+            pass
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        import traceback
+        traceback.print_exc()
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
+        except Exception:
             pass
 
     async def _on_select(self, interaction: discord.Interaction):
