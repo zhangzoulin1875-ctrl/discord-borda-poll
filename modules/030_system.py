@@ -1974,118 +1974,156 @@ def _get_community_chronicle_context() -> str:
     """Render the community chronicle as a compact text block for
     injection into the AI system prompt. This gives the AI deep
     historical context — long-standing relationships, past events,
-    treaties, and their current status."""
-    ch = _community_chronicle
-    if not ch.get("last_updated"):
+    treaties, and their current status.
+
+    NOTE: _community_chronicle is populated wholesale from AI-generated JSON
+    (see the chronicle refine job below) and only validated as "is a dict"
+    at the top level — individual list entries or fields can come back in
+    an unexpected shape if the model drifts from the requested schema
+    (e.g. a conflict entry as a plain string, or "parties" as a string
+    instead of a list). This function must NEVER let a malformed entry
+    crash chat — it's just supplementary context, not required. Every
+    entry is defensively type-checked/skipped, and the whole thing is
+    wrapped in a top-level try/except as a final safety net."""
+    try:
+        ch = _community_chronicle
+        if not isinstance(ch, dict) or not ch.get("last_updated"):
+            return ""
+
+        def _safe_join(value, sep=", "):
+            """Join a field that's supposed to be a list of strings, but
+            defensively handle it being a plain string or something else."""
+            if isinstance(value, list):
+                return sep.join(str(v) for v in value)
+            if isinstance(value, str):
+                return value
+            if value:
+                return str(value)
+            return ""
+
+        def _dicts_only(items):
+            """Filter a list down to dict entries only, skipping anything
+            the AI returned in an unexpected shape."""
+            if not isinstance(items, list):
+                return []
+            return [i for i in items if isinstance(i, dict)]
+
+        lines = ["─── 社群編年史（僅供參考的次要背景資訊，非查證來源）───"]
+
+        # Major alliances
+        alliances = _dicts_only(ch.get("major_alliances", []))
+        if alliances:
+            alliance_parts = []
+            for a in alliances[:8]:
+                members = _safe_join(a.get("members", []))
+                name = a.get("name", "") or ""
+                formed = a.get("formed", "") or ""
+                context = a.get("context", "") or ""
+                status = a.get("status", "") or ""
+                name_str = f"「{name}」" if name else ""
+                alliance_parts.append(f"  • {name_str}{members}（{formed}）— {context} [{status}]")
+            if alliance_parts:
+                lines.append("\n🤝 重大聯盟：\n" + "\n".join(alliance_parts))
+
+        # Major conflicts
+        conflicts = _dicts_only(ch.get("major_conflicts", []))
+        if conflicts:
+            conflict_parts = []
+            for c in conflicts[:8]:
+                parties = _safe_join(c.get("parties", []), sep=" vs ")
+                started = c.get("started", "") or ""
+                cause = c.get("cause", "") or ""
+                status = c.get("status", "") or ""
+                current = c.get("current_state", "") or ""
+                resolution = c.get("resolution", "") or ""
+                detail = f"起因：{cause}" if cause else ""
+                if resolution:
+                    detail += f" → 已解決：{resolution}"
+                elif current:
+                    detail += f" → 目前：{current}"
+                conflict_parts.append(f"  • {parties}（{started}）— {detail} [{status}]")
+            if conflict_parts:
+                lines.append("\n⚔️ 重大衝突：\n" + "\n".join(conflict_parts))
+
+        # Key events
+        events = _dicts_only(ch.get("key_events", []))
+        if events:
+            event_parts = []
+            for e in events[:10]:
+                date = e.get("date", "") or ""
+                event = e.get("event", "") or ""
+                consequences = e.get("consequences", "") or ""
+                significance = e.get("significance", "") or ""
+                detail = f" — {consequences}" if consequences else ""
+                if significance:
+                    detail += f"（{significance}）"
+                event_parts.append(f"  • [{date}] {event}{detail}")
+            if event_parts:
+                lines.append("\n📜 關鍵歷史事件：\n" + "\n".join(event_parts))
+
+        # Treaties
+        treaties = _dicts_only(ch.get("treaties_agreements", []))
+        if treaties:
+            treaty_parts = []
+            for t in treaties[:8]:
+                name = t.get("name", "?") or "?"
+                parties = _safe_join(t.get("parties", []))
+                date = t.get("date", "") or ""
+                terms = t.get("terms", "") or ""
+                status = t.get("status", "") or ""
+                treaty_parts.append(f"  • {name}（{parties}，{date}）— {terms} [{status}]")
+            if treaty_parts:
+                lines.append("\n📑 條約與協議：\n" + "\n".join(treaty_parts))
+
+        # Power dynamics
+        power = _dicts_only(ch.get("power_dynamics", []))
+        if power:
+            power_parts = []
+            for p in power[:5]:
+                desc = p.get("description", "") or ""
+                evolution = p.get("evolution", "") or ""
+                power_parts.append(f"  • {desc} — 演變：{evolution}")
+            if power_parts:
+                lines.append("\n👑 權力動態：\n" + "\n".join(power_parts))
+
+        # Cultural traditions
+        traditions = _dicts_only(ch.get("cultural_traditions", []))
+        if traditions:
+            trad_parts = []
+            for ct in traditions[:5]:
+                norm = ct.get("norm", "") or ""
+                origin = ct.get("origin", "") or ""
+                trad_parts.append(f"  • {norm} — 起源：{origin}")
+            if trad_parts:
+                lines.append("\n🎭 文化傳統：\n" + "\n".join(trad_parts))
+
+        # Notable figures
+        figures = _dicts_only(ch.get("notable_figures", []))
+        if figures:
+            figure_parts = []
+            for f in figures[:10]:
+                name = f.get("name", "?") or "?"
+                role = f.get("role", "") or ""
+                history = f.get("history", "") or ""
+                current = f.get("current_status", "") or ""
+                figure_parts.append(f"  • {name}（{role}）— {history} [{current}]")
+            if figure_parts:
+                lines.append("\n👤 重要人物：\n" + "\n".join(figure_parts))
+
+        lines.append(
+            "\n⚠️ 以上是 AI 分析社群歷史得到的編年史，涵蓋長期的聯盟、衝突、"
+            "事件因果和人物動態。請自然運用這些歷史理解來回應使用者，"
+            "表現得像一個了解社群過去的人。不要主動提及「編年史」這個詞。\n"
+            "🚫 反幻覺鐵律：以上條目彼此是獨立的實體記錄，不要自己腦補或推論出"
+            "「兩個國家/人物其實是同一個」「A 其實就是 B 的別名」這類等同關係，"
+            "除非條目裡明確這樣寫。如果使用者問的細節不在上面資料中，"
+            "誠實說不確定，不要編造合理但沒根據的關聯。"
+        )
+
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"⚠️ 社群編年史渲染失敗（已忽略，不影響聊天）：{type(e).__name__}: {e}")
         return ""
-
-    lines = ["─── 社群編年史（僅供參考的次要背景資訊，非查證來源）───"]
-
-    # Major alliances
-    alliances = ch.get("major_alliances", [])
-    if alliances:
-        alliance_parts = []
-        for a in alliances[:8]:
-            members = ", ".join(a.get("members", []))
-            name = a.get("name", "")
-            formed = a.get("formed", "")
-            context = a.get("context", "")
-            status = a.get("status", "")
-            name_str = f"「{name}」" if name else ""
-            alliance_parts.append(f"  • {name_str}{members}（{formed}）— {context} [{status}]")
-        lines.append("\n🤝 重大聯盟：\n" + "\n".join(alliance_parts))
-
-    # Major conflicts
-    conflicts = ch.get("major_conflicts", [])
-    if conflicts:
-        conflict_parts = []
-        for c in conflicts[:8]:
-            parties = " vs ".join(c.get("parties", []))
-            started = c.get("started", "")
-            cause = c.get("cause", "")
-            status = c.get("status", "")
-            current = c.get("current_state", "")
-            resolution = c.get("resolution", "")
-            detail = f"起因：{cause}" if cause else ""
-            if resolution:
-                detail += f" → 已解決：{resolution}"
-            elif current:
-                detail += f" → 目前：{current}"
-            conflict_parts.append(f"  • {parties}（{started}）— {detail} [{status}]")
-        lines.append("\n⚔️ 重大衝突：\n" + "\n".join(conflict_parts))
-
-    # Key events
-    events = ch.get("key_events", [])
-    if events:
-        event_parts = []
-        for e in events[:10]:
-            date = e.get("date", "")
-            event = e.get("event", "")
-            consequences = e.get("consequences", "")
-            significance = e.get("significance", "")
-            detail = f" — {consequences}" if consequences else ""
-            if significance:
-                detail += f"（{significance}）"
-            event_parts.append(f"  • [{date}] {event}{detail}")
-        lines.append("\n📜 關鍵歷史事件：\n" + "\n".join(event_parts))
-
-    # Treaties
-    treaties = ch.get("treaties_agreements", [])
-    if treaties:
-        treaty_parts = []
-        for t in treaties[:8]:
-            name = t.get("name", "?")
-            parties = ", ".join(t.get("parties", []))
-            date = t.get("date", "")
-            terms = t.get("terms", "")
-            status = t.get("status", "")
-            treaty_parts.append(f"  • {name}（{parties}，{date}）— {terms} [{status}]")
-        lines.append("\n📑 條約與協議：\n" + "\n".join(treaty_parts))
-
-    # Power dynamics
-    power = ch.get("power_dynamics", [])
-    if power:
-        power_parts = []
-        for p in power[:5]:
-            desc = p.get("description", "")
-            evolution = p.get("evolution", "")
-            power_parts.append(f"  • {desc} — 演變：{evolution}")
-        lines.append("\n👑 權力動態：\n" + "\n".join(power_parts))
-
-    # Cultural traditions
-    traditions = ch.get("cultural_traditions", [])
-    if traditions:
-        trad_parts = []
-        for ct in traditions[:5]:
-            norm = ct.get("norm", "")
-            origin = ct.get("origin", "")
-            trad_parts.append(f"  • {norm} — 起源：{origin}")
-        lines.append("\n🎭 文化傳統：\n" + "\n".join(trad_parts))
-
-    # Notable figures
-    figures = ch.get("notable_figures", [])
-    if figures:
-        figure_parts = []
-        for f in figures[:10]:
-            name = f.get("name", "?")
-            role = f.get("role", "")
-            history = f.get("history", "")
-            current = f.get("current_status", "")
-            figure_parts.append(f"  • {name}（{role}）— {history} [{current}]")
-        lines.append("\n👤 重要人物：\n" + "\n".join(figure_parts))
-
-    lines.append(
-        "\n⚠️ 以上是 AI 分析社群歷史得到的編年史，涵蓋長期的聯盟、衝突、"
-        "事件因果和人物動態。請自然運用這些歷史理解來回應使用者，"
-        "表現得像一個了解社群過去的人。不要主動提及「編年史」這個詞。\n"
-        "🚫 反幻覺鐵律：以上條目彼此是獨立的實體記錄，不要自己腦補或推論出"
-        "「兩個國家/人物其實是同一個」「A 其實就是 B 的別名」這類等同關係，"
-        "除非條目裡明確這樣寫。如果使用者問的細節不在上面資料中，"
-        "誠實說不確定，不要編造合理但沒根據的關聯。"
-    )
-
-    return "\n".join(lines)
-
 
 
     @app_commands.command(name="clear_tool_cache", description="清除 AI 工具支援快取並重新探測（機器人擁有者限定）")
