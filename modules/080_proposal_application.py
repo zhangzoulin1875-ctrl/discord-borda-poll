@@ -87,7 +87,7 @@ class CorrectionModal(discord.ui.Modal, title="📝 修正建議"):
                 {"role": "user", "content": validation_prompt},
             ]
             val_result = await asyncio.wait_for(
-                call_chat_api(val_messages, chat_ai_settings, tools=None, fallback_mode="disabled", category="admin"),
+                call_chat_api(val_messages, chat_ai_settings, tools=None, fallback_mode="full", category="admin"),
                 timeout=20,
             )
             val_text = (val_result.get("content") or "").strip()

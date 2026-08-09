@@ -1869,7 +1869,7 @@ async def _deep_scan_community(guild) -> bool:
 
     try:
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings, max_tokens=4000, fallback_mode="disabled", category="admin"), timeout=120
+            call_chat_api(messages, chat_ai_settings, max_tokens=4000, fallback_mode="full", category="admin"), timeout=120
         )
     except Exception as e:
         print(f"📜 社群編年史：AI 分析失敗：{e}")

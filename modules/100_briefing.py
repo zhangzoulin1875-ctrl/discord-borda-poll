@@ -207,7 +207,7 @@ async def _rate_nation_name(nation_name: str, ai_settings: dict, nation_info: st
         result = await call_chat_api(
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini"), "model_fallback_chain": ai_settings.get("model_fallback_chain", "")},
-            max_tokens=1200, fallback_mode="disabled", category="admin",  # generous budget — reasoning models can burn
+            max_tokens=1200, fallback_mode="full", category="admin",  # generous budget — reasoning models can burn
                               # a few hundred tokens on internal preamble
                               # before ever reaching the requested format
         )

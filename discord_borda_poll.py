@@ -2754,7 +2754,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
     if facts:
         memory_lines = []
         for f in facts[-10:]:
-            memory_lines.append(f"- {f.get('content', '')}")
+            memory_lines.append(f"- {f}")
         system_prompt += (
             f"\n\n─── 你對「{user_name}」的記憶 ───\n"
             f"以下是之前互動中記住的關於這位使用者的事：\n"
@@ -3057,7 +3057,7 @@ async def generate_chat_room_reply(message, settings: dict) -> tuple:
             mem_match = re.search(r"\[MEMORY:\s*(.+?)\]", actual_reply)
             if mem_match:
                 mem_content = mem_match.group(1).strip()
-                new_facts = [{"content": mem_content, "date": _now.strftime("%Y-%m-%d")}]
+                new_facts = [mem_content]
                 actual_reply = (actual_reply[:mem_match.start()] + actual_reply[mem_match.end():]).strip()
         except Exception:
             pass
@@ -10929,73 +10929,40 @@ async def call_ai_api(conversation: str, settings: dict) -> str:
 
 
 async def call_ai_api_stream(conversation: str, settings: dict):
-    """Async generator: yields text chunks from AI API as they stream in."""
-    headers = {
-        "Authorization": f"Bearer {settings['api_key']}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": settings.get("model", "gpt-4o-mini"),
-        "messages": [
-            {"role": "system", "content": settings.get("system_prompt", DEFAULT_AI_SYSTEM_PROMPT)},
-            {"role": "user", "content": conversation},
-        ],
-        "temperature": 0.3,
-        "stream": True,
-    }
-    # ── Reasoning 模型控制 ──
-    _reasoning_effort = settings.get("reasoning_effort") or chat_ai_settings.get("reasoning_chat_effort", "low")
-    _reasoning_params = _build_reasoning_params(_reasoning_effort)
-    if _reasoning_params:
-        payload.update(_reasoning_params)
-    _reasoning_timeout = _get_reasoning_timeout(_reasoning_effort)
-    # Auto-append /chat/completions if only base URL is provided
-    api_url = settings["api_url"].rstrip("/")
-    if not api_url.endswith("/chat/completions"):
-        if api_url.endswith("/v1"):
-            api_url += "/chat/completions"
-        elif api_url.endswith("/v2"):
-            api_url += "/chat/completions"
-        else:
-            api_url += "/v1/chat/completions"
-    timeout = aiohttp.ClientTimeout(total=_reasoning_timeout, connect=15, sock_read=max(15, _reasoning_timeout // 2))
-    async with aiohttp.ClientSession() as session:
-        async with session.post(api_url, json=payload, headers=headers, timeout=timeout) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise Exception(f"AI API returned {resp.status}: {error_text[:500]}")
-            _stream_chars = 0
-            _stream_usage = None
-            async for raw_line in resp.content:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    chunk = json_module.loads(data_str)
-                    if chunk.get("usage"):
-                        _stream_usage = chunk["usage"]
-                    delta = chunk["choices"][0].get("delta", {})
-                    if "content" in delta and delta["content"]:
-                        _stream_chars += len(delta["content"])
-                        yield delta["content"]
-                except Exception:
-                    continue
-            # Track token usage after stream ends
-            if _stream_usage:
-                _track_token_usage({"usage": _stream_usage})
-            elif _stream_chars > 0:
-                est_completion = max(1, _stream_chars // 4)
-                est_prompt = max(1, len(conversation) // 4)
-                _track_token_usage({
-                    "usage": {
-                        "total_tokens": est_prompt + est_completion,
-                        "prompt_tokens": est_prompt,
-                        "completion_tokens": est_completion,
-                    }
-                })
+    """Async generator: yields text chunks from AI API.
+    Now uses call_chat_api for full degradation chain (model fallback, pool chain, backup API, circuit breaker).
+    Yields in ~200 char chunks to simulate streaming UX."""
+    messages = [
+        {"role": "system", "content": settings.get("system_prompt", DEFAULT_AI_SYSTEM_PROMPT)},
+        {"role": "user", "content": conversation},
+    ]
+    # Use call_chat_api with full fallback chain
+    result = await call_chat_api(
+        messages, settings,
+        max_tokens=4000,
+        fallback_mode="full",
+        category="admin",
+    )
+    raw_text = result.get("content", "")
+    if not raw_text:
+        err = result.get("error", "AI 回應為空")
+        raise Exception(f"AI API 串流失敗：{err}")
+    # Simulate streaming by yielding in chunks
+    chunk_size = 200
+    for i in range(0, len(raw_text), chunk_size):
+        yield raw_text[i:i + chunk_size]
+        await asyncio.sleep(0.05)
+    # Track token usage estimate
+    try:
+        _track_token_usage({
+            "usage": {
+                "total_tokens": max(1, len(conversation) // 4 + len(raw_text) // 4),
+                "prompt_tokens": max(1, len(conversation) // 4),
+                "completion_tokens": max(1, len(raw_text) // 4),
+            }
+        })
+    except Exception:
+        pass
 
 
 async def api_get_ai_settings(request):
@@ -13007,7 +12974,7 @@ async def _ai_refine_extract_from_discord(channel_snippets: str, existing_topics
 
         try:
             result = await asyncio.wait_for(
-                call_chat_api(messages, chat_ai_settings, max_tokens=1500, fallback_mode="disabled", category="admin"), timeout=40
+                call_chat_api(messages, chat_ai_settings, max_tokens=1500, fallback_mode="full", category="admin"), timeout=40
             )
         except Exception as e:
             print(f"🔍 AI精煉: {prompt_label}失敗: {e}")
@@ -13200,7 +13167,7 @@ async def _ai_refine_verify_and_reorganize(preliminary_entries: list, wiki_artic
 
         try:
             result = await asyncio.wait_for(
-                call_chat_api(messages, chat_ai_settings, max_tokens=800, fallback_mode="disabled", category="admin"), timeout=40
+                call_chat_api(messages, chat_ai_settings, max_tokens=800, fallback_mode="full", category="admin"), timeout=40
             )
         except Exception as e:
             print(f"🔍 AI精煉: 驗證「{entry['topic']}」失敗: {e}")
@@ -13664,7 +13631,7 @@ async def _analyze_community(guild) -> bool:
 
     try:
         result = await asyncio.wait_for(
-            call_chat_api(messages, chat_ai_settings, max_tokens=2500, fallback_mode="disabled", category="admin"), timeout=60
+            call_chat_api(messages, chat_ai_settings, max_tokens=2500, fallback_mode="full", category="admin"), timeout=60
         )
     except Exception as e:
         print(f"🧠 社群感知：AI 分析失敗：{e}")
@@ -14541,7 +14508,7 @@ async def _generate_daily_summary(messages_text: str, date_str: str) -> str:
         result = await call_chat_api(
             messages,
             {"api_url": ai_settings["api_url"], "api_key": ai_settings["api_key"], "model": ai_settings.get("model", "gpt-4o-mini"), "model_fallback_chain": ai_settings.get("model_fallback_chain", "")},
-            max_tokens=2500, fallback_mode="disabled", category="admin",  # briefing asks for 500-1500 中文字 output — needs a
+            max_tokens=2500, fallback_mode="full", category="admin",  # briefing asks for 500-1500 中文字 output — needs a
                               # much bigger budget than the 300-token chat default,
                               # plus headroom for reasoning-model preamble
         )
