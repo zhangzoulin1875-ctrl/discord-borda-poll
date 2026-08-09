@@ -777,13 +777,15 @@ class StockSelectView(discord.ui.View):
         self.trade_type = trade_type
 
         # 建構公司下拉選單（必須在 __init__ 裡建，不能放在 on_error）
+        # label/description 必須截斷到 100 字元以內 —— Discord SelectOption 硬限制，
+        # 公司政策文字使用者可自訂、可能很長，超過就會在建構時直接拋 ValueError。
         active = get_active_companies()
         options = []
         for cid, co in list(active.items())[:25]:  # Discord select 最多 25 個
             cap = co["share_price"] * co["shares_outstanding"]
             options.append(discord.SelectOption(
-                label=co["name"],
-                description=f"{_format_price(co['share_price'])} 元/股 | 市值 {_format_price(cap)} | {co.get('policy', '無政策')}",
+                label=co["name"][:100],
+                description=f"{_format_price(co['share_price'])} 元/股 | 市值 {_format_price(cap)} | {co.get('policy', '無政策')}"[:100],
                 value=cid,
             ))
 
