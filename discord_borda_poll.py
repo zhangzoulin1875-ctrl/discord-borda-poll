@@ -7523,10 +7523,17 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
                     err_text = await resp.text()
                     print(f"🎨 T2I 過濾 API 失敗 (HTTP {resp.status}): {err_text[:200]}，放行（fail-open）")
                     return {"allowed": True}
+                # 同樣先讀原始文字再用 content_type=None 解析，避免代理/免費 API
+                # 回傳非 application/json 的 Content-Type header 導致 resp.json() 誤判失敗
+                _raw_body_text_p = await resp.text()
                 try:
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
                 except Exception:
-                    return {"allowed": True, "vision_status": "skipped_json_parse_error"}
+                    try:
+                        data = json_module.loads(_raw_body_text_p)
+                    except Exception:
+                        print(f"🎨 T2I 過濾：JSON 解析真的失敗，原始回應內容：{_raw_body_text_p[:300]}，放行（fail-open）")
+                        return {"allowed": True}
                 reply_text = ""
                 choices = data.get("choices", [])
                 if choices:
@@ -7685,10 +7692,19 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
                         return {"allowed": False, "reason": _reason, "vision_status": "blocked_api_policy"}
                     print(f"🎨 T2I 圖片複審 API 失敗 (HTTP {resp.status}): {err_text[:200]}，放行（fail-open）")
                     return {"allowed": True, "vision_status": "skipped_api_error"}
+                # 先讀原始文字，因為很多視覺 API/代理服務回傳 Content-Type 不是
+                # application/json（例如 text/plain），即使 body 本身是合法 JSON，
+                # aiohttp 的 resp.json() 預設會嚴格比對 header 而直接拋例外——
+                # 這正是「每次都 JSON 解析失敗」的真正根因，不是圖片或 API 本身壞了。
+                _raw_body_text = await resp.text()
                 try:
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
                 except Exception:
-                    return {"allowed": True, "vision_status": "skipped_json_parse_error"}
+                    try:
+                        data = json_module.loads(_raw_body_text)
+                    except Exception as _je:
+                        print(f"🎨 T2I 圖片複審：JSON 解析真的失敗，原始回應內容：{_raw_body_text[:300]}")
+                        return {"allowed": True, "vision_status": "skipped_json_parse_error"}
                 reply_text = ""
                 choices = data.get("choices", [])
                 if choices:
