@@ -9971,7 +9971,8 @@ async def api_get_chat_ai_settings(request):
         "t2i_filter_vision_model": chat_ai_settings.get("t2i_filter_vision_model", ""),
         # ── 提案/入盟審核身分組 ──
         "proposal_review_role_id": proposal_settings.get("review_role_id"),
-        "application_review_role_id": application_settings.get("review_role_id"),
+        "secretariat_review_role_id": application_settings.get("secretariat_review_role_id"),
+        "council_review_role_id": application_settings.get("council_review_role_id"),
     })
 
 
@@ -10223,8 +10224,11 @@ async def api_set_chat_ai_settings(request):
     if "proposal_review_role_id" in body:
         proposal_settings["review_role_id"] = body["proposal_review_role_id"] or None
         save_proposal_settings()
-    if "application_review_role_id" in body:
-        application_settings["review_role_id"] = body["application_review_role_id"] or None
+    if "secretariat_review_role_id" in body:
+        application_settings["secretariat_review_role_id"] = body["secretariat_review_role_id"] or None
+        save_application_settings()
+    if "council_review_role_id" in body:
+        application_settings["council_review_role_id"] = body["council_review_role_id"] or None
         save_application_settings()
     save_chat_ai_settings()
     return web.json_response({"ok": True})

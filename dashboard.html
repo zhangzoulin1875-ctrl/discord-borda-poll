@@ -726,16 +726,21 @@
       <div class="bg-[#2b2d31] rounded-xl p-5">
         <h3 class="font-semibold mb-1">🔐 審核按鈕身分組限制</h3>
         <p class="text-xs text-gray-400 mb-4">設定後，只有擁有指定身分組的成員才能點擊審核按鈕（受理/駁回提案、審核通過/退回入盟申請）。留空則沿用原本的管理員權限。</p>
-        <div class="grid grid-cols-2 gap-3 mb-4">
+        <div class="grid grid-cols-3 gap-3 mb-4">
           <div>
             <label class="block text-sm text-gray-400 mb-1">提案審核身分組 ID</label>
             <input id="proposal-review-role-id" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="身分組 ID（留空=管理員才能按）">
             <p class="text-xs text-gray-500 mt-1">秘書處頻道的「受理/駁回」按鈕</p>
           </div>
           <div>
-            <label class="block text-sm text-gray-400 mb-1">入盟審核身分組 ID</label>
-            <input id="application-review-role-id" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="身分組 ID（留空=管理員才能按）">
-            <p class="text-xs text-gray-500 mt-1">秘書處/理事國頻道的「審核通過/退回」按鈕</p>
+            <label class="block text-sm text-gray-400 mb-1">秘書處入盟審核身分組 ID</label>
+            <input id="secretariat-review-role-id" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="身分組 ID（留空=管理員才能按）">
+            <p class="text-xs text-gray-500 mt-1">秘書處頻道的「審核通過/退回」按鈕</p>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-400 mb-1">理事國入盟審核身分組 ID</label>
+            <input id="council-review-role-id" type="text" class="w-full bg-[#1e1f22] text-white rounded-lg px-3 py-2 outline-none focus:ring-2 ring-[#5865f2] text-sm" placeholder="身分組 ID（留空=管理員才能按）">
+            <p class="text-xs text-gray-500 mt-1">理事國頻道的「審核通過/退回」按鈕</p>
           </div>
         </div>
       </div>
@@ -1691,7 +1696,8 @@ async function showChatAIPanel() {
   document.getElementById('ai-t2i-filter-vision-model').value = s.t2i_filter_vision_model || '';
   // 審核身分組
   document.getElementById('proposal-review-role-id').value = s.proposal_review_role_id || '';
-  document.getElementById('application-review-role-id').value = s.application_review_role_id || '';
+  document.getElementById('secretariat-review-role-id').value = s.secretariat_review_role_id || '';
+  document.getElementById('council-review-role-id').value = s.council_review_role_id || '';
   // 填充池下拉選單
   const filterPoolSelect = document.getElementById('ai-t2i-filter-pool-id');
   if (filterPoolSelect) {
@@ -2001,7 +2007,8 @@ async function saveChatAISettings() {
     t2i_filter_strictness: document.getElementById('ai-t2i-filter-strictness').value,
     t2i_filter_vision_model: document.getElementById('ai-t2i-filter-vision-model').value.trim(),
     proposal_review_role_id: document.getElementById('proposal-review-role-id').value.trim() || null,
-    application_review_role_id: document.getElementById('application-review-role-id').value.trim() || null,
+    secretariat_review_role_id: document.getElementById('secretariat-review-role-id').value.trim() || null,
+    council_review_role_id: document.getElementById('council-review-role-id').value.trim() || null,
     // Turtle Soup
     turtle_soup_enabled: document.getElementById('ai-turtle-soup-enabled').checked,
     turtle_soup_channel_id: document.getElementById('ai-turtle-soup-channel').value.trim(),

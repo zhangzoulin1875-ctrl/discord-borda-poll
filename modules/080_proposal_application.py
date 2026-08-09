@@ -403,6 +403,18 @@ def _check_review_permission(interaction: discord.Interaction, role_id, fallback
     return False
 
 
+def _get_application_review_role_id(app_id: str):
+    """依申請的 system_type（秘書處/理事國）取得對應的審核身分組 ID。"""
+    entry = None
+    for a in _applications.get("entries", []):
+        if a.get("id") == app_id:
+            entry = a
+            break
+    if entry and entry.get("system_type") == "council":
+        return application_settings.get("council_review_role_id")
+    return application_settings.get("secretariat_review_role_id")
+
+
 class ProposalReviewView(discord.ui.View):
     """受理/駁回 buttons attached to proposal notifications in the secretariat channel."""
 
@@ -607,7 +619,8 @@ application_settings = {
     "secretariat_channel": None,   # 秘書處 notification target
     "council_channels": [],        # 理事國入盟申請區 channels to monitor (separate)
     "council_channel": None,       # 理事國 notification target
-    "review_role_id": None,        # 審入盟按鈕限制的身分組 ID（留空=沿用 is_admin 權限）
+    "secretariat_review_role_id": None,  # 秘書處審入盟按鈕限制的身分組 ID（留空=沿用 is_admin 權限）
+    "council_review_role_id": None,      # 理事國審入盟按鈕限制的身分組 ID（留空=沿用 is_admin 權限）
     "nation_admin_whitelist": [],  # Discord user IDs allowed to manage nations
     "ai_settings": {               # optional: separate AI config
         "api_url": "",
@@ -1307,7 +1320,7 @@ class ApplicationReviewView(discord.ui.View):
 
     @discord.ui.button(label="審核通過", style=discord.ButtonStyle.success, emoji="✅")
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _role_id = application_settings.get("review_role_id")
+        _role_id = _get_application_review_role_id(self.app_id)
         if not _check_review_permission(interaction, _role_id):
             _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
             await interaction.response.send_message(_msg, ephemeral=True)
@@ -1316,7 +1329,7 @@ class ApplicationReviewView(discord.ui.View):
 
     @discord.ui.button(label="退回", style=discord.ButtonStyle.danger, emoji="❌")
     async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _role_id = application_settings.get("review_role_id")
+        _role_id = _get_application_review_role_id(self.app_id)
         if not _check_review_permission(interaction, _role_id):
             _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
             await interaction.response.send_message(_msg, ephemeral=True)
