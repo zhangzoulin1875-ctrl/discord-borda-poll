@@ -386,6 +386,8 @@ class ChatGroup(app_commands.Group):
             fake.author = interaction.user
             fake.content = message
             fake.guild = interaction.guild  # needed by generate_chat_reply's server-awareness lookup
+            fake.attachments = []  # generate_chat_reply iterates message.attachments for vision
+            fake.reference = None  # generate_chat_reply checks message.reference for reply-context
             reply, new_facts, mod_action, _ = await generate_chat_reply(fake, chat_ai_settings)
             # Strip [MEMORY:] from test reply
             if "[MEMORY:" in reply:
