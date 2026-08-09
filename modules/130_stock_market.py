@@ -901,42 +901,56 @@ def _calc_inject_efficiency(current_price: float) -> float:
 
 def _calc_inject_boost(amount: float, current_price: float, shares: int) -> tuple:
     """計算注入 amount 元後的股價提升百分比和最終價格。
-    因為效率隨股價上升而下降，這是一個非線性問題，需要逐步計算。
+    分兩階段計算，O(200) 固定迭代次數，即使注入 1 億也不會卡住 event loop。
     回傳 (boost_pct: float, new_price: float, effective_efficiency: float)"""
     if amount <= 0 or shares <= 0:
         return 0.0, current_price, 0.0
 
-    price = current_price
-    remaining = amount
+    price = float(current_price)
+    remaining = float(amount)
     total_cap_increase = 0.0
-    step = max(1.0, current_price * 0.01)  # 每次計算 1% 股價的區間
 
-    while remaining > 0 and price < current_price * 5:  # 安全上限：最多 5 倍
-        eff = _calc_inject_efficiency(price)
-        # 在這個價格區間，花 step 元能提升多少市值
-        cap_gain_per_unit = step * eff
-        if cap_gain_per_unit <= 0:
-            break
+    # ── Phase 1: 股價在 soft cap 以下時，效率固定 50%，直接解析計算 ──
+    if price < INJECT_PRICE_SOFT_CAP:
+        eff = INJECT_EFFICIENCY  # 固定效率
+        market_cap_current = price * shares
+        market_cap_at_cap = INJECT_PRICE_SOFT_CAP * shares
+        cap_needed_to_reach_cap = market_cap_at_cap - market_cap_current
+        cost_to_reach_cap = cap_needed_to_reach_cap / eff if eff > 0 else float('inf')
 
-        market_cap = price * shares
-        pct_gain = (cap_gain_per_unit / market_cap) * 100 if market_cap > 0 else 0
-
-        if remaining < step:
-            # 剩餘金額不足以做一個完整 step
-            eff = _calc_inject_efficiency(price)
+        if remaining <= cost_to_reach_cap:
+            # 全部金額都在固定效率區間內花完，簡單計算
             cap_gain = remaining * eff
+            boost_pct = (cap_gain / market_cap_current) * 100 if market_cap_current > 0 else 0
+            new_price = price * (1 + boost_pct / 100)
+            return round(boost_pct, 2), round(new_price, 2), round(eff, 4)
+        else:
+            # 先花錢把股價推到 soft cap
+            total_cap_increase += cap_needed_to_reach_cap
+            remaining -= cost_to_reach_cap
+            price = INJECT_PRICE_SOFT_CAP
+
+    # ── Phase 2: 股價超過 soft cap，效率指數衰減 ──
+    # 效率衰減極快（1.06^(-excess)），價格幾乎不會動。
+    # 用固定 200 步近似積分，不管金額多大都是 O(200)。
+    MAX_ITER = 200
+    if remaining > 0:
+        step_size = remaining / MAX_ITER
+        for _ in range(MAX_ITER):
+            if remaining <= 0:
+                break
+            spend = min(step_size, remaining)
+            eff = _calc_inject_efficiency(price)
+            if eff <= 1e-12:
+                break
             market_cap = price * shares
+            cap_gain = spend * eff
             pct_gain = (cap_gain / market_cap) * 100 if market_cap > 0 else 0
             total_cap_increase += cap_gain
-            price = price * (1 + pct_gain / 100)
-            remaining = 0
-        else:
-            remaining -= step
-            total_cap_increase += cap_gain_per_unit
-            price = price * (1 + pct_gain / 100)
+            price *= (1 + pct_gain / 100)
+            remaining -= spend
 
     boost_pct = ((price - current_price) / current_price) * 100 if current_price > 0 else 0
-    # 沒有限制上限了——但成本本身會讓大額注入不切實際
     effective_eff = (total_cap_increase / amount) if amount > 0 else 0
     return round(boost_pct, 2), round(price, 2), round(effective_eff, 4)
 
