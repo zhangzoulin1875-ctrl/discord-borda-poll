@@ -6852,6 +6852,62 @@ def _strip_raw_tool_dump(text: str) -> str:
     return cleaned
 
 
+async def _fetch_image_as_data_uri(image_url: str, max_dimension: int = 1280, max_bytes: int = 4_000_000) -> str:
+    """下載圖片並轉成 base64 data URI，供傳給視覺模型使用。
+
+    為什麼要這樣做（而不是直接把 Discord CDN 網址傳給視覺模型 API）：
+    有些視覺模型供應商（尤其 meta/llama-3.2-vision 這類透過第三方路由的模型）
+    是「伺服器端自己再去下載 image_url 指定的網址」，而不是我們主動把圖片內容
+    送過去。這代表整個識圖請求的耗時和成功率，取決於「對方伺服器能不能順利
+    抓到 Discord 的 CDN 網址」——這常常因為 User-Agent 檢查、重定向、對方網路
+    速度、簽名網址過期等原因而變慢或失敗，正是「逾時 >90s」和「回應為空/非
+    JSON」這兩種診斷訊息最常見的根因。改成我們自己先把圖片抓下來、轉成 base64
+    內嵌進 payload，就完全繞過了「對方伺服器抓圖」這個不可控環節。
+
+    回傳 data URI 字串；下載失敗回傳空字串（呼叫端應 fallback 回原始 URL）。"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                image_url,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; ICEA-bot/1.0)"},
+                timeout=aiohttp.ClientTimeout(total=15, connect=8),
+            ) as resp:
+                if resp.status != 200:
+                    return ""
+                raw = await resp.read()
+                content_type = resp.content_type or "image/png"
+    except Exception:
+        return ""
+
+    if not raw:
+        return ""
+
+    # 圖片太大時用 Pillow 縮小，避免 base64 payload 過大導致視覺模型 API 逾時/拒收
+    if _PIL_AVAILABLE:
+        try:
+            with Image.open(io.BytesIO(raw)) as img:
+                img = img.convert("RGB") if img.mode not in ("RGB", "L") else img
+                w, h = img.size
+                if max(w, h) > max_dimension:
+                    scale = max_dimension / max(w, h)
+                    img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                raw = buf.getvalue()
+                content_type = "image/jpeg"
+        except Exception:
+            # Pillow 處理失敗（例如不支援的格式、動態 GIF 等）就用原始 bytes，
+            # 只要沒超過 max_bytes 硬上限就照樣送出去，讓視覺模型自己試
+            if len(raw) > max_bytes:
+                return ""
+    elif len(raw) > max_bytes:
+        # 沒裝 Pillow 又檔案太大，無法縮圖，直接放棄改用原始 URL 讓供應商自己抓
+        return ""
+
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"data:{content_type};base64,{b64}"
+
+
 async def _describe_image(image_url: str, settings: dict, _vision_diag: list = None) -> str:
     """Call a vision-capable model to describe an image. Uses the same API
     URL/Key as the chat AI, but with a different model name (settings["vision_model"]).
@@ -6863,6 +6919,16 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
     fallback API endpoint (same as the chat degradation chain)."""
     if _vision_diag is None:
         _vision_diag = []
+
+    # 優先把圖片轉成 base64 data URI 自己送過去，避免視覺模型供應商自己去抓
+    # Discord CDN 網址時卡住/失敗（這是逾時與空回應兩種診斷訊息的常見根因）。
+    # 下載/轉檔失敗就 fallback 回原始 URL（讓供應商自己抓，維持原行為不會更差）。
+    _data_uri = await _fetch_image_as_data_uri(image_url)
+    _image_ref = _data_uri if _data_uri else image_url
+    if _data_uri:
+        _vision_diag.append(f"📷 圖片已轉為 base64 內嵌（{len(_data_uri)//1024}KB），略過遠端抓圖環節")
+    else:
+        _vision_diag.append("📷 圖片下載/轉檔失敗，改用原始網址（供應商需自行抓取）")
     # ── 池解析：vision 角色 ──
     _vis_url, _vis_key, vision_model = _resolve_role_endpoint("vision", settings)
     if not vision_model:
@@ -6906,12 +6972,14 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
                     "role": "user",
                     "content": [
                         {"type": "text", "text": _prompt_text},
-                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "image_url", "image_url": {"url": _image_ref}},
                     ],
                 }
             ],
             "max_tokens": 500,
             "temperature": 0.3,
+            "stream": False,  # 明確要求非串流回應——某些路由層在特定條件下會預設走串流，
+                               # 造成我們用一般 JSON 解析讀到的內容是 SSE 格式或空字串
         }
         _hdrs = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         try:
@@ -6919,15 +6987,24 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     url, json=_payload, headers=_hdrs,
-                    timeout=aiohttp.ClientTimeout(total=90, connect=10, sock_read=80),
+                    timeout=aiohttp.ClientTimeout(total=60, connect=10, sock_read=50),
                 ) as resp:
+                    _raw_text = await resp.text()
                     if resp.status != 200:
-                        _err = await resp.text()
-                        _short = _err[:150].replace("\n", " ")
+                        _short = _raw_text[:150].replace("\n", " ")
                         diag_list.append(f"📷 {label}（{model_name}）HTTP {resp.status}：{_short}")
-                        print(f"⚠️ 視覺模型 {label}（{model_name}）API 返回 {resp.status}: {_err[:200]}")
+                        print(f"⚠️ 視覺模型 {label}（{model_name}）API 返回 {resp.status}: {_raw_text[:200]}")
                         return "", False
-                    data = json_module.loads(await resp.text())
+                    try:
+                        data = json_module.loads(_raw_text)
+                    except json_module.JSONDecodeError:
+                        # 對方回了 200 但內容不是合法 JSON（可能是空字串、HTML錯誤頁、
+                        # 或 SSE 串流格式）。把原始內容片段記進診斷，這樣以後排查
+                        # 才知道對方到底回了什麼，不是只看到一句「JSON解析失敗」。
+                        _snippet = (_raw_text[:150] if _raw_text else "(空白回應)").replace("\n", " ")
+                        diag_list.append(f"📷 {label}（{model_name}）回應非JSON：{_snippet}")
+                        print(f"⚠️ 視覺模型 {label}（{model_name}）回應非JSON，原始內容前150字：{_snippet}")
+                        return "", False
                     choices = data.get("choices", [])
                     if choices:
                         desc = choices[0].get("message", {}).get("content", "")
@@ -6940,8 +7017,8 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
             print(f"⚠️ 視覺模型 {label}（{model_name}）回應為空")
             return "", False
         except asyncio.TimeoutError:
-            diag_list.append(f"📷 {label}（{model_name}）逾時（>90s）")
-            print(f"⚠️ 視覺模型 {label}（{model_name}）識圖逾時（>90s）")
+            diag_list.append(f"📷 {label}（{model_name}）逾時（>60s）")
+            print(f"⚠️ 視覺模型 {label}（{model_name}）識圖逾時（>60s）")
             return "", False
         except Exception as e:
             _short = str(e)[:100]
@@ -8508,13 +8585,13 @@ async def generate_chat_reply(message, settings: dict) -> tuple:
     # user is replying to — not just the user's own message.
     async def _describe_with_timeout(att):
         try:
-            # Matches _describe_image's own 90s internal budget, plus a
-            # small margin — the inner aiohttp timeout should fire first
-            # in normal cases, this is just a hard outer safety net.
-            return await asyncio.wait_for(_describe_image(att.url, settings, _vision_diag=_vision_diag), timeout=95)
+            # 內部每次嘗試上限 60s，若設定了降級鏈可能連續嘗試多個模型，
+            # 這裡的外層安全網留寬一點（120s）確保降級鏈有機會跑完，
+            # 同時仍是硬上限，避免識圖卡住拖垮整個聊天回覆流程。
+            return await asyncio.wait_for(_describe_image(att.url, settings, _vision_diag=_vision_diag), timeout=120)
         except asyncio.TimeoutError:
-            _vision_diag.append(f"📷 譖覺模型識圖逾時（>95s）")
-            print(f"⚠️ 視覺模型識圖逾時（>95s），此圖片將略過")
+            _vision_diag.append(f"📷 視覺模型識圖逾時（>120s，含降級鏈嘗試）")
+            print(f"⚠️ 視覺模型識圖逾時（>120s），此圖片將略過")
             return ""
         except Exception as e:
             _vision_diag.append(f"📷 識圖子流程例外：{str(e)[:80]}")
