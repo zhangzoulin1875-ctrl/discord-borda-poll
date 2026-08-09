@@ -379,19 +379,21 @@ class StockTradeModal(discord.ui.Modal, title="股票交易"):
         self.add_item(self.quantity_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        # 先 defer，確保 3 秒內有回應，避免 save_stock_market() 同步 I/O 導致「未及時回應」
+        await interaction.response.defer(ephemeral=True)
         try:
             qty = int(self.quantity_input.value)
         except ValueError:
-            await interaction.response.send_message("❌ 請輸入有效的數字。", ephemeral=True)
+            await interaction.followup.send("❌ 請輸入有效的數字。", ephemeral=True)
             return
 
         if qty <= 0:
-            await interaction.response.send_message("❌ 數量必須大於 0。", ephemeral=True)
+            await interaction.followup.send("❌ 數量必須大於 0。", ephemeral=True)
             return
 
         co = stock_companies.get(self.company_id)
         if not co or co.get("status") != "active":
-            await interaction.response.send_message("❌ 此公司已不存在或已破產。", ephemeral=True)
+            await interaction.followup.send("❌ 此公司已不存在或已破產。", ephemeral=True)
             return
 
         cost = int(qty * co["share_price"])
@@ -402,7 +404,7 @@ class StockTradeModal(discord.ui.Modal, title="股票交易"):
 
         if self.trade_type == "buy":
             if get_balance(uid) < cost:
-                await interaction.response.send_message(f"❌ 餘額不足。需要 {cost} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
+                await interaction.followup.send(f"❌ 餘額不足。需要 {cost} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
                 return
             # 扣錢、加股
             add_balance(uid, -cost, interaction.user.display_name)
@@ -419,7 +421,7 @@ class StockTradeModal(discord.ui.Modal, title="股票交易"):
 
         elif self.trade_type == "sell":
             if pos["long"] < qty:
-                await interaction.response.send_message(f"❌ 你只持有 {pos['long']} 股，不足以賣出 {qty} 股。", ephemeral=True)
+                await interaction.followup.send(f"❌ 你只持有 {pos['long']} 股，不足以賣出 {qty} 股。", ephemeral=True)
                 return
             revenue = int(qty * co["share_price"])
             add_balance(uid, revenue, interaction.user.display_name)
@@ -452,11 +454,11 @@ class StockTradeModal(discord.ui.Modal, title="股票交易"):
 
         elif self.trade_type == "cover":
             if pos["short"] < qty:
-                await interaction.response.send_message(f"❌ 你只做空了 {pos['short']} 股，不足以回補 {qty} 股。", ephemeral=True)
+                await interaction.followup.send(f"❌ 你只做空了 {pos['short']} 股，不足以回補 {qty} 股。", ephemeral=True)
                 return
             pay = int(qty * co["share_price"])
             if get_balance(uid) < pay:
-                await interaction.response.send_message(f"❌ 餘額不足。回補需要 {pay} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
+                await interaction.followup.send(f"❌ 餘額不足。回補需要 {pay} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
                 return
             add_balance(uid, -pay, interaction.user.display_name)
             pos["short"] -= qty
@@ -471,7 +473,7 @@ class StockTradeModal(discord.ui.Modal, title="股票交易"):
             embed.add_field(name="餘額", value=f"{get_balance(uid)} {currency_name()}", inline=True)
 
         save_stock_market()
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 class CompanyCreateModal(discord.ui.Modal, title="創建公司"):
@@ -602,6 +604,17 @@ class StockManagementView(discord.ui.View):
     async def _deny(self, interaction: discord.Interaction):
         await interaction.response.send_message("這不是你的面板！", ephemeral=True)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        import traceback
+        traceback.print_exc()
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
+        except Exception:
+            pass
+
     # ── 第一排：公司管理 ──
     @discord.ui.button(label="建立公司", style=discord.ButtonStyle.success, emoji="🏢", row=0)
     async def btn_create(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -703,6 +716,29 @@ class StockManagementView(discord.ui.View):
             return await self._deny(interaction)
         await interaction.response.send_message(embed=_build_market_embed(), ephemeral=True)
 
+    # ── 第四排：公司維護 ──
+    @discord.ui.button(label="注入資金", style=discord.ButtonStyle.success, emoji="💉", row=3)
+    async def btn_inject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self._is_owner(interaction):
+            return await self._deny(interaction)
+        my_companies = {cid: co for cid, co in stock_companies.items()
+                        if co.get("founder_id") == self.user_id_str and co.get("status") == "active"}
+        if not my_companies:
+            await interaction.response.send_message("你目前沒有活躍的公司可以注入資金。", ephemeral=True)
+            return
+        view = StockInjectSelectView(self.user_id_str)
+        embed = discord.Embed(
+            title="💉 注入資金 — 搶救股價",
+            description=(
+                "選擇要注入資金的公司，輸入金額後股價會立刻上漲。\n\n"
+                "⚠️ 注入效率 50%：花 1000 元大約提升市值 500 元等值的股價\n"
+                "⚠️ 每回合限注一次，每次最多提升 +20%\n"
+                "⚠️ 注入的資金直接消耗，無法退還"
+            ),
+            color=discord.Color.gold(),
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
 
 class EconomyPanelButtonsView(discord.ui.View):
     """經濟看板下方的持久化快捷按鈕。點擊後開啟只有點擊者自己看得到（ephemeral）
@@ -740,6 +776,17 @@ class StockSelectView(discord.ui.View):
         self.user_id_str = user_id_str
         self.trade_type = trade_type
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        import traceback
+        traceback.print_exc()
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
+        except Exception:
+            pass
+
         active = get_active_companies()
         options = []
         for cid, co in list(active.items())[:25]:  # Discord select 最多 25 個
@@ -771,6 +818,158 @@ class StockSelectView(discord.ui.View):
 
         modal = StockTradeModal(company_id, co["name"], co["share_price"], self.trade_type, self.user_id_str)
         await interaction.response.send_modal(modal)
+
+
+# ── 注入資金視圖 ──
+
+INJECT_EFFICIENCY = 0.5       # 注入效率：花 1000 元提升約 500 元等值的市值
+INJECT_MAX_BOOST = 20.0       # 單次注入最高提升 +20% 股價
+INJECT_COOLDOWN_KEY = "last_inject_turn"  # 存在公司 dict 裡的欄位名
+
+
+class StockInjectSelectView(discord.ui.View):
+    """選擇要注入資金的公司，選擇後彈出 Modal 輸入金額。"""
+
+    def __init__(self, user_id_str: str):
+        super().__init__(timeout=120)
+        self.user_id_str = user_id_str
+        my_companies = {cid: co for cid, co in stock_companies.items()
+                        if co.get("founder_id") == user_id_str and co.get("status") == "active"}
+        options = []
+        for cid, co in list(my_companies.items())[:25]:
+            cap = co["share_price"] * co["shares_outstanding"]
+            inject_cd = co.get(INJECT_COOLDOWN_KEY, -1)
+            cd_label = "（本回合已注入）" if inject_cd == stock_market.get("turn", 0) else "可注入"
+            options.append(discord.SelectOption(
+                label=co["name"][:100],
+                description=f"{_format_price(co['share_price'])} 元/股 | 市值 {_format_price(cap)} | {cd_label}"[:100],
+                value=cid,
+            ))
+        if options:
+            select = discord.ui.Select(placeholder="選擇要注入資金的公司…", options=options, min_values=1, max_values=1)
+            select.callback = self._on_select
+            self.add_item(select)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        import traceback
+        traceback.print_exc()
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ 操作發生錯誤，請重試。", ephemeral=True)
+        except Exception:
+            pass
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != self.user_id_str:
+            await interaction.response.send_message("這不是你的面板！", ephemeral=True)
+            return
+        company_id = interaction.data["values"][0]
+        co = stock_companies.get(company_id)
+        if not co or co.get("status") != "active":
+            await interaction.response.send_message("❌ 公司已不存在或已破產。", ephemeral=True)
+            return
+        current_turn = stock_market.get("turn", 0)
+        if co.get(INJECT_COOLDOWN_KEY, -1) == current_turn:
+            await interaction.response.send_message("⏳ 本回合已注入過資金，請等下一回合。", ephemeral=True)
+            return
+        modal = StockInjectModal(company_id, co["name"], co["share_price"], co["shares_outstanding"], self.user_id_str)
+        await interaction.response.send_modal(modal)
+
+
+class StockInjectModal(discord.ui.Modal, title="💉 注入資金"):
+    """創辦人花現金提升公司股價的 Modal。"""
+
+    def __init__(self, company_id: str, company_name: str, price: float, shares: int, user_id_str: str):
+        super().__init__(timeout=120)
+        self.company_id = company_id
+        self.company_name = company_name
+        self.price = price
+        self.shares = shares
+        self.user_id_str = user_id_str
+        market_cap = price * shares
+        max_boost_value = market_cap * (INJECT_MAX_BOOST / 100)
+        max_inject_amount = int(max_boost_value / INJECT_EFFICIENCY)
+        self.amount_input = discord.ui.TextInput(
+            label=f"注入金額（效率 {INJECT_EFFICIENCY*100:.0f}%，最高 +{INJECT_MAX_BOOST:.0f}%）",
+            placeholder=f"目前股價 {_format_price(price)} 元，最多可注 {max_inject_amount} 元",
+            required=True,
+            max_length=10,
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = int(self.amount_input.value)
+        except ValueError:
+            await interaction.followup.send("❌ 請輸入有效的數字。", ephemeral=True)
+            return
+        if amount <= 0:
+            await interaction.followup.send("❌ 金額必須大於 0。", ephemeral=True)
+            return
+
+        co = stock_companies.get(self.company_id)
+        if not co or co.get("status") != "active":
+            await interaction.followup.send("❌ 公司已不存在或已破產。", ephemeral=True)
+            return
+
+        uid = self.user_id_str
+        if co.get("founder_id") != uid:
+            await interaction.followup.send("❌ 只有公司創辦人可以注入資金。", ephemeral=True)
+            return
+
+        current_turn = stock_market.get("turn", 0)
+        if co.get(INJECT_COOLDOWN_KEY, -1) == current_turn:
+            await interaction.followup.send("⏳ 本回合已注入過資金，請等下一回合。", ephemeral=True)
+            return
+
+        if amount < 100:
+            await interaction.followup.send("❌ 最低注入金額為 100 琉璃幣。", ephemeral=True)
+            return
+
+        if get_balance(uid) < amount:
+            await interaction.followup.send(f"❌ 餘額不足。需要 {amount} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
+            return
+
+        _ensure_user(uid, interaction.user.display_name)
+
+        old_price = co["share_price"]
+        market_cap = old_price * co["shares_outstanding"]
+        cap_increase = amount * INJECT_EFFICIENCY
+        boost_pct = (cap_increase / market_cap) * 100 if market_cap > 0 else 0
+        boost_pct = min(boost_pct, INJECT_MAX_BOOST)
+        new_price = round(old_price * (1 + boost_pct / 100), 2)
+
+        add_balance(uid, -amount, interaction.user.display_name)
+        co["last_turn_price"] = old_price
+        co["share_price"] = new_price
+        co["market_cap"] = new_price * co["shares_outstanding"]
+        co[INJECT_COOLDOWN_KEY] = current_turn
+        co.setdefault("history", []).append({
+            "turn": current_turn,
+            "price": new_price,
+            "change_pct": boost_pct,
+            "event": f"創辦人注入 {amount} 琉璃幣搶救股價",
+        })
+        if len(co["history"]) > 20:
+            co["history"] = co["history"][-20:]
+
+        save_stock_market()
+
+        embed = discord.Embed(
+            title="💉 資金注入完成",
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="公司", value=self.company_name, inline=True)
+        embed.add_field(name="注入金額", value=f"{amount} {currency_name()}", inline=True)
+        embed.add_field(name="股價變化", value=f"{_format_price(old_price)} → {_format_price(new_price)} 元（+{boost_pct:.1f}%）", inline=True)
+        embed.add_field(name="新市值", value=_format_price(new_price * co["shares_outstanding"]), inline=True)
+        embed.add_field(name="剩餘餘額", value=f"{get_balance(uid)} {currency_name()}", inline=True)
+        embed.set_footer(text="⚠️ 本回合已注入，下次開盤後可再注入")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ── AI 市場回合 ──
@@ -1225,6 +1424,67 @@ class StockGroup(app_commands.Group):
     @app_commands.command(name="market", description="查看股市總覽")
     async def stock_market_cmd(self, interaction: discord.Interaction):
         embed = _build_market_embed()
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="inject", description="注入資金搶救自己公司的股價（僅創辦人）")
+    @app_commands.describe(name="公司名稱", amount="注入金額（琉璃幣）")
+    async def stock_inject(self, interaction: discord.Interaction, name: str, amount: int):
+        uid = str(interaction.user.id)
+        cid, co = get_company_by_name(name)
+        if not co:
+            await interaction.response.send_message(f"❌ 找不到公司「{name}」。", ephemeral=True)
+            return
+        if co.get("founder_id") != uid:
+            await interaction.response.send_message("❌ 只有公司創辦人可以注入資金。", ephemeral=True)
+            return
+        if co.get("status") != "active":
+            await interaction.response.send_message("❌ 已破產的公司無法注入資金。", ephemeral=True)
+            return
+        current_turn = stock_market.get("turn", 0)
+        if co.get(INJECT_COOLDOWN_KEY, -1) == current_turn:
+            await interaction.response.send_message("⏳ 本回合已注入過資金，請等下一回合。", ephemeral=True)
+            return
+        if amount < 100:
+            await interaction.response.send_message("❌ 最低注入金額為 100 琉璃幣。", ephemeral=True)
+            return
+        if get_balance(uid) < amount:
+            await interaction.response.send_message(f"❌ 餘額不足。需要 {amount} {currency_name()}，你只有 {get_balance(uid)} {currency_name()}。", ephemeral=True)
+            return
+
+        _ensure_user(uid, interaction.user.display_name)
+        old_price = co["share_price"]
+        market_cap = old_price * co["shares_outstanding"]
+        cap_increase = amount * INJECT_EFFICIENCY
+        boost_pct = (cap_increase / market_cap) * 100 if market_cap > 0 else 0
+        boost_pct = min(boost_pct, INJECT_MAX_BOOST)
+        new_price = round(old_price * (1 + boost_pct / 100), 2)
+
+        add_balance(uid, -amount, interaction.user.display_name)
+        co["last_turn_price"] = old_price
+        co["share_price"] = new_price
+        co["market_cap"] = new_price * co["shares_outstanding"]
+        co[INJECT_COOLDOWN_KEY] = current_turn
+        co.setdefault("history", []).append({
+            "turn": current_turn,
+            "price": new_price,
+            "change_pct": boost_pct,
+            "event": f"創辦人注入 {amount} 琉璃幣搶救股價",
+        })
+        if len(co["history"]) > 20:
+            co["history"] = co["history"][-20:]
+        save_stock_market()
+
+        embed = discord.Embed(
+            title="💉 資金注入完成",
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="公司", value=co["name"], inline=True)
+        embed.add_field(name="注入金額", value=f"{amount} {currency_name()}", inline=True)
+        embed.add_field(name="股價變化", value=f"{_format_price(old_price)} → {_format_price(new_price)} 元（+{boost_pct:.1f}%）", inline=True)
+        embed.add_field(name="新市值", value=_format_price(new_price * co["shares_outstanding"]), inline=True)
+        embed.add_field(name="剩餘餘額", value=f"{get_balance(uid)} {currency_name()}", inline=True)
+        embed.set_footer(text="⚠️ 本回合已注入，下次開盤後可再注入")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="history", description="查看公司股價歷史")
