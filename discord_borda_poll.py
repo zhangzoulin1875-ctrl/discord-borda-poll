@@ -6963,8 +6963,17 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
         "用繁體中文回答，簡潔但完整。"
     )
 
-    async def _try_vision(model_name, url, key, label, diag_list):
-        """Single attempt to call a vision model. Returns (description, success)."""
+    # 對方伺服器暫時性錯誤（重啟中/過載/gateway問題）——這類錯誤通常是快速失敗
+    # （nginx幾乎立刻回502，不會等到timeout），原地重試1次成本很低但常常就成功了。
+    # 逾時（asyncio.TimeoutError）刻意不重試：那代表對方已經卡了60秒，再等60秒
+    # 沒有意義，應該直接換下一個降級選項比較划算。
+    _TRANSIENT_HTTP_STATUS = {429, 500, 502, 503, 504}
+
+    async def _try_vision(model_name, url, key, label, diag_list, _retry_count=1):
+        """單次（含原地重試）呼叫視覺模型。遇到 429/5xx/連線錯誤這類「快速失敗」的
+        暫時性錯誤會原地重試最多 _retry_count 次（間隔1秒）；逾時、JSON解析失敗、
+        永久性 4xx 不重試，直接回報失敗讓外層換下一個降級選項。
+        Returns (description, success)."""
         _payload = {
             "model": model_name,
             "messages": [
@@ -6982,49 +6991,69 @@ async def _describe_image(image_url: str, settings: dict, _vision_diag: list = N
                                # 造成我們用一般 JSON 解析讀到的內容是 SSE 格式或空字串
         }
         _hdrs = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        try:
-            _t0 = _time.time()
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, json=_payload, headers=_hdrs,
-                    timeout=aiohttp.ClientTimeout(total=60, connect=10, sock_read=50),
-                ) as resp:
-                    _raw_text = await resp.text()
-                    if resp.status != 200:
-                        _short = _raw_text[:150].replace("\n", " ")
-                        diag_list.append(f"📷 {label}（{model_name}）HTTP {resp.status}：{_short}")
-                        print(f"⚠️ 視覺模型 {label}（{model_name}）API 返回 {resp.status}: {_raw_text[:200]}")
-                        return "", False
-                    try:
-                        data = json_module.loads(_raw_text)
-                    except json_module.JSONDecodeError:
-                        # 對方回了 200 但內容不是合法 JSON（可能是空字串、HTML錯誤頁、
-                        # 或 SSE 串流格式）。把原始內容片段記進診斷，這樣以後排查
-                        # 才知道對方到底回了什麼，不是只看到一句「JSON解析失敗」。
-                        _snippet = (_raw_text[:150] if _raw_text else "(空白回應)").replace("\n", " ")
-                        diag_list.append(f"📷 {label}（{model_name}）回應非JSON：{_snippet}")
-                        print(f"⚠️ 視覺模型 {label}（{model_name}）回應非JSON，原始內容前150字：{_snippet}")
-                        return "", False
-                    choices = data.get("choices", [])
-                    if choices:
-                        desc = choices[0].get("message", {}).get("content", "")
-                        if desc:
-                            _elapsed = _time.time() - _t0
-                            diag_list.append(f"📷 {label}（{model_name}）✅ {_elapsed:.1f}s, {len(desc)} chars")
-                            print(f"📷 視覺模型 {label}（{model_name}）識圖完成（{_elapsed:.1f}s, {len(desc)} chars）")
-                            return desc.strip(), True
-            diag_list.append(f"📷 {label}（{model_name}）回應為空")
-            print(f"⚠️ 視覺模型 {label}（{model_name}）回應為空")
-            return "", False
-        except asyncio.TimeoutError:
-            diag_list.append(f"📷 {label}（{model_name}）逾時（>60s）")
-            print(f"⚠️ 視覺模型 {label}（{model_name}）識圖逾時（>60s）")
-            return "", False
-        except Exception as e:
-            _short = str(e)[:100]
-            diag_list.append(f"📷 {label}（{model_name}）例外：{_short}")
-            print(f"⚠️ 視覺模型 {label}（{model_name}）識圖失敗：{e}")
-            return "", False
+
+        for _attempt in range(_retry_count + 1):
+            try:
+                _t0 = _time.time()
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url, json=_payload, headers=_hdrs,
+                        timeout=aiohttp.ClientTimeout(total=60, connect=10, sock_read=50),
+                    ) as resp:
+                        _raw_text = await resp.text()
+                        if resp.status != 200:
+                            _short = _raw_text[:150].replace("\n", " ")
+                            if resp.status in _TRANSIENT_HTTP_STATUS and _attempt < _retry_count:
+                                print(f"⚠️ 視覺模型 {label}（{model_name}）暫時性錯誤 HTTP {resp.status}，1s 後原地重試（第{_attempt+1}/{_retry_count}次）...")
+                                await asyncio.sleep(1)
+                                continue
+                            diag_list.append(f"📷 {label}（{model_name}）HTTP {resp.status}：{_short}")
+                            print(f"⚠️ 視覺模型 {label}（{model_name}）API 返回 {resp.status}: {_raw_text[:200]}")
+                            return "", False
+                        try:
+                            data = json_module.loads(_raw_text)
+                        except json_module.JSONDecodeError:
+                            # 對方回了 200 但內容不是合法 JSON（可能是空字串、HTML錯誤頁、
+                            # 或 SSE 串流格式）。把原始內容片段記進診斷，這樣以後排查
+                            # 才知道對方到底回了什麼，不是只看到一句「JSON解析失敗」。
+                            _snippet = (_raw_text[:150] if _raw_text else "(空白回應)").replace("\n", " ")
+                            diag_list.append(f"📷 {label}（{model_name}）回應非JSON：{_snippet}")
+                            print(f"⚠️ 視覺模型 {label}（{model_name}）回應非JSON，原始內容前150字：{_snippet}")
+                            return "", False
+                        choices = data.get("choices", [])
+                        if choices:
+                            desc = choices[0].get("message", {}).get("content", "")
+                            if desc:
+                                _elapsed = _time.time() - _t0
+                                diag_list.append(f"📷 {label}（{model_name}）✅ {_elapsed:.1f}s, {len(desc)} chars")
+                                print(f"📷 視覺模型 {label}（{model_name}）識圖完成（{_elapsed:.1f}s, {len(desc)} chars）")
+                                return desc.strip(), True
+                diag_list.append(f"📷 {label}（{model_name}）回應為空")
+                print(f"⚠️ 視覺模型 {label}（{model_name}）回應為空")
+                return "", False
+            except asyncio.TimeoutError:
+                # 逾時不重試——已經等了60秒，再等一次沒意義，直接讓外層換下一個選項
+                diag_list.append(f"📷 {label}（{model_name}）逾時（>60s）")
+                print(f"⚠️ 視覺模型 {label}（{model_name}）識圖逾時（>60s）")
+                return "", False
+            except (aiohttp.ClientConnectionError, aiohttp.ServerDisconnectedError) as e:
+                # 連線層級的暫時性問題（對方重啟中斷連線等），同樣值得原地重試
+                if _attempt < _retry_count:
+                    print(f"⚠️ 視覺模型 {label}（{model_name}）連線錯誤，1s 後原地重試（第{_attempt+1}/{_retry_count}次）：{e}")
+                    await asyncio.sleep(1)
+                    continue
+                diag_list.append(f"📷 {label}（{model_name}）連線錯誤：{str(e)[:100]}")
+                print(f"⚠️ 視覺模型 {label}（{model_name}）識圖失敗（連線錯誤）：{e}")
+                return "", False
+            except Exception as e:
+                _short = str(e)[:100]
+                diag_list.append(f"📷 {label}（{model_name}）例外：{_short}")
+                print(f"⚠️ 視覺模型 {label}（{model_name}）識圖失敗：{e}")
+                return "", False
+
+        # 所有重試都用完仍是暫時性錯誤
+        diag_list.append(f"📷 {label}（{model_name}）重試{_retry_count}次後仍失敗（暫時性錯誤）")
+        return "", False
 
     # ── Build the model attempt list (degradation chain) ──
     _attempt_list = [(vision_model, api_url, settings["api_key"], "主視覺模型")]
