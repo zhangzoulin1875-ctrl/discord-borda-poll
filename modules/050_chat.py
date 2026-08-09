@@ -400,7 +400,9 @@ class ChatGroup(app_commands.Group):
             import traceback
             tb = traceback.format_exc()
             print(f"❌ /chat test 失敗，完整 traceback:\n{tb}")
-            short_tb = tb.strip().split(chr(10))[-1][:200]
+            # 取最後 6 行（含檔名:行號），暫時性除錯強化，方便直接從 Discord 訊息定位問題行
+            tb_lines = [l for l in tb.strip().split(chr(10)) if l.strip()]
+            short_tb = "\n".join(tb_lines[-8:])[:1500]
             await interaction.followup.send(f"❌ AI 聊天測試失敗：{type(e).__name__}: {e}\n```{short_tb}```", ephemeral=True)
 
     @app_commands.command(name="memory", description="查看 AI 對你的記憶")
