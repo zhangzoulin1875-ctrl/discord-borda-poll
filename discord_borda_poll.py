@@ -11378,6 +11378,12 @@ async def on_ready():
     except Exception as e:
         print(f"⚠️ 遊戲狀態恢復失敗：{e}")
 
+    # 清理殘留的狼人殺身分組（重啟前未正常結束的遊戲會留下孤兒身分組）
+    try:
+        await _ww_startup_cleanup(bot)
+    except Exception as e:
+        print(f"⚠️ 狼人殺身分組清理失敗：{e}")
+
     # Warmup probe: if we don't yet know whether the chat AI endpoint supports
     # tools, do a tiny test call NOW (before any user message arrives) so the
     # first real user message doesn't pay the double-call penalty. This probe
@@ -14815,7 +14821,7 @@ _sub_bot_cmd_config = {}
 # 只有真的寫死比對單一 BOT_OWNER_ID（跨伺服器都只有那一個人能用）的指令
 # 才預設關閉，其餘一律預設開啟，讓子機器人真正做到「Guest 伺服器自治」。
 _SUB_BOT_TRUE_OWNER_ONLY_KEYS = {
-    "ww.toggle", "ww.channel", "ww.end", "ww.test",          # modules/010_werewolf.py: is_owner()
+    "ww.toggle", "ww.channel", "ww.end", "ww.test", "ww.cleanup_roles",  # modules/010_werewolf.py: is_owner()
     "horse.set_channel", "horse.start_now",                   # modules/140_horse_racing.py: is_owner()
     "siege.start", "siege.settle", "siege.setup", "siege.toggle",  # modules/160_siege.py: 寫死 BOT_OWNER_ID
     "cyber_war.start", "cyber_war.end",   # modules/180_cyber_war.py: 寫死 BOT_OWNER_ID（set_channel 已改為 is_admin() 管理員限定，見上方 quiz/soup 註解邏輯）

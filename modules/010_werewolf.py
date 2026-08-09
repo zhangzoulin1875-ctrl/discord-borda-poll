@@ -97,6 +97,31 @@ def _ww_log(msg: str):
     print(f"🐺 WW: {msg}")
 
 
+async def _ww_startup_cleanup(bot):
+    """機器人啟動時清理所有殘留的狼人殺身分組。在 on_ready 中呼叫。"""
+    cleaned = 0
+    for guild in bot.guilds:
+        for role in guild.roles:
+            if role.name.startswith("狼人殺玩家"):
+                try:
+                    for m in role.members:
+                        try:
+                            await m.remove_roles(role)
+                        except Exception:
+                            pass
+                    await role.delete(reason="機器人啟動：清理殘留狼人殺身分組")
+                    cleaned += 1
+                    _ww_log(f"Startup cleanup: deleted {role.name} ({role.id}) in {guild.name}")
+                except discord.Forbidden:
+                    _ww_log(f"Startup cleanup: no permission to delete {role.name} in {guild.name}")
+                except Exception as e:
+                    _ww_log(f"Startup cleanup: failed to delete {role.name}: {e}")
+    if cleaned:
+        print(f"🐺 WW startup cleanup: removed {cleaned} stale role(s)")
+    # 重置 state 中的 role_id（舊的已經被清理了）
+    _ww_state["role_id"] = None
+
+
 # ── AI 主持人生成旁白 ──
 _WW_NARRATOR_PROMPT = """你是一個狼人殺遊戲的主持人（旁白）。請用台灣繁體中文生成簡短、有氛圍感的旁白文字。要求：
 - 50-100字以內
