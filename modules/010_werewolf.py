@@ -1427,11 +1427,32 @@ async def werewolf_loop():
 
 
 async def _ww_setup_role_and_perms(channel):
-    """建立臨時身分組並設定頻道權限。"""
+    """建立臨時身分組並設定頻道權限。優先清理現有的殘留狼人殺身分組，避免累積。"""
     global _ww_state
 
     guild = channel.guild
-    # 建立身分組
+
+    # ── 先清理所有殘留的狼人殺身分組（名稱以「狼人殺玩家」開頭）──
+    cleaned = 0
+    for existing_role in list(guild.roles):
+        if existing_role.name.startswith("狼人殺玩家"):
+            try:
+                for m in list(existing_role.members):
+                    try:
+                        await m.remove_roles(existing_role)
+                    except Exception:
+                        pass
+                await existing_role.delete(reason="狼人殺身分組清理（避免累積）")
+                cleaned += 1
+                _ww_log(f"Cleaned up stale role: {existing_role.name} ({existing_role.id})")
+            except discord.Forbidden:
+                _ww_log(f"Cannot delete stale role {existing_role.name} (missing permissions)")
+            except Exception as e:
+                _ww_log(f"Failed to clean up role {existing_role.name}: {e}")
+    if cleaned:
+        _ww_log(f"Cleaned up {cleaned} stale werewolf role(s) before creating new one")
+
+    # 建立新的身分組
     try:
         role = await guild.create_role(
             name=f"狼人殺玩家_本場",
@@ -1509,6 +1530,43 @@ class WerewolfGroup(app_commands.Group):
             return
         await _ww_end_game(interaction.channel, "villagers")
         await interaction.response.send_message("✅ 狼人殺遊戲已強制結束。", ephemeral=True)
+
+    @app_commands.command(name="cleanup_roles", description="刪除所有狼人殺身分組（機器人擁有者限定）")
+    async def ww_cleanup_roles(self, interaction: discord.Interaction):
+        """刪除伺服器中所有名稱以「狼人殺玩家」開頭的身分組。"""
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("⚠️ 無法取得伺服器資訊。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        deleted = 0
+        failed = 0
+        for role in list(guild.roles):
+            if role.name.startswith("狼人殺玩家"):
+                try:
+                    for m in list(role.members):
+                        try:
+                            await m.remove_roles(role)
+                        except Exception:
+                            pass
+                    await role.delete(reason="手動清除狼人殺身分組")
+                    deleted += 1
+                except discord.Forbidden:
+                    failed += 1
+                except Exception:
+                    failed += 1
+        if _ww_state.get("role_id"):
+            old_role = guild.get_role(int(_ww_state["role_id"]))
+            if not old_role:
+                _ww_state["role_id"] = None
+        await interaction.followup.send(
+            f"🧹 清理完成：刪除了 {deleted} 個狼人殺身分組" +
+            (f"，{failed} 個因權限不足無法刪除。" if failed else "。"),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="test", description="測試模式：用 6 個 AI 玩家直接開始遊戲（機器人擁有者限定）")
     async def ww_test(self, interaction: discord.Interaction):
