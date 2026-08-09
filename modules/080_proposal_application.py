@@ -385,6 +385,24 @@ class ProposalRejectModal(discord.ui.Modal, title="駁回提案原因"):
             print("⚠️ 靜默例外:", e)
 
 
+def _check_review_permission(interaction: discord.Interaction, role_id, fallback_admin_check=True) -> bool:
+    """檢查使用者是否有權限按審核按鈕。
+    若 role_id 有設定 → 使用者必須擁有該身分組（管理員也放行）。
+    若 role_id 為空 → fallback 到 is_admin 檢查。"""
+    if role_id:
+        user_role_ids = {r.id for r in interaction.user.roles} if interaction.user.roles else set()
+        if int(role_id) in user_role_ids:
+            return True
+        # 有身分組限制但使用者沒有該身分組——管理員仍放行
+        if interaction.user.guild_permissions.administrator:
+            return True
+        return False
+    # 沒設身分組 → 用原本的 is_admin 邏輯
+    if fallback_admin_check:
+        return is_admin(interaction)
+    return False
+
+
 class ProposalReviewView(discord.ui.View):
     """受理/駁回 buttons attached to proposal notifications in the secretariat channel."""
 
@@ -394,15 +412,19 @@ class ProposalReviewView(discord.ui.View):
 
     @discord.ui.button(label="受理", style=discord.ButtonStyle.success, emoji="✅")
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+        _role_id = proposal_settings.get("review_role_id")
+        if not _check_review_permission(interaction, _role_id):
+            _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
+            await interaction.response.send_message(_msg, ephemeral=True)
             return
         await _handle_proposal_decision(interaction, self.proposal_id, "accepted", "")
 
     @discord.ui.button(label="駁回", style=discord.ButtonStyle.danger, emoji="❌")
     async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+        _role_id = proposal_settings.get("review_role_id")
+        if not _check_review_permission(interaction, _role_id):
+            _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
+            await interaction.response.send_message(_msg, ephemeral=True)
             return
         modal = ProposalRejectModal(self.proposal_id)
         await interaction.response.send_modal(modal)
@@ -585,6 +607,7 @@ application_settings = {
     "secretariat_channel": None,   # 秘書處 notification target
     "council_channels": [],        # 理事國入盟申請區 channels to monitor (separate)
     "council_channel": None,       # 理事國 notification target
+    "review_role_id": None,        # 審入盟按鈕限制的身分組 ID（留空=沿用 is_admin 權限）
     "nation_admin_whitelist": [],  # Discord user IDs allowed to manage nations
     "ai_settings": {               # optional: separate AI config
         "api_url": "",
@@ -1284,15 +1307,19 @@ class ApplicationReviewView(discord.ui.View):
 
     @discord.ui.button(label="審核通過", style=discord.ButtonStyle.success, emoji="✅")
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+        _role_id = application_settings.get("review_role_id")
+        if not _check_review_permission(interaction, _role_id):
+            _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
+            await interaction.response.send_message(_msg, ephemeral=True)
             return
         await _handle_application_decision(interaction, self.app_id, "accepted", "")
 
     @discord.ui.button(label="退回", style=discord.ButtonStyle.danger, emoji="❌")
     async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 此操作僅限管理員。", ephemeral=True)
+        _role_id = application_settings.get("review_role_id")
+        if not _check_review_permission(interaction, _role_id):
+            _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
+            await interaction.response.send_message(_msg, ephemeral=True)
             return
         modal = ApplicationRejectModal(self.app_id)
         await interaction.response.send_modal(modal)

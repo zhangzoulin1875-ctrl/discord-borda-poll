@@ -9969,6 +9969,9 @@ async def api_get_chat_ai_settings(request):
         "t2i_filter_max_tokens": chat_ai_settings.get("t2i_filter_max_tokens", 100),
         "t2i_filter_strictness": chat_ai_settings.get("t2i_filter_strictness", "medium"),
         "t2i_filter_vision_model": chat_ai_settings.get("t2i_filter_vision_model", ""),
+        # ── 提案/入盟審核身分組 ──
+        "proposal_review_role_id": proposal_settings.get("review_role_id"),
+        "application_review_role_id": application_settings.get("review_role_id"),
     })
 
 
@@ -10216,6 +10219,13 @@ async def api_set_chat_ai_settings(request):
             chat_ai_settings["t2i_filter_strictness"] = _strict
     if "t2i_filter_vision_model" in body:
         chat_ai_settings["t2i_filter_vision_model"] = body["t2i_filter_vision_model"]
+    # ── 提案/入盟審核身分組 ──
+    if "proposal_review_role_id" in body:
+        proposal_settings["review_role_id"] = body["proposal_review_role_id"] or None
+        save_proposal_settings()
+    if "application_review_role_id" in body:
+        application_settings["review_role_id"] = body["application_review_role_id"] or None
+        save_application_settings()
     save_chat_ai_settings()
     return web.json_response({"ok": True})
 
@@ -14190,6 +14200,7 @@ proposal_settings = {
     "enabled": False,
     "proposal_channels": [],     # list of channel IDs to monitor for proposals
     "secretariat_channel": None, # channel ID where admin gets notifications
+    "review_role_id": None,      # 審提案按鈕限制的身分組 ID（留空=沿用 is_admin 權限）
     "ai_settings": {             # separate AI config for proposal analysis (falls back to chat AI)
         "api_url": "",
         "api_key": "",
