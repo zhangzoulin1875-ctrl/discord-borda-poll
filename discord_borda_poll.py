@@ -7391,7 +7391,7 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
     a warning so it's visible.
     """
     if not settings.get("t2i_filter_enabled"):
-        return {"allowed": True}
+        return {"allowed": True, "vision_status": "skipped_filter_disabled"}
 
     # ── 硬編碼色情黑名單（AI 審查之前先快速擋掉） ──
     # 這些詞彙幾乎只出現在色情/擦邊語境，不需要 AI 判斷即可直接擋掉。
@@ -7526,7 +7526,7 @@ async def _t2i_filter_prompt(prompt: str, settings: dict) -> dict:
                 try:
                     data = await resp.json()
                 except Exception:
-                    return {"allowed": True}
+                    return {"allowed": True, "vision_status": "skipped_json_parse_error"}
                 reply_text = ""
                 choices = data.get("choices", [])
                 if choices:
@@ -7569,9 +7569,9 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
     """
     strictness = settings.get("t2i_filter_strictness", "medium").lower()
     if strictness != "strict":
-        return {"allowed": True}
+        return {"allowed": True, "vision_status": "skipped_not_strict"}
     if not settings.get("t2i_filter_enabled"):
-        return {"allowed": True}
+        return {"allowed": True, "vision_status": "skipped_filter_disabled"}
     print(f"🎨 T2I 嚴格模式：開始圖片複審（image_path={image_path[:60]}...）")
 
     # Resolve which vision model to use for image review:
@@ -7596,10 +7596,10 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
 
     if not vision_model:
         print("🎨 T2I 嚴格模式：未設定視覺模型，跳過圖片複審（fail-open）")
-        return {"allowed": True}
+        return {"allowed": True, "vision_status": "skipped_no_model"}
     if not api_url:
         print("🎨 T2I 嚴格模式：視覺 API URL 為空，跳過圖片複審（fail-open）")
-        return {"allowed": True}
+        return {"allowed": True, "vision_status": "skipped_no_api_url"}
 
     # Read the generated image file and convert to base64 data URL
     try:
@@ -7618,7 +7618,7 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
         data_url = f"data:{mime};base64,{b64_str}"
     except Exception as e:
         print(f"🎨 T2I 嚴格模式：讀取圖片失敗: {e}，跳過複審（fail-open）")
-        return {"allowed": True}
+        return {"allowed": True, "vision_status": "skipped_read_error"}
 
     # Normalize chat completions URL
     chat_url = api_url.rstrip("/")
@@ -7628,17 +7628,21 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
         elif "/v1/" not in chat_url:
             chat_url += "/v1/chat/completions"
 
-    # 改用「描述圖片」而非「當審查員」的框架——
-    # 舊版叫模型扮演「安全審查員」回覆 SAFE/BLOCKED，但很多視覺模型
+    # 改用「結構化分類」而非「當審查員」的框架——
+    # 第一版叫模型扮演「安全審查員」回覆 SAFE/BLOCKED，但很多視覺模型
     # 不願意扮演這個角色，連無害圖片也拒答，導致 100% 誤擋。
-    # 修正版叫模型「描述你看到的圖片內容」，再從描述文字中偵測色情關鍵字。
-    # — 無害圖片：模型正常描述 → 描述中無色情關鍵字 → 放行
-    # — 色情圖片：模型要嘛描述中帶色情字眼（→擋），要嘛拒絕描述（→擋）
-    # — 不再需要模型「扮演審查員」，避免角色扮演導致的整體拒答問題
+    # 第二版叫模型「描述圖片內容」再從描述中偵測色情關鍵字，但弱模型
+    # 的描述可能含糊不清（如「two people together」）導致漏判。
+    # 第三版（現行）：叫模型回覆 JSON 結構化分類，欄位清晰，弱模型
+    # 也能可靠輸出，且可同時取得「是否色情」+「具體描述」+「信心度」。
     vision_prompt = (
-        "Briefly describe what you see in this image in 1-2 sentences. "
-        "Just describe the visual content factually — objects, people, actions, setting. "
-        "Do not judge or evaluate whether the content is appropriate.\n"
+        "Analyze this image and respond with ONLY a JSON object (no markdown, no explanation).\n"
+        "Format: {\"is_sexual\": true/false, \"description\": \"brief factual description\", \"confidence\": \"high/medium/low\"}\n"
+        "Rules:\n"
+        "- is_sexual=true if the image shows nudity, sexual acts, exposed genitals/breasts, or explicit erotic content\n"
+        "- is_sexual=false for everything else including war, violence, weapons, blood, gore, death — these are NOT sexual\n"
+        "- Violence and war scenes are SAFE (is_sexual=false)\n"
+        "- Only flag actual sexual/pornographic content as is_sexual=true\n"
         f"The image was generated from this prompt: {prompt[:200]}"
     )
 
@@ -7678,29 +7682,44 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
                              "pornograph", "csam", "sensitive")):
                         _reason = f"視覺 API 拒絕分析圖片（HTTP {resp.status}，疑似不當內容）"
                         print(f"🎨 T2I 圖片複審：API 內容政策拒絕 (HTTP {resp.status}): {err_text[:150]}")
-                        return {"allowed": False, "reason": _reason}
+                        return {"allowed": False, "reason": _reason, "vision_status": "blocked_api_policy"}
                     print(f"🎨 T2I 圖片複審 API 失敗 (HTTP {resp.status}): {err_text[:200]}，放行（fail-open）")
-                    return {"allowed": True}
+                    return {"allowed": True, "vision_status": "skipped_api_error"}
                 try:
                     data = await resp.json()
                 except Exception:
-                    return {"allowed": True}
+                    return {"allowed": True, "vision_status": "skipped_json_parse_error"}
                 reply_text = ""
                 choices = data.get("choices", [])
                 if choices:
                     reply_text = choices[0].get("message", {}).get("content", "").strip()
                 print(f"🎨 T2I 圖片複審結果: {reply_text[:200]}")
 
-                # ── 描述式審查：檢查模型回覆中是否包含色情關鍵字 ──
+                # ── 結構化 JSON 審查 + 關鍵字 fallback ──
                 _reply_upper = reply_text.upper()
                 _sexual_keywords = [
+                    # 直接色情
                     "NUDITY", "NUDE", "NAKED", "SEXUAL", "PORNOGRAPH",
                     "NSFW", "EXPLICIT SEXUAL", "GENITAL", "BREAST",
                     "INTERCOURSE", "EROTIC", "LEWD", "OBSCENE",
                     "CSAM", "CHILD PORNOGRAPH", "UNDERAGE", "MINOR IN",
                     "NOT SAFE FOR WORK",
+                    # 擴充：更多色情/性暗示用語
+                    "SEMIN", "EJACUL", "PENIS", "VAGINA", "ANUS",
+                    "MASTURB", "ORAL SEX", "ANAL SEX", "HANDJOB",
+                    "BLOWJOB", "CUMSHOT", "FETISH", "BONDAGE",
+                    "TOPLESS", "BOTTOMLESS", "LINGERIE",
+                    "EXPOSED", "REVEALING", "PROVOCATIVE POSE",
+                    "SUGGESTIVE", "SEDUCTIVE",
+                    "BARE SKIN", "SKINNY DIPPING", "STREAKING",
+                    "UPSKIRT", "DOWNBLOUSE", "CLEAVAGE",
+                    "PANTIES", "BRA ", "THONG", "G-STRING",
+                    "NUDE BEACH", "STRIP CLUB", "STRIPPER",
+                    "ADULT CONTENT", "XXX ", "HENTAI",
+                    "UNDRESSED", "UNCLOTHED", "IN THE NUDE",
+                    "FULL FRONTAL", "PARTIAL NUDITY",
+                    "SEXUAL INTERCOURSE", "SEX ACT", "LOVE MAKING",
                 ]
-                # 偵測拒答模式（模型的安全過濾觸發）
                 _refusal_markers = [
                     "I CAN'T", "I CANNOT", "I'M SORRY", "I AM SORRY",
                     "I'M UNABLE", "I AM UNABLE", "UNABLE TO",
@@ -7708,35 +7727,71 @@ async def _t2i_filter_image(image_path: str, prompt: str, settings: dict) -> dic
                     "INAPPROPRIATE", "VIOLATES", "CONTENT POLICY",
                     "NOT ABLE TO", "CANNOT ASSIST", "CAN'T ASSIST",
                     "I'M NOT ABLE", "NOT APPROPRIATE",
+                    "I APOLOGIZE", "I MUST DECLINE",
                 ]
+
+                # ── 優先嘗試 JSON 結構化解析 ──
+                _json_parsed = False
+                _is_sexual_json = None
+                _json_desc = ""
+                _json_confidence = "unknown"
+                try:
+                    import json as _json_mod
+                    # 清除可能的 markdown code fence
+                    _clean = reply_text.strip().strip("`").strip()
+                    if _clean.startswith("json"):
+                        _clean = _clean[4:].strip()
+                    _parsed = _json_mod.loads(_clean)
+                    _is_sexual_json = bool(_parsed.get("is_sexual", False))
+                    _json_desc = str(_parsed.get("description", ""))[:200]
+                    _json_confidence = str(_parsed.get("confidence", "unknown"))
+                    _json_parsed = True
+                    print(f"🎨 T2I 圖片複審 JSON 解析成功: is_sexual={_is_sexual_json}, confidence={_json_confidence}, desc={_json_desc[:100]}")
+                except Exception:
+                    print(f"🎨 T2I 圖片複審 JSON 解析失敗，退回關鍵字掃描: {reply_text[:100]}")
+
                 _is_refusal = any(_m in _reply_upper for _m in _refusal_markers)
                 _has_sexual_kw = any(_m in _reply_upper for _m in _sexual_keywords)
 
-                # 情況1：描述中包含色情關鍵字 → 圖片有色情內容 → 擋
+                # 情況1：JSON 明確判定色情 → 擋
+                if _json_parsed and _is_sexual_json:
+                    _reason = f"視覺模型判定色情（信心度：{_json_confidence}）— {_json_desc[:100]}"
+                    print(f"🎨 T2I 圖片複審：JSON 判定 is_sexual=true，BLOCKED: {_reason[:120]}")
+                    return {"allowed": False, "reason": _reason, "vision_status": "blocked_json", "vision_desc": _json_desc[:200], "vision_confidence": _json_confidence}
+
+                # 情況1b：JSON 判定非色情 → 但再做關鍵字二次確認
+                if _json_parsed and not _is_sexual_json:
+                    if _has_sexual_kw:
+                        _reason = f"JSON 判定安全但描述含色情關鍵字，二次確認 BLOCKED：{reply_text[:100]}"
+                        print(f"🎨 T2I 圖片複審：JSON 判定 safe 但關鍵字命中，BLOCKED: {_reason[:120]}")
+                        return {"allowed": False, "reason": _reason, "vision_status": "blocked_keyword_override", "vision_desc": reply_text[:200], "vision_confidence": _json_confidence}
+                    # JSON + 關鍵字都判定安全 → 放行
+                    print(f"🎨 T2I 圖片複審：JSON + 關鍵字都判定安全，放行（desc={_json_desc[:100]}）")
+                    return {"allowed": True, "vision_status": "passed", "vision_desc": _json_desc[:200], "vision_confidence": _json_confidence}
+
+                # 情況2（無 JSON）：描述中包含色情關鍵字 → 擋
                 if _has_sexual_kw:
                     _reason = f"圖片描述偵測到色情內容：{reply_text[:100]}"
-                    print(f"🎨 T2I 圖片複審：描述含色情關鍵字，BLOCKED: {_reason[:120]}")
-                    return {"allowed": False, "reason": _reason}
+                    print(f"🎨 T2I 圖片複審：關鍵字命中，BLOCKED: {_reason[:120]}")
+                    return {"allowed": False, "reason": _reason, "vision_status": "blocked_keyword", "vision_desc": reply_text[:200], "vision_confidence": "fallback"}
 
-                # 情況2：模型拒絕描述圖片 → 圖片很可能觸發了模型的安全過濾 → 擋
-                # （新框架是「描述圖片」而非「審查圖片」，模型不會因為不想扮演
-                #  審查員而拒絕——如果連單純的描述都拒絕，通常是圖片本身有問題）
+                # 情況3（無 JSON）：模型拒絕描述圖片 → 圖片很可能觸發了模型的安全過濾 → 擋
                 if _is_refusal or not reply_text:
                     _reason = "視覺模型拒絕描述圖片（疑似不當內容觸發安全過濾）"
                     if _is_refusal and reply_text:
                         _reason = f"視覺模型拒絕描述：{reply_text[:80]}"
                     print(f"🎨 T2I 圖片複審：模型拒答，fail-closed BLOCKED: {_reason[:100]}")
-                    return {"allowed": False, "reason": _reason}
+                    return {"allowed": False, "reason": _reason, "vision_status": "blocked_refusal", "vision_desc": reply_text[:200], "vision_confidence": "n/a"}
 
-                # 情況3：模型正常描述了圖片，描述中無色情關鍵字 → 放行
+                # 情況4（無 JSON）：模型正常描述了圖片，描述中無色情關鍵字 → 放行
                 print(f"🎨 T2I 圖片複審：描述正常，放行: {reply_text[:150]}")
-                return {"allowed": True}
+                return {"allowed": True, "vision_status": "passed_fallback", "vision_desc": reply_text[:200], "vision_confidence": "fallback"}
     except asyncio.TimeoutError:
         print(f"🎨 T2I 圖片複審逾時（{timeout_s+15}s），放行（fail-open）")
-        return {"allowed": True}
+        return {"allowed": True, "vision_status": "skipped_timeout"}
     except Exception as e:
         print(f"🎨 T2I 圖片複審例外: {type(e).__name__}: {e}，放行（fail-open）")
-        return {"allowed": True}
+        return {"allowed": True, "vision_status": "skipped_exception"}
 
 
 async def _generate_image(prompt: str, settings: dict) -> dict:
@@ -7798,6 +7853,7 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
                         print(f"🎨 T2I 嚴格模式：下載圖片失敗，跳過複審: {_e}")
                 if _img_p:
                     _img_review = await _t2i_filter_image(_img_p, prompt, settings)
+                    premium_result["vision_review"] = _img_review
                     if not _img_review.get("allowed"):
                         _reason = _img_review.get("reason", "圖片內容不符安全規範")
                         print(f"🎨 T2I 嚴格模式圖片複審攔截: {_reason[:100]}")
@@ -7836,6 +7892,7 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
                     print(f"🎨 T2I 嚴格模式：下載圖片失敗，跳過複審: {_e}")
             if _img_p:
                 _img_review = await _t2i_filter_image(_img_p, prompt, settings)
+                result["vision_review"] = _img_review
                 if not _img_review.get("allowed"):
                     _reason = _img_review.get("reason", "圖片內容不符安全規範")
                     print(f"🎨 T2I 嚴格模式圖片複審攔截: {_reason[:100]}")
@@ -7844,6 +7901,9 @@ async def _generate_image(prompt: str, settings: dict) -> dict:
                     except Exception:
                         pass
                     return {"success": False, "error": f"🚫 生成的圖片未通過安全複審：{_reason}", "filtered": True}
+    # 如果嚴格模式未啟用或跳過複審，也記錄 skip 原因
+    if "vision_review" not in result:
+        result["vision_review"] = {"allowed": True, "vision_status": "not_triggered"}
     # 把高級通道失敗/跳過的原因也帶上，這樣 ai-log 才能顯示「高級通道當時為什麼沒用到」，
     # 不然使用者永遠只看得到最終成功用了預設通道，猜不出高級通道到底發生了什麼事。
     if premium_error:
@@ -8383,9 +8443,41 @@ async def _send_t2i_log(guild, user, prompt: str, result: dict, elapsed_ms: int 
     elif premium_skip:
         embed.add_field(name="ℹ️ 高級通道未使用原因", value=premium_skip, inline=False)
 
+    # ── 視覺審查狀態 ──
+    vision_review = result.get("vision_review", {})
+    vision_status = vision_review.get("vision_status", "not_triggered")
+    _vision_labels = {
+        "passed": "✅ 通過",
+        "passed_fallback": "✅ 通過（關鍵字掃描）",
+        "blocked_json": "🚫 攔截（JSON 判定色情）",
+        "blocked_keyword": "🚫 攔截（關鍵字命中）",
+        "blocked_keyword_override": "🚫 攔截（JSON 誤判→關鍵字修正）",
+        "blocked_refusal": "🚫 攔截（模型拒答）",
+        "blocked_api_policy": "🚫 攔截（API 政策拒絕）",
+        "skipped_not_strict": "⏭️ 未啟用嚴格模式",
+        "skipped_filter_disabled": "⏭️ 過濾器未啟用",
+        "skipped_no_model": "⚠️ 未設定視覺模型",
+        "skipped_no_api_url": "⚠️ 視覺 API URL 為空",
+        "skipped_read_error": "⚠️ 讀取圖片失敗",
+        "skipped_api_error": "⚠️ 視覺 API 錯誤",
+        "skipped_json_parse_error": "⚠️ JSON 解析失敗",
+        "skipped_timeout": "⚠️ 視覺審查逾時",
+        "skipped_exception": "⚠️ 視覺審查例外",
+        "not_triggered": "⏭️ 未觸發",
+    }
+    _vision_label = _vision_labels.get(vision_status, f"❓ {vision_status}")
+    _vision_desc = vision_review.get("vision_desc", "")
+    _vision_conf = vision_review.get("vision_confidence", "")
+    _vision_value = _vision_label
+    if _vision_desc:
+        _vision_value += f"\n描述：{_vision_desc[:200]}"
+    if _vision_conf:
+        _vision_value += f"\n信心度：{_vision_conf}"
+    embed.add_field(name="🔍 視覺審查", value=_vision_value[:1024], inline=False)
+
     try:
         await log_ch.send(embed=embed)
-        print(f"📝 生圖紀錄已發送到 #{log_ch.name}（通道={channel_used}, 模型={model_used}）")
+        print(f"📝 生圖紀錄已發送到 #{log_ch.name}（通道={channel_used}, 模型={model_used}, 視覺審查={vision_status}）")
     except Exception as e:
         print(f"⚠️ T2I 紀錄發送例外：{e}")
 
