@@ -9888,6 +9888,14 @@ async def _immediate_drive_upload(filename: str):
         print(f"⚠️ 即時同步 {filename} 例外：{e}（將由週期迴圈補上）")
 
 
+# Default: Drive load has not succeeded yet. Set to True only when
+# load_from_drive() successfully downloads chat_ai_settings.json.
+# Without this default, if Drive token is expired/revoked, the variable
+# never gets defined (the code path that sets it is never reached),
+# causing a NameError at the reference site in setup_hook.
+_drive_load_succeeded = False
+
+
 async def load_from_drive():
     """Load ALL data files from Google Drive on startup (overwrites local).
     Dynamically discovers every file actually present in the Drive folder —
