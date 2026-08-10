@@ -1010,3 +1010,113 @@ async def drive_restore_command(interaction: discord.Interaction, index: int, fi
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 bot.tree.add_command(drive_restore_command)
+
+
+# ══════════════════════════════════════════════════════════════════
+# 清除 AI 暫存記憶/知識庫 — 獨立頂層指令
+# ChatGroup 與 SystemGroup 皆已達 discord.py 的 25 個子指令上限（同 /draw 的理由），
+# 所以這個指令做成獨立頂層指令 /clear_ai_cache。
+#
+# 用途：當 AI 回答被錯誤/惡搞資訊誤導（例如頻道裡的玩笑話被 AI 精煉系統
+# 誤判成「事實」存進知識庫、或社群感知/編年史歸納出錯誤印象），owner
+# 可以用這個指令一次清空所有會被當作背景資料注入的暫存快取，讓 AI
+# 重新從乾淨的狀態開始累積。
+#
+# 涵蓋範圍：
+# 1. ai_refined_knowledge — AI 精煉系統萃取的「知識庫」
+# 2. _community_awareness — 社群感知（近期事件/話題/氛圍印象）
+# 3. _community_chronicle — 社群編年史（長期歷史歸納）
+# 4. _knowledge_base（summaries）— 每日對話摘要永久知識庫
+# 5. _channel_index_cache / _forum_index_cache — 頻道/論壇搜尋索引（強制重新索引）
+#
+# 注意：search_discord 工具裡的「即時全伺服器訊息搜尋」是直接打 Discord
+# 搜尋 API 查真實訊息，沒有快取，這個指令清不掉——如果誤導資訊的源頭是
+# 頻道裡還留著的一則玩笑訊息，AI 之後搜尋仍會找到它。真正要根除需要
+# 到 Discord 裡刪除/編輯那則來源訊息本身。
+# ══════════════════════════════════════════════════════════════════
+
+@app_commands.command(name="clear_ai_cache", description="清除 AI 暫存記憶/知識庫，避免被錯誤或惡搞資訊誤導（機器人擁有者限定）")
+@app_commands.describe(scope="要清除的範圍，預設全部清除")
+@app_commands.choices(scope=[
+    app_commands.Choice(name="全部（推薦）", value="all"),
+    app_commands.Choice(name="AI 精煉知識庫", value="refine"),
+    app_commands.Choice(name="社群感知", value="awareness"),
+    app_commands.Choice(name="社群編年史", value="chronicle"),
+    app_commands.Choice(name="每日摘要知識庫", value="daily_kb"),
+    app_commands.Choice(name="頻道/論壇搜尋索引", value="search_index"),
+])
+async def clear_ai_cache_command(interaction: discord.Interaction, scope: app_commands.Choice[str] = None):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        return
+
+    scope_value = scope.value if scope else "all"
+    await interaction.response.defer(ephemeral=True)
+
+    global ai_refined_knowledge, _community_awareness, _community_chronicle, _knowledge_base
+
+    cleared = []
+
+    if scope_value in ("all", "refine"):
+        n = len(ai_refined_knowledge)
+        ai_refined_knowledge.clear()
+        save_refine_knowledge()
+        cleared.append(f"🔬 AI 精煉知識庫：清空 {n} 條")
+
+    if scope_value in ("all", "awareness"):
+        n_events = len(_community_awareness.get("recent_events", []))
+        n_topics = len(_community_awareness.get("current_topics", []))
+        _community_awareness["last_updated"] = ""
+        _community_awareness["social_dynamics"] = {"active_members": [], "relationships": []}
+        _community_awareness["recent_events"] = []
+        _community_awareness["current_topics"] = []
+        _community_awareness["channel_cultures"] = {}
+        _save_community_awareness()
+        cleared.append(f"👥 社群感知：清空（原 {n_events} 則事件、{n_topics} 個話題）")
+
+    if scope_value in ("all", "chronicle"):
+        n_events = len(_community_chronicle.get("key_events", []))
+        n_conflicts = len(_community_chronicle.get("major_conflicts", []))
+        _community_chronicle["last_updated"] = ""
+        _community_chronicle["last_deep_scan"] = ""
+        _community_chronicle["major_alliances"] = []
+        _community_chronicle["major_conflicts"] = []
+        _community_chronicle["key_events"] = []
+        _community_chronicle["treaties_agreements"] = []
+        _community_chronicle["power_dynamics"] = []
+        _community_chronicle["cultural_traditions"] = []
+        _community_chronicle["notable_figures"] = []
+        _save_community_chronicle()
+        cleared.append(f"📜 社群編年史：清空（原 {n_events} 個事件、{n_conflicts} 個衝突紀錄）")
+
+    if scope_value in ("all", "daily_kb"):
+        n = len(_knowledge_base.get("summaries", []))
+        _knowledge_base["summaries"] = []
+        save_knowledge_base()
+        cleared.append(f"📚 每日摘要知識庫：清空 {n} 篇")
+
+    if scope_value in ("all", "search_index"):
+        n_ch = len(_channel_index_cache)
+        n_forum = len(_forum_index_cache)
+        _channel_index_cache.clear()
+        _forum_index_cache.clear()
+        cleared.append(f"🔍 頻道/論壇搜尋索引：清空（{n_ch} 個伺服器頻道索引、{n_forum} 個伺服器論壇索引，下次搜尋時會自動重建）")
+
+    embed = discord.Embed(
+        title="🧹 AI 暫存記憶清除完成",
+        description="\n".join(cleared) if cleared else "沒有清除任何項目。",
+        color=discord.Color.green(),
+    )
+    embed.add_field(
+        name="⚠️ 這個指令清不掉的部分",
+        value=(
+            "search_discord 工具的「即時全伺服器訊息搜尋」是直接查 Discord 真實訊息，"
+            "沒有快取。如果誤導資訊的源頭是頻道裡還留著的一則玩笑/惡搞訊息，"
+            "AI 之後搜尋仍會找到同一則訊息——真正要根除需要到 Discord 頻道裡"
+            "刪除或編輯那則來源訊息本身。"
+        ),
+        inline=False,
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+bot.tree.add_command(clear_ai_cache_command)
