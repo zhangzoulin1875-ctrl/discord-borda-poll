@@ -4,7 +4,9 @@
     1468824158585753813
   ],
   "secretariat_channel": null,
-  "council_channels": [],
+  "council_channels": [
+    1534089809734271147
+  ],
   "council_channel": null,
   "secretariat_review_role_id": null,
   "council_review_role_id": null,
