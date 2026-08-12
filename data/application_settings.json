@@ -1,6 +1,8 @@
 {
   "enabled": true,
-  "application_channels": [],
+  "application_channels": [
+    1468824158585753813
+  ],
   "secretariat_channel": null,
   "council_channels": [],
   "council_channel": null,
