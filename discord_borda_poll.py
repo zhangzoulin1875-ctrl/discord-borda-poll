@@ -6,9 +6,8 @@ A clean starting point for the rewritten bot.
 
 Architecture:
   - Single main file (discord_borda_poll.py) — bot init, event loop, shared state
-  - modules/ — feature modules loaded at startup (empty for now)
+  - modules/ — feature modules loaded at startup
   - data/ — JSON persistence (auto-created)
-  - Dashboard (dashboard.html) — web management panel (TODO)
 
 Design Principles:
   1. Every async handler has try/except — no silent crashes
@@ -16,7 +15,7 @@ Design Principles:
   3. All times are GMT+8 (Asia/Taipei)
   4. ephemeral messages for personal interactions
   5. Owner-only management commands (Discord ID in env or hardcoded)
-  6. AI calls use full fallback chain — never fail silently
+  6. Supports Render Web Service mode (built-in HTTP keep-alive server)
 """
 
 import asyncio
@@ -29,6 +28,7 @@ from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
+from aiohttp import web
 
 # ─── Line-buffered stdout (critical on Render — non-TTY blocks by default) ───
 try:
@@ -86,7 +86,32 @@ def is_owner(interaction: discord.Interaction) -> bool:
     return interaction.user.id == OWNER_ID
 
 
+# ─── Keep-Alive HTTP Server (Render Web Service mode) ────────────────────────
+async def keep_alive_server():
+    """啟動 HTTP keep-alive server（Render Web Service 用）。
+    Render 的 Web Service 要求綁定一個 port，否則會一直掃描。
+    這個小 server 只回 200 OK，讓 Render 認為服務正常。
+    """
+    port = int(os.getenv("PORT", 10000))
+
+    async def health(request):
+        return web.Response(text="Bot is running ✅", status=200)
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Keep-alive HTTP server started on port {port}")
+
+
 # ─── Module Loader ──────────────────────────────────────────────────────────
+_bot_globals = {}
+
+
 def load_modules():
     """Execute all modules/NNN_*.py files into the bot's namespace.
     Each module can register commands, event handlers, etc.
@@ -101,7 +126,7 @@ def load_modules():
         try:
             with open(mod_file, "r", encoding="utf-8") as f:
                 code = f.read()
-            exec(compile(code, str(mod_file), "exec"), bot._bot_globals)
+            exec(compile(code, str(mod_file), "exec"), _bot_globals)
             print(f"✅ 已載入模組：{mod_file.name}")
         except Exception as e:
             print(f"❌ 載入模組 {mod_file.name} 失敗：{e}")
@@ -163,11 +188,49 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    """Central message handler — modules can hook into this via bot._event_hooks."""
+    """Central message handler — dispatches to module hooks."""
     if message.author.bot or message.author == bot.user:
         return
-    # Modules will register their own message handlers here
-    # For now this is a placeholder
+
+    # ── 提案區偵測 ──
+    handler = _bot_globals.get("handle_proposal_message")
+    if handler:
+        try:
+            await handler(message)
+        except Exception as e:
+            print(f"⚠️ handle_proposal_message 錯誤：{e}")
+
+    # ── 入盟申請區偵測 ──
+    handler = _bot_globals.get("handle_application_message")
+    if handler:
+        try:
+            await handler(message)
+        except Exception as e:
+            print(f"⚠️ handle_application_message 錯誤：{e}")
+
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    """Detect edits to application posts and re-check them."""
+    if after.author.bot:
+        return
+    handler = _bot_globals.get("handle_application_edit")
+    if handler:
+        try:
+            await handler(before, after)
+        except Exception as e:
+            print(f"⚠️ handle_application_edit 錯誤：{e}")
+
+
+@bot.event
+async def on_thread_create(thread: discord.Thread):
+    """Detect new forum threads in proposal/application channels."""
+    handler = _bot_globals.get("handle_thread_create")
+    if handler:
+        try:
+            await handler(thread)
+        except Exception as e:
+            print(f"⚠️ handle_thread_create 錯誤：{e}")
 
 
 @bot.event
@@ -183,7 +246,7 @@ async def main():
         sys.exit(1)
 
     # Store globals for module access
-    bot._bot_globals = {
+    _bot_globals.update({
         "bot": bot,
         "tree": tree,
         "save_json": save_json,
@@ -195,10 +258,26 @@ async def main():
         "DATA_DIR": DATA_DIR,
         "discord": discord,
         "app_commands": app_commands,
-    }
+        "asyncio": asyncio,
+    })
 
     # Load feature modules
     load_modules()
+
+    # Register any command groups that modules created
+    for name, obj in list(_bot_globals.items()):
+        if isinstance(obj, app_commands.Group):
+            try:
+                tree.add_command(obj)
+                print(f"📝 已註冊指令群組：/{obj.name}")
+            except Exception as e:
+                print(f"⚠️ 註冊指令群組 {name} 失敗：{e}")
+
+    # Start keep-alive HTTP server (for Render Web Service)
+    try:
+        await keep_alive_server()
+    except Exception as e:
+        print(f"⚠️ Keep-alive server 啟動失敗（不影響 bot 運行）：{e}")
 
     # Start bot
     async with bot:
