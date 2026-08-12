@@ -15,6 +15,7 @@ Design Principles:
   3. All times are GMT+8 (Asia/Taipei)
   4. ephemeral messages for personal interactions
   5. Owner-only management commands (Discord ID in env or hardcoded)
+  6. Supports Render Web Service mode (built-in HTTP keep-alive server)
 """
 
 import asyncio
@@ -27,6 +28,7 @@ from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
+from aiohttp import web
 
 # ─── Line-buffered stdout (critical on Render — non-TTY blocks by default) ───
 try:
@@ -82,6 +84,28 @@ def load_json(filename: str, default=None):
 
 def is_owner(interaction: discord.Interaction) -> bool:
     return interaction.user.id == OWNER_ID
+
+
+# ─── Keep-Alive HTTP Server (Render Web Service mode) ────────────────────────
+async def keep_alive_server():
+    """啟動 HTTP keep-alive server（Render Web Service 用）。
+    Render 的 Web Service 要求綁定一個 port，否則會一直掃描。
+    這個小 server 只回 200 OK，讓 Render 認為服務正常。
+    """
+    port = int(os.getenv("PORT", 10000))
+
+    async def health(request):
+        return web.Response(text="Bot is running ✅", status=200)
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Keep-alive HTTP server started on port {port}")
 
 
 # ─── Module Loader ──────────────────────────────────────────────────────────
@@ -248,6 +272,12 @@ async def main():
                 print(f"📝 已註冊指令群組：/{obj.name}")
             except Exception as e:
                 print(f"⚠️ 註冊指令群組 {name} 失敗：{e}")
+
+    # Start keep-alive HTTP server (for Render Web Service)
+    try:
+        await keep_alive_server()
+    except Exception as e:
+        print(f"⚠️ Keep-alive server 啟動失敗（不影響 bot 運行）：{e}")
 
     # Start bot
     async with bot:
