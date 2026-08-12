@@ -1,13 +1,8 @@
 __pycache__/
 *.pyc
-.env
+*.pyo
 data/*.json
-bot.log
+.env
+blobs/
 incoming_files/
 .agents/
-.base44-conversation-workspace
-.agents/.env
-node_modules/
-.npm/
-.cache/
-blobs/
