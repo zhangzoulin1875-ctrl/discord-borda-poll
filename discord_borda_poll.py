@@ -22,9 +22,12 @@ import asyncio
 import json
 import os
 import sys
+import base64
 import traceback
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+import urllib.request
+import urllib.error
 
 import discord
 from discord import app_commands
@@ -44,6 +47,17 @@ TZ_TAIPEI = timezone(timedelta(hours=8))
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
+# ─── GitHub Persistence Config ───────────────────────────────────────────
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "zhangzoulin1875-ctrl/discord-borda-poll")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+_github_file_shas = {}
+# Files to persist to GitHub (settings only - records are rebuildable from Discord)
+_PERSIST_FILES = {
+    "proposal_settings.json",
+    "application_settings.json",
+}
+
 # ─── Bot Instance ──────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
@@ -61,12 +75,20 @@ def now_str() -> str:
 
 
 def save_json(filename: str, data) -> None:
-    """Atomic JSON write to data/ directory."""
+    """Atomic JSON write to data/ directory + GitHub sync."""
     path = DATA_DIR / filename
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(path)
+    # Async push to GitHub (non-blocking)
+    if GITHUB_TOKEN and filename in _PERSIST_FILES:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(github_push_json(filename, data))
+        except Exception:
+            pass
 
 
 def load_json(filename: str, default=None):
@@ -84,6 +106,105 @@ def load_json(filename: str, default=None):
 
 def is_owner(interaction: discord.Interaction) -> bool:
     return interaction.user.id == OWNER_ID
+
+
+# ─── GitHub Persistence (replaces Google Drive) ──────────────────────────
+def _github_api_url(filename: str) -> str:
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/data/{filename}"
+
+
+def _github_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def github_pull_json(filename: str):
+    """Sync read JSON settings from GitHub (called at startup)."""
+    if not GITHUB_TOKEN:
+        return None
+    try:
+        url = _github_api_url(filename) + f"?ref={GITHUB_BRANCH}"
+        req = urllib.request.Request(url, headers=_github_headers(), method="GET")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8"))
+            sha = data.get("sha", "")
+            content_b64 = data.get("content", "")
+            if sha:
+                _github_file_shas[filename] = sha
+            if not content_b64:
+                return None
+            decoded = base64.b64decode(content_b64).decode("utf-8")
+            return json.loads(decoded)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"\U0001F4C2 GitHub: {filename} not found (first deploy)")
+        else:
+            print(f"\u26a0\ufe0f GitHub pull {filename} failed (HTTP {e.code})")
+        return None
+    except Exception as e:
+        print(f"\u26a0\ufe0f GitHub pull {filename} failed: {e}")
+        return None
+
+
+def github_pull_all():
+    """Pull all persisted settings from GitHub at startup."""
+    if not GITHUB_TOKEN:
+        print("\u2139\ufe0f GITHUB_TOKEN not set, skipping GitHub persistence")
+        return
+    print(f"\U0001F504 Syncing settings from GitHub ({GITHUB_REPO})...")
+    pulled = 0
+    for filename in _PERSIST_FILES:
+        data = github_pull_json(filename)
+        if data is not None:
+            path = DATA_DIR / filename
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"  \u2705 Pulled {filename} from GitHub")
+            pulled += 1
+    print(f"\U0001F504 GitHub sync complete: {pulled} files")
+
+
+async def github_push_json(filename: str, data) -> None:
+    """Async push JSON settings to GitHub (called after save_json)."""
+    if not GITHUB_TOKEN or filename not in _PERSIST_FILES:
+        return
+    try:
+        content_str = json.dumps(data, ensure_ascii=False, indent=2)
+        content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("ascii")
+        body_obj = {
+            "message": f"Auto-sync {filename}",
+            "content": content_b64,
+            "branch": GITHUB_BRANCH,
+        }
+        sha = _github_file_shas.get(filename)
+        if sha:
+            body_obj["sha"] = sha
+        body = json.dumps(body_obj).encode("utf-8")
+
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.put(
+                _github_api_url(filename),
+                data=body,
+                headers=_github_headers(),
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status in (200, 201):
+                    resp_data = await resp.json()
+                    new_sha = resp_data.get("content", {}).get("sha", "")
+                    if new_sha:
+                        _github_file_shas[filename] = new_sha
+                    print(f"\u2705 GitHub push {filename} success")
+                else:
+                    err_text = await resp.text()
+                    print(f"\u26a0\ufe0f GitHub push {filename} failed (HTTP {resp.status}): {err_text[:200]}")
+    except Exception as e:
+        print(f"\u26a0\ufe0f GitHub push {filename} failed: {e}")
 
 
 # ─── Keep-Alive HTTP Server (Render Web Service mode) ────────────────────────
@@ -259,7 +380,11 @@ async def main():
         "discord": discord,
         "app_commands": app_commands,
         "asyncio": asyncio,
+        "github_push_json": github_push_json,
     })
+
+    # Pull persisted settings from GitHub (replaces Google Drive)
+    github_pull_all()
 
     # Load feature modules
     load_modules()
