@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "application_channels": [],
+  "secretariat_channel": null,
+  "council_channels": [],
+  "council_channel": null,
+  "secretariat_review_role_id": null,
+  "council_review_role_id": null,
+  "nation_admin_whitelist": []
+}
