@@ -62,6 +62,7 @@ _PERSIST_FILES = {
     "tickets.json",
     "task_settings.json",
     "tasks.json",
+    "kaobei_settings.json",
 }
 
 # ─── Bot Instance ──────────────────────────────────────────────────────────
