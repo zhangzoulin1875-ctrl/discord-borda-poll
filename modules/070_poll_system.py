@@ -438,9 +438,6 @@ class PollVoteView(discord.ui.View):
             return
 
         existing = [v for v in poll.get("votes", []) if v.get("user_id") == user_id]
-        if existing and not poll.get("allow_revote", False):
-            await interaction.response.send_message("⚠️ 你已經投過票了。", ephemeral=True)
-            return
 
         if poll_type == "borda":
             candidates = poll.get("candidates", [])
@@ -790,7 +787,7 @@ async def _handle_poll_create(modal_interaction: discord.Interaction, mode: str)
         "title": title,
         "description": desc,
         "deadline": deadline or None,
-        "allow_revote": False,
+        "allow_revote": True,
     }
 
     if mode == "borda":
@@ -1134,12 +1131,6 @@ async def handle_poll_message(message: discord.Message):
 
             user_id = str(message.author.id)
             existing = [v for v in poll.get("votes", []) if v.get("user_id") == user_id]
-            if existing and not poll.get("allow_revote", False):
-                try:
-                    await message.reply("⚠️ 你已經投過票了。", delete_after=5)
-                except Exception:
-                    pass
-                return
 
             if existing:
                 poll["votes"] = [v for v in poll.get("votes", []) if v.get("user_id") != user_id]
