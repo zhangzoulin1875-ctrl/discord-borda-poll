@@ -12,7 +12,21 @@
       "created_at": "2026-08-13 11:24:37",
       "deadline": "2026-08-13 12:00",
       "allow_revote": false,
-      "votes": [],
+      "votes": [
+        {
+          "user_id": "1482256878334640209",
+          "user_name": "張作霖/副秘書長",
+          "ranking": [
+            "C",
+            "A",
+            "F",
+            "B",
+            "D",
+            "E"
+          ],
+          "ts": 1786591566
+        }
+      ],
       "candidates": [
         {
           "code": "A",
