@@ -668,8 +668,72 @@ async def handle_ticket_bot_ready():
     except Exception as e:
         print(f"⚠️ 客服單面板重啟檢查失敗：{e}")
 
+    # 掃描孤兒客服單（頻道已被手動刪除但狀態仍為 open 的記錄）
+    try:
+        await _scan_orphaned_tickets()
+    except Exception as e:
+        print(f"⚠️ 孤兒客服單掃描失敗：{e}")
+
 
 _bot_ready_hooks.append(handle_ticket_bot_ready)
+
+
+# ═════════════════════════════════════════════════════════════════
+# 頻道刪除偵測：手動刪客服頻道時自動標記關閉
+# ═════════════════════════════════════════════════════════════════
+
+async def handle_channel_delete(channel):
+    """當伺服器中有頻道被刪除時，檢查是否為客服單頻道。
+    如果是，將該客服單標記為 closed，避免開單者被「一人一單」永遠擋住。"""
+    entry = _find_ticket_by_channel(channel.id)
+    if not entry:
+        return
+    if entry.get("status") != "open":
+        return
+
+    print(f"⚠️ 偵測到客服單頻道被刪除：#{entry.get('number')} (channel_id={channel.id})，自動標記為關閉")
+    entry["status"] = "closed"
+    entry["closed_at"] = now_str()
+    entry["closed_by"] = "頻道被刪除（自動）"
+    entry["close_reason"] = "channel_deleted"
+    await _persist_tickets_now()
+
+
+# ═════════════════════════════════════════════════════════════════
+# 啟動時孤兒掃描：所有 open 狀態的客服單，頻道已不存在就標記關閉
+# ═════════════════════════════════════════════════════════════════
+
+async def _scan_orphaned_tickets():
+    """啟動後掃描所有 status=open 的客服單，若頻道已不存在則自動關閉。"""
+    orphaned = []
+    for t in _tickets.get("entries", []):
+        if t.get("status") != "open":
+            continue
+        ch_id = t.get("channel_id")
+        if not ch_id:
+            orphaned.append(t)
+            continue
+        # 檢查頻道是否還存在
+        found = False
+        for guild in bot.guilds:
+            if guild.get_channel(int(ch_id)):
+                found = True
+                break
+        if not found:
+            orphaned.append(t)
+
+    if not orphaned:
+        return
+
+    print(f"🧹 發現 {len(orphaned)} 筆孤兒客服單（頻道已刪但狀態仍為 open），自動關閉中…")
+    for t in orphaned:
+        t["status"] = "closed"
+        t["closed_at"] = now_str()
+        t["closed_by"] = "啟動掃描（頻道已刪除）"
+        t["close_reason"] = "channel_deleted"
+        print(f"  → #{t.get('number')} {t.get('subject', '')[:40]} (channel_id={t.get('channel_id')})")
+    await _persist_tickets_now()
+    print(f"✅ 孤兒客服單清理完成，{len(orphaned)} 筆已標記關閉")
 
 
 # ─── 啟動時載入資料 ──────────────────────────────────────────────────────────

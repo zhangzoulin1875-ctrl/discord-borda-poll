@@ -409,6 +409,17 @@ async def on_thread_create(thread: discord.Thread):
 
 
 @bot.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    """頻道被刪除時，通知模組做清理（例如客服單頻道被手動刪除）。"""
+    handler = _bot_globals.get("handle_channel_delete")
+    if handler:
+        try:
+            await handler(channel)
+        except Exception as e:
+            print(f"⚠️ handle_channel_delete 錯誤：{e}")
+
+
+@bot.event
 async def on_error(event_name: str, *args, **kwargs):
     print(f"⚠️ 事件 '{event_name}' 發生例外：")
     traceback.print_exc()
