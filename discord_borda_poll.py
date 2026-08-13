@@ -339,6 +339,14 @@ async def on_ready():
     # Start self-ping loop (prevent Render free tier sleep)
     asyncio.ensure_future(self_ping_loop())
 
+    # ── 模組 on_ready 掛鉤：重啟後偵測未結案提案/申請並重發面板 ──
+    handler = _bot_globals.get("handle_bot_ready")
+    if handler:
+        try:
+            asyncio.ensure_future(handler())
+        except Exception as e:
+            print(f"⚠️ handle_bot_ready 錯誤：{e}")
+
 
 @bot.event
 async def on_message(message: discord.Message):
