@@ -62,6 +62,15 @@ def _find_ticket_by_channel(channel_id):
     return None
 
 
+def _find_open_ticket_by_user(user_id):
+    """檢查某使用者是否已有未關閉的客服單，回傳該客服單 entry 或 None。"""
+    uid = str(user_id)
+    for t in _tickets.get("entries", []):
+        if str(t.get("opener_id")) == uid and t.get("status") == "open":
+            return t
+    return None
+
+
 def _slugify_subject(text, max_len=40):
     text = (text or "").strip()
     text = re.sub(r"\s+", "-", text)
@@ -337,6 +346,19 @@ class TicketPanelView(discord.ui.View):
             await interaction.response.send_message("❌ 客服系統目前未啟用，請聯絡管理員。", ephemeral=True)
             return
 
+        # 一人一單限制：直接在點按鈕時就檢查，避免填完整個 Modal 才被擋
+        existing_open = _find_open_ticket_by_user(interaction.user.id)
+        if existing_open:
+            ch_id = existing_open.get("channel_id", "")
+            ch_mention = f"<#{ch_id}>" if ch_id else "（頻道已刪除）"
+            await interaction.response.send_message(
+                f"⚠️ 你已有一張進行中的客服單：{ch_mention}\n"
+                f"請先結束該客服單後再開新單。\n"
+                f"客服單 #{existing_open.get('number')} — {existing_open.get('subject', '')}",
+                ephemeral=True,
+            )
+            return
+
         modal = discord.ui.Modal(title="📩 開啟客服單")
         modal.add_item(discord.ui.TextInput(
             label="問題主旨",
@@ -378,6 +400,20 @@ class TicketPanelView(discord.ui.View):
                 return
 
             await modal_ia.response.defer(ephemeral=True, thinking=True)
+
+            # 一人一單限制：檢查是否已有未關閉的客服單
+            existing_open = _find_open_ticket_by_user(modal_ia.user.id)
+            if existing_open:
+                ch_id = existing_open.get("channel_id", "")
+                ch_mention = f"<#{ch_id}>" if ch_id else "（頻道已刪除）"
+                await modal_ia.followup.send(
+                    f"⚠️ 你已有一張進行中的客服單：{ch_mention}\n"
+                    f"請先結束該客服單後再開新單。\n"
+                    f"客服單 #{existing_open.get('number')} — {existing_open.get('subject', '')}",
+                    ephemeral=True,
+                )
+                return
+
             try:
                 channel, entry = await _create_ticket_channel(
                     modal_ia.guild, modal_ia.user, subject, content, note
