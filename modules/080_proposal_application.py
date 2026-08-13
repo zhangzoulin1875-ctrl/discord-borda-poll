@@ -244,7 +244,10 @@ async def _process_new_proposal(message: discord.Message, channel):
 
     view = ProposalReviewView(proposal_id)
     try:
-        await sec_ch.send(embed=embed, view=view)
+        sent_msg = await sec_ch.send(embed=embed, view=view)
+        entry["notify_message_id"] = str(sent_msg.id)
+        entry["notify_channel_id"] = str(sec_ch.id)
+        save_proposals()
         print(f"✅ 提案通知已發送至秘書處 #{sec_ch.name}")
     except Exception as e:
         print(f"❌ 提案通知發送失敗：{e}")
@@ -277,30 +280,62 @@ class ProposalRejectModal(discord.ui.Modal, title="駁回提案原因"):
 
 
 class ProposalReviewView(discord.ui.View):
-    """受理/駁回 buttons attached to proposal notifications."""
+    """受理/駁回 buttons attached to proposal notifications.
 
-    def __init__(self, proposal_id: str):
+    Persistent view: buttons use static custom_id so they survive bot
+    restarts (registered once via bot.add_view() at module load time).
+    The proposal_id is looked up from the message's embed field ("提案 ID"),
+    NOT from self.proposal_id — that only works for freshly-created
+    instances in the same process. This makes ALL such panels forever
+    clickable regardless of when/which process sent them.
+    """
+
+    def __init__(self, proposal_id: str = None):
         super().__init__(timeout=None)
         self.proposal_id = proposal_id
 
-    @discord.ui.button(label="受理", style=discord.ButtonStyle.success, emoji="✅")
-    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _role_id = proposal_settings.get("review_role_id")
-        if not _check_review_permission(interaction, _role_id):
-            _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
-            await interaction.response.send_message(_msg, ephemeral=True)
-            return
-        await _handle_proposal_decision(interaction, self.proposal_id, "accepted", "")
+    @staticmethod
+    def _extract_proposal_id(interaction: discord.Interaction):
+        try:
+            embeds = interaction.message.embeds
+            if embeds:
+                for field in embeds[0].fields:
+                    if field.name == "提案 ID":
+                        return field.value.strip()
+        except Exception:
+            pass
+        return None
 
-    @discord.ui.button(label="駁回", style=discord.ButtonStyle.danger, emoji="❌")
-    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="受理", style=discord.ButtonStyle.success, emoji="✅", custom_id="icea_proposal_accept")
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        proposal_id = self._extract_proposal_id(interaction) or self.proposal_id
         _role_id = proposal_settings.get("review_role_id")
         if not _check_review_permission(interaction, _role_id):
             _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
             await interaction.response.send_message(_msg, ephemeral=True)
             return
-        modal = ProposalRejectModal(self.proposal_id)
+        if not proposal_id:
+            await interaction.response.send_message("❌ 無法辨識此提案 ID，請聯絡管理員。", ephemeral=True)
+            return
+        await _handle_proposal_decision(interaction, proposal_id, "accepted", "")
+
+    @discord.ui.button(label="駁回", style=discord.ButtonStyle.danger, emoji="❌", custom_id="icea_proposal_reject")
+    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        proposal_id = self._extract_proposal_id(interaction) or self.proposal_id
+        _role_id = proposal_settings.get("review_role_id")
+        if not _check_review_permission(interaction, _role_id):
+            _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
+            await interaction.response.send_message(_msg, ephemeral=True)
+            return
+        if not proposal_id:
+            await interaction.response.send_message("❌ 無法辨識此提案 ID，請聯絡管理員。", ephemeral=True)
+            return
+        modal = ProposalRejectModal(proposal_id)
         await interaction.response.send_modal(modal)
+
+
+# 註冊為持久化 view（一次即可，讓所有提案通知面板的按鈕永遠可用）
+bot.add_view(ProposalReviewView())
 
 
 async def _handle_proposal_decision(interaction: discord.Interaction, proposal_id: str,
@@ -693,20 +728,25 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
         )
         if image_url:
             ack_embed.set_thumbnail(url=image_url)
+        ack_embed.set_footer(text=f"申請 ID：{entry['id']}")
 
         view = ApplicationFlagUploadView(entry["id"]) if "國旗" in str(missing_fields) else None
+        orig_ack_ch = message.channel if isinstance(message.channel, discord.Thread) else channel
         try:
             if existing_entry and existing_entry.get("ack_message_id"):
                 # 編輯已有的 ack 訊息
                 try:
-                    orig_ack_ch = message.channel if isinstance(message.channel, discord.Thread) else channel
                     ack_msg = await orig_ack_ch.fetch_message(int(existing_entry["ack_message_id"]))
                     await ack_msg.edit(embed=ack_embed, view=view)
                 except Exception:
-                    await message.reply(embed=ack_embed, view=view, mention_author=False)
+                    sent = await message.reply(embed=ack_embed, view=view, mention_author=False)
+                    entry["ack_message_id"] = str(sent.id) if hasattr(sent, 'id') else ""
+                    entry["ack_channel_id"] = str(orig_ack_ch.id)
+                    save_applications()
             else:
                 sent = await message.reply(embed=ack_embed, view=view, mention_author=False)
                 entry["ack_message_id"] = str(sent.id) if hasattr(sent, 'id') else ""
+                entry["ack_channel_id"] = str(orig_ack_ch.id)
                 save_applications()
         except Exception as e:
             print(f"⚠️ 入盟申請 ack 訊息發送失敗：{e}")
@@ -798,7 +838,10 @@ async def _process_new_application(message: discord.Message, channel, is_edit: b
     notify_embed.set_footer(text=notify_footer)
 
     try:
-        await notify_ch.send(embed=notify_embed, view=ApplicationReviewView(entry["id"]))
+        sent_notify = await notify_ch.send(embed=notify_embed, view=ApplicationReviewView(entry["id"]))
+        entry["notify_message_id"] = str(sent_notify.id)
+        entry["notify_channel_id"] = str(notify_ch.id)
+        save_applications()
         print(f"✅ 入盟申請通知已發送至{reviewer_label} #{notify_ch.name}")
     except Exception as e:
         print(f"❌ 入盟申請通知發送失敗：{e}")
@@ -810,17 +853,38 @@ _pending_flag_uploads = {}
 
 
 class ApplicationFlagUploadView(discord.ui.View):
-    """View with a '補上國旗' button attached to the orange ⚠️ embed."""
+    """View with a '補上國旗' button attached to the orange ⚠️ embed.
 
-    def __init__(self, app_id: str):
+    Persistent view: static custom_id, app_id read from the embed footer
+    ("申請 ID：xxx") so it keeps working after bot restarts, regardless of
+    which process originally sent the panel.
+    """
+
+    def __init__(self, app_id: str = None):
         super().__init__(timeout=None)
         self.app_id = app_id
 
-    @discord.ui.button(label="補上國旗圖片", style=discord.ButtonStyle.primary, emoji="🚩")
+    @staticmethod
+    def _extract_app_id(interaction: discord.Interaction):
+        try:
+            embeds = interaction.message.embeds
+            if embeds and embeds[0].footer and embeds[0].footer.text:
+                footer_text = embeds[0].footer.text
+                if "申請 ID" in footer_text:
+                    return footer_text.split("：", 1)[-1].split(":", 1)[-1].strip()
+        except Exception:
+            pass
+        return None
+
+    @discord.ui.button(label="補上國旗圖片", style=discord.ButtonStyle.primary, emoji="🚩", custom_id="icea_flag_upload_btn")
     async def upload_flag_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        app_id = self._extract_app_id(interaction) or self.app_id
+        if not app_id:
+            await interaction.response.send_message("❌ 無法辨識此申請 ID，請聯絡管理員。", ephemeral=True)
+            return
         entry = None
         for a in _applications.get("entries", []):
-            if a.get("id") == self.app_id:
+            if a.get("id") == app_id:
                 entry = a
                 break
         if not entry:
@@ -833,7 +897,7 @@ class ApplicationFlagUploadView(discord.ui.View):
             await interaction.response.send_message("✅ 此申請已通過初檢，國旗無需再補。", ephemeral=True)
             return
 
-        _pending_flag_uploads[self.app_id] = {
+        _pending_flag_uploads[app_id] = {
             "user_id": str(interaction.user.id),
             "expires": _time.time() + 300,
             "channel_id": entry.get("channel_id"),
@@ -846,6 +910,10 @@ class ApplicationFlagUploadView(discord.ui.View):
             "（5 分鐘內有效）",
             ephemeral=True,
         )
+
+
+# 註冊為持久化 view
+bot.add_view(ApplicationFlagUploadView())
 
 
 # ─── 入盟申請審核 UI ──────────────────────────────────────────────────────
@@ -901,30 +969,59 @@ def _get_application_review_role_id(app_id: str):
 
 
 class ApplicationReviewView(discord.ui.View):
-    """審核通過/退回 buttons for application notifications."""
+    """審核通過/退回 buttons for application notifications.
 
-    def __init__(self, app_id: str):
+    Persistent view: static custom_id, app_id read from the embed field
+    ("申請 ID") so it keeps working after bot restarts, regardless of which
+    process originally sent the panel.
+    """
+
+    def __init__(self, app_id: str = None):
         super().__init__(timeout=None)
         self.app_id = app_id
 
-    @discord.ui.button(label="審核通過", style=discord.ButtonStyle.success, emoji="✅")
-    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _role_id = _get_application_review_role_id(self.app_id)
-        if not _check_review_permission(interaction, _role_id):
-            _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
-            await interaction.response.send_message(_msg, ephemeral=True)
-            return
-        await _handle_application_decision(interaction, self.app_id, "accepted", "")
+    @staticmethod
+    def _extract_app_id(interaction: discord.Interaction):
+        try:
+            embeds = interaction.message.embeds
+            if embeds:
+                for field in embeds[0].fields:
+                    if field.name == "申請 ID":
+                        return field.value.strip()
+        except Exception:
+            pass
+        return None
 
-    @discord.ui.button(label="退回", style=discord.ButtonStyle.danger, emoji="❌")
-    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        _role_id = _get_application_review_role_id(self.app_id)
+    @discord.ui.button(label="審核通過", style=discord.ButtonStyle.success, emoji="✅", custom_id="icea_app_review_accept")
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        app_id = self._extract_app_id(interaction) or self.app_id
+        if not app_id:
+            await interaction.response.send_message("❌ 無法辨識此申請 ID，請聯絡管理員。", ephemeral=True)
+            return
+        _role_id = _get_application_review_role_id(app_id)
         if not _check_review_permission(interaction, _role_id):
             _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
             await interaction.response.send_message(_msg, ephemeral=True)
             return
-        modal = ApplicationRejectModal(self.app_id)
+        await _handle_application_decision(interaction, app_id, "accepted", "")
+
+    @discord.ui.button(label="退回", style=discord.ButtonStyle.danger, emoji="❌", custom_id="icea_app_review_reject")
+    async def reject_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        app_id = self._extract_app_id(interaction) or self.app_id
+        if not app_id:
+            await interaction.response.send_message("❌ 無法辨識此申請 ID，請聯絡管理員。", ephemeral=True)
+            return
+        _role_id = _get_application_review_role_id(app_id)
+        if not _check_review_permission(interaction, _role_id):
+            _msg = "❌ 此操作僅限指定身分組。" if _role_id else "❌ 此操作僅限管理員。"
+            await interaction.response.send_message(_msg, ephemeral=True)
+            return
+        modal = ApplicationRejectModal(app_id)
         await interaction.response.send_modal(modal)
+
+
+# 註冊為持久化 view
+bot.add_view(ApplicationReviewView())
 
 
 async def _handle_application_decision(interaction: discord.Interaction, app_id: str,
@@ -1545,7 +1642,10 @@ async def _handle_flag_upload(message: discord.Message, app_id: str, image_url: 
         notify_embed.set_footer(text=notify_footer)
 
         try:
-            await notify_ch.send(embed=notify_embed, view=ApplicationReviewView(entry["id"]))
+            sent_notify = await notify_ch.send(embed=notify_embed, view=ApplicationReviewView(entry["id"]))
+            entry["notify_message_id"] = str(sent_notify.id)
+            entry["notify_channel_id"] = str(notify_ch.id)
+            save_applications()
             reviewer_label = "理事國" if entry.get("system_type") == "council" else "秘書處"
             print(f"✅ 入盟申請通知已發送至{reviewer_label} #{notify_ch.name}")
         except Exception as e:
@@ -1727,6 +1827,247 @@ async def handle_thread_create(thread: discord.Thread):
                     print(f"📝 論壇貼文入盟申請已處理（理事國）：#{thread.name}")
             except Exception as e:
                 print(f"⚠️ 論壇貼文入盟申請處理失敗（理事國）：{e}")
+
+
+
+# ═════════════════════════════════════════════════════════════════
+# 重啟後自動偵測未結案的提案/申請 → 重發全新可用面板
+# （舊面板因 custom_id 未持久化/process 重啟而失效，此處主動補救）
+# ═════════════════════════════════════════════════════════════════
+
+_startup_panel_refresh_done = False
+
+
+async def _resend_proposal_panel(entry: dict):
+    """重發一則提案審核面板（受理/駁回按鈕），並標記舊面板已失效。"""
+    proposal_id = entry["id"]
+    notify_ch_id = entry.get("notify_channel_id") or proposal_settings.get("secretariat_channel")
+    if not notify_ch_id:
+        return
+    notify_ch = None
+    for guild in bot.guilds:
+        ch = guild.get_channel(int(notify_ch_id))
+        if ch:
+            notify_ch = ch
+            break
+    if not notify_ch:
+        return
+
+    old_msg_id = entry.get("notify_message_id")
+    if old_msg_id:
+        try:
+            old_msg = await notify_ch.fetch_message(int(old_msg_id))
+            if old_msg.components:
+                old_embed = old_msg.embeds[0] if old_msg.embeds else None
+                if old_embed:
+                    old_embed.set_footer(text="⚠️ 此面板因機器人重啟失效，請使用下方新面板")
+                    await old_msg.edit(embed=old_embed, view=None)
+                else:
+                    await old_msg.edit(view=None)
+        except Exception:
+            pass  # 訊息可能已刪除/找不到，忽略
+
+    embed = discord.Embed(
+        title=f"📋 新提案通知：{entry.get('proposal_type', '一般提案')}（重啟後重發）",
+        color=discord.Color.gold(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="提案人", value=entry.get("proposer_name", "?"), inline=True)
+    embed.add_field(name="提案頻道", value=f"#{entry.get('channel_name', '?')}", inline=True)
+    embed.add_field(name="提案時間", value=entry.get("date", "?"), inline=True)
+    embed.add_field(name="摘要", value=entry.get("summary", "")[:1024], inline=False)
+    embed.add_field(name="原文連結", value=entry.get("message_url", "(無)"), inline=False)
+    embed.add_field(name="提案 ID", value=proposal_id, inline=False)
+    embed.set_footer(text="請管理員點擊下方按鈕受理或駁回此提案")
+
+    try:
+        sent = await notify_ch.send(embed=embed, view=ProposalReviewView(proposal_id))
+        entry["notify_message_id"] = str(sent.id)
+        entry["notify_channel_id"] = str(notify_ch.id)
+        save_proposals()
+        print(f"🔄 已重發提案審核面板（{proposal_id}）")
+    except Exception as e:
+        print(f"⚠️ 重發提案面板失敗（{proposal_id}）：{e}")
+
+
+async def _resend_application_notify_panel(entry: dict):
+    """重發一則入盟申請審核面板（審核通過/退回按鈕），並標記舊面板已失效。"""
+    app_id = entry["id"]
+    system_type = entry.get("system_type")
+    if system_type == "council":
+        notify_ch_id = entry.get("notify_channel_id") or application_settings.get("council_channel")
+        notify_title = "📝 新入盟申請（理事國審核・重啟後重發）"
+        notify_footer = "請理事國點擊下方按鈕審核通過或退回此申請"
+        notify_color = discord.Color.dark_gold()
+        reviewer_label = "理事國"
+    else:
+        notify_ch_id = entry.get("notify_channel_id") or application_settings.get("secretariat_channel")
+        notify_title = "📝 新入盟申請（重啟後重發）"
+        notify_footer = "請管理員點擊下方按鈕審核通過或退回此申請"
+        notify_color = discord.Color.gold()
+        reviewer_label = "秘書處"
+
+    if not notify_ch_id:
+        return
+    notify_ch = None
+    for guild in bot.guilds:
+        ch = guild.get_channel(int(notify_ch_id))
+        if ch:
+            notify_ch = ch
+            break
+    if not notify_ch:
+        return
+
+    old_msg_id = entry.get("notify_message_id")
+    if old_msg_id:
+        try:
+            old_msg = await notify_ch.fetch_message(int(old_msg_id))
+            if old_msg.components:
+                old_embed = old_msg.embeds[0] if old_msg.embeds else None
+                if old_embed:
+                    old_embed.set_footer(text="⚠️ 此面板因機器人重啟失效，請使用下方新面板")
+                    await old_msg.edit(embed=old_embed, view=None)
+                else:
+                    await old_msg.edit(view=None)
+        except Exception:
+            pass
+
+    notify_embed = discord.Embed(
+        title=notify_title,
+        color=notify_color,
+        timestamp=discord.utils.utcnow(),
+    )
+    notify_embed.add_field(name="申請人", value=entry.get("applicant_name", "?"), inline=True)
+    notify_embed.add_field(name="申請頻道", value=f"#{entry.get('channel_name', '?')}", inline=True)
+    notify_embed.add_field(name="申請時間", value=entry.get("date", "?"), inline=True)
+    if entry.get("applicant_nation"):
+        notify_embed.add_field(name="申請國家", value=entry["applicant_nation"], inline=True)
+    notify_embed.add_field(name="欄位檢查", value="✅ 全部必填欄位齊全（含國旗圖片）", inline=False)
+    if entry.get("flag_image_url"):
+        notify_embed.set_thumbnail(url=entry["flag_image_url"])
+    notify_embed.add_field(name="原文連結", value=entry.get("message_url", "(無)"), inline=False)
+    notify_embed.add_field(name="申請 ID", value=entry["id"], inline=False)
+    notify_embed.set_footer(text=notify_footer)
+
+    try:
+        sent = await notify_ch.send(embed=notify_embed, view=ApplicationReviewView(app_id))
+        entry["notify_message_id"] = str(sent.id)
+        entry["notify_channel_id"] = str(notify_ch.id)
+        save_applications()
+        print(f"🔄 已重發入盟審核面板至{reviewer_label} #{notify_ch.name}（{app_id}）")
+    except Exception as e:
+        print(f"⚠️ 重發入盟審核面板失敗（{app_id}）：{e}")
+
+
+async def _resend_application_ack_panel(entry: dict):
+    """重發一則入盟申請「待補齊欄位/國旗」面板，並標記舊面板已失效。"""
+    app_id = entry["id"]
+    ack_ch_id = entry.get("ack_channel_id") or entry.get("thread_id") or entry.get("channel_id")
+    if not ack_ch_id:
+        return
+    ack_ch = None
+    for guild in bot.guilds:
+        ch = guild.get_channel(int(ack_ch_id))
+        if not ch:
+            try:
+                ch = await guild.fetch_channel(int(ack_ch_id))
+            except Exception:
+                ch = None
+        if ch:
+            ack_ch = ch
+            break
+    if not ack_ch:
+        return
+
+    old_msg_id = entry.get("ack_message_id")
+    if old_msg_id:
+        try:
+            old_msg = await ack_ch.fetch_message(int(old_msg_id))
+            if old_msg.components:
+                old_embed = old_msg.embeds[0] if old_msg.embeds else None
+                if old_embed:
+                    old_embed.set_footer(text="⚠️ 此面板因機器人重啟失效，請使用下方新面板")
+                    await old_msg.edit(embed=old_embed, view=None)
+                else:
+                    await old_msg.edit(view=None)
+        except Exception:
+            pass
+
+    missing_fields = entry.get("missing_fields", [])
+    fields_text = "\n".join(f"❌ {f}" for f in missing_fields)
+    ack_desc = (
+        f"📝 已收到入盟申請，但以下欄位仍需補齊：\n\n"
+        f"{fields_text}\n\n"
+        f"請**編輯原貼文**補齊上述欄位，系統會自動重新檢查。\n"
+        f"如果缺少國旗圖片，可以點擊下方按鈕單獨補上。\n\n"
+        f"（此面板為機器人重啟後重發）"
+    )
+    ack_embed = discord.Embed(
+        title="⚠️ 入盟申請待補齊",
+        description=ack_desc,
+        color=discord.Color.orange(),
+    )
+    if entry.get("flag_image_url"):
+        ack_embed.set_thumbnail(url=entry["flag_image_url"])
+    ack_embed.set_footer(text=f"申請 ID：{app_id}")
+
+    view = ApplicationFlagUploadView(app_id) if "國旗" in str(missing_fields) else None
+    mention = f"<@{entry.get('applicant_id')}>" if entry.get("applicant_id") else None
+    try:
+        sent = await ack_ch.send(content=mention, embed=ack_embed, view=view)
+        entry["ack_message_id"] = str(sent.id)
+        entry["ack_channel_id"] = str(ack_ch.id)
+        save_applications()
+        print(f"🔄 已重發入盟補件面板（{app_id}）")
+    except Exception as e:
+        print(f"⚠️ 重發入盟補件面板失敗（{app_id}）：{e}")
+
+
+async def handle_bot_ready():
+    """在 on_ready 中呼叫（僅執行一次）：偵測未結案的提案/申請，
+    重發一份全新、按鈕仍可用的審核面板。舊面板因機器人重啟（custom_id
+    未持久化跨 process）而失效，會被編輯加註警語並移除按鈕，避免混淆。
+    """
+    global _startup_panel_refresh_done
+    if _startup_panel_refresh_done:
+        return
+    _startup_panel_refresh_done = True
+
+    await asyncio.sleep(5)  # 等 bot 完全連線、guild/channel cache 建立完成
+
+    refreshed_proposals = 0
+    refreshed_apps_notify = 0
+    refreshed_apps_ack = 0
+
+    for entry in list(_proposals.get("entries", [])):
+        if entry.get("status") != "pending":
+            continue
+        try:
+            await _resend_proposal_panel(entry)
+            refreshed_proposals += 1
+        except Exception as e:
+            print(f"⚠️ 重發提案面板時發生例外（{entry.get('id')}）：{e}")
+
+    for entry in list(_applications.get("entries", [])):
+        if entry.get("status") != "pending":
+            continue
+        if entry.get("secretariat_notified"):
+            try:
+                await _resend_application_notify_panel(entry)
+                refreshed_apps_notify += 1
+            except Exception as e:
+                print(f"⚠️ 重發入盟審核面板時發生例外（{entry.get('id')}）：{e}")
+        elif entry.get("missing_fields"):
+            try:
+                await _resend_application_ack_panel(entry)
+                refreshed_apps_ack += 1
+            except Exception as e:
+                print(f"⚠️ 重發入盟補件面板時發生例外（{entry.get('id')}）：{e}")
+
+    if refreshed_proposals or refreshed_apps_notify or refreshed_apps_ack:
+        print(f"🔄 重啟面板重發完成：提案 {refreshed_proposals} 筆、入盟審核 {refreshed_apps_notify} 筆、入盟補件 {refreshed_apps_ack} 筆")
+    else:
+        print("ℹ️ 沒有待審提案/申請需要重發面板")
 
 
 # ─── 啟動時載入資料 ──────────────────────────────────────────────────────────
