@@ -1,5 +1,5 @@
 # 靠北微國版（Kaobei Micronation）— 匿名投稿到指定論壇頻道
-# 用戶透過 /kaobei post 指令投稿，bot 以匿名身分在論壇頻道建立貼文。
+# 用戶透過 /post 指令投稿，bot 以匿名身分在論壇頻道建立貼文。
 # 支援文字 + 圖片附件，投稿者身分完全不公開。
 #
 # ─── Shared globals injected by the main file ──────────────────────────────
@@ -18,10 +18,9 @@ kaobei_settings = {
     "enabled": False,
     "forum_channel_id": None,
     "next_post_number": 1,
-    "cooldown_seconds": 300,  # 每位用戶兩次投稿間的最短間隔（秒）
+    "cooldown_seconds": 300,
 }
 
-# 記憶體中的冷卻追蹤：{user_id_str: timestamp_float}
 _kaobei_cooldowns = {}
 
 
@@ -40,7 +39,6 @@ def save_kaobei_settings():
 
 
 async def _persist_kaobei_settings_now():
-    """立即寫入本地 + await GitHub 推送完成（設定變更專用）。"""
     path = DATA_DIR / "kaobei_settings.json"
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -53,133 +51,130 @@ async def _persist_kaobei_settings_now():
 
 
 # ═════════════════════════════════════════════════════════════════
-# 指令群組
+# 頂層 /post 指令（匿名投稿）
+# ═════════════════════════════════════════════════════════════════
+
+@app_commands.command(name="post", description="📰 匿名投稿到靠北微國版")
+@app_commands.describe(
+    title="貼文標題（最多 100 字）",
+    content="貼文內容（最多 4000 字）",
+    image="附帶圖片（選填）",
+)
+async def post_command(
+    interaction: discord.Interaction,
+    title: str,
+    content: str,
+    image: discord.Attachment = None,
+):
+    if not kaobei_settings.get("enabled"):
+        await interaction.response.send_message("❌ 靠北微國版目前未啟用。", ephemeral=True)
+        return
+
+    forum_id = kaobei_settings.get("forum_channel_id")
+    if not forum_id:
+        await interaction.response.send_message("❌ 尚未設定論壇頻道，請聯絡管理員。", ephemeral=True)
+        return
+
+    # ── 冷卻檢查 ──
+    user_id = str(interaction.user.id)
+    now = time.time()
+    cooldown = kaobei_settings.get("cooldown_seconds", 300)
+    last = _kaobei_cooldowns.get(user_id, 0)
+    remaining = cooldown - (now - last)
+    if remaining > 0:
+        mins = int(remaining // 60)
+        secs = int(remaining % 60)
+        await interaction.response.send_message(
+            f"⏳ 投稿冷卻中，請於 {mins} 分 {secs} 秒後再試。",
+            ephemeral=True,
+        )
+        return
+
+    # ── 驗證 ──
+    title = title.strip()[:100]
+    content = content.strip()[:4000]
+    if not title or not content:
+        await interaction.response.send_message("❌ 標題與內容皆為必填。", ephemeral=True)
+        return
+
+    if image and not (image.content_type or "").startswith("image/"):
+        await interaction.response.send_message("❌ 附件必須為圖片格式。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # ── 尋找論壇頻道 ──
+    forum_channel = None
+    for guild in bot.guilds:
+        ch = guild.get_channel(int(forum_id))
+        if ch and isinstance(ch, discord.ForumChannel):
+            forum_channel = ch
+            break
+
+    if not forum_channel:
+        await interaction.followup.send(
+            "❌ 找不到論壇頻道，請聯絡管理員重新設定。",
+            ephemeral=True,
+        )
+        return
+
+    # ── 下載圖片（如有）──
+    files = []
+    if image:
+        try:
+            image_data = await image.read()
+            files.append(
+                discord.File(
+                    io.BytesIO(image_data),
+                    filename=image.filename or "image.png",
+                    description="匿名投稿圖片",
+                )
+            )
+        except Exception as e:
+            print(f"⚠️ 靠北圖片下載失敗：{e}")
+
+    # ── 建立論壇貼文 ──
+    post_number = kaobei_settings.get("next_post_number", 1)
+    thread_name = f"#{post_number} {title}"[:100]
+
+    try:
+        result = await forum_channel.create_thread(
+            name=thread_name,
+            content=content,
+            files=files if files else None,
+        )
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ 建立貼文失敗：機器人缺少「管理頻道」或「發送訊息」權限。",
+            ephemeral=True,
+        )
+        return
+    except Exception as e:
+        print(f"⚠️ 靠北論壇貼文建立失敗：{e}")
+        await interaction.followup.send(f"❌ 建立貼文失敗：{e}", ephemeral=True)
+        return
+
+    thread = result.thread if hasattr(result, "thread") else result
+
+    kaobei_settings["next_post_number"] = post_number + 1
+    await _persist_kaobei_settings_now()
+
+    _kaobei_cooldowns[user_id] = now
+
+    await interaction.followup.send(
+        f"✅ 匿名投稿成功！\n貼文已建立：{thread.mention}",
+        ephemeral=True,
+    )
+    print(f"📰 靠北微國版 #{post_number} 已由用戶 {interaction.user.id} 匿名發布")
+
+
+# ═════════════════════════════════════════════════════════════════
+# 管理指令群組 /kaobei
 # ═════════════════════════════════════════════════════════════════
 
 class KaobeiGroup(app_commands.Group):
     def __init__(self):
-        super().__init__(name="kaobei", description="📰 靠北微國版 — 匿名投稿")
-
-    # ── 投稿 ──────────────────────────────────────────────────────
-
-    @app_commands.command(name="post", description="匿名投稿到靠北微國版")
-    @app_commands.describe(
-        title="貼文標題（最多 100 字）",
-        content="貼文內容（最多 4000 字）",
-        image="附帶圖片（選填）",
-    )
-    async def post(
-        self,
-        interaction: discord.Interaction,
-        title: str,
-        content: str,
-        image: discord.Attachment = None,
-    ):
-        if not kaobei_settings.get("enabled"):
-            await interaction.response.send_message("❌ 靠北微國版目前未啟用。", ephemeral=True)
-            return
-
-        forum_id = kaobei_settings.get("forum_channel_id")
-        if not forum_id:
-            await interaction.response.send_message("❌ 尚未設定論壇頻道，請聯絡管理員。", ephemeral=True)
-            return
-
-        # ── 冷卻檢查 ──
-        user_id = str(interaction.user.id)
-        now = time.time()
-        cooldown = kaobei_settings.get("cooldown_seconds", 300)
-        last = _kaobei_cooldowns.get(user_id, 0)
-        remaining = cooldown - (now - last)
-        if remaining > 0:
-            mins = int(remaining // 60)
-            secs = int(remaining % 60)
-            await interaction.response.send_message(
-                f"⏳ 投稿冷卻中，請於 {mins} 分 {secs} 秒後再試。",
-                ephemeral=True,
-            )
-            return
-
-        # ── 驗證 ──
-        title = title.strip()[:100]
-        content = content.strip()[:4000]
-        if not title or not content:
-            await interaction.response.send_message("❌ 標題與內容皆為必填。", ephemeral=True)
-            return
-
-        if image and not (image.content_type or "").startswith("image/"):
-            await interaction.response.send_message("❌ 附件必須為圖片格式。", ephemeral=True)
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        # ── 尋找論壇頻道 ──
-        forum_channel = None
-        for guild in bot.guilds:
-            ch = guild.get_channel(int(forum_id))
-            if ch and isinstance(ch, discord.ForumChannel):
-                forum_channel = ch
-                break
-
-        if not forum_channel:
-            await interaction.followup.send(
-                "❌ 找不到論壇頻道，請聯絡管理員重新設定。",
-                ephemeral=True,
-            )
-            return
-
-        # ── 下載圖片（如有）──
-        files = []
-        if image:
-            try:
-                image_data = await image.read()
-                files.append(
-                    discord.File(
-                        io.BytesIO(image_data),
-                        filename=image.filename or "image.png",
-                        description="匿名投稿圖片",
-                    )
-                )
-            except Exception as e:
-                print(f"⚠️ 靠北圖片下載失敗：{e}")
-
-        # ── 建立論壇貼文 ──
-        post_number = kaobei_settings.get("next_post_number", 1)
-        thread_name = f"#{post_number} {title}"[:100]
-
-        try:
-            result = await forum_channel.create_thread(
-                name=thread_name,
-                content=content,
-                files=files if files else None,
-            )
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "❌ 建立貼文失敗：機器人缺少「管理頻道」或「發送訊息」權限。",
-                ephemeral=True,
-            )
-            return
-        except Exception as e:
-            print(f"⚠️ 靠北論壇貼文建立失敗：{e}")
-            await interaction.followup.send(f"❌ 建立貼文失敗：{e}", ephemeral=True)
-            return
-
-        # create_thread 回傳 ThreadWithMessage（具名元組）
-        thread = result.thread if hasattr(result, "thread") else result
-
-        # ── 更新編號 & 持久化 ──
-        kaobei_settings["next_post_number"] = post_number + 1
-        await _persist_kaobei_settings_now()
-
-        # ── 設定冷卻 ──
-        _kaobei_cooldowns[user_id] = now
-
-        await interaction.followup.send(
-            f"✅ 匿名投稿成功！\n貼文已建立：{thread.mention}",
-            ephemeral=True,
-        )
-        print(f"📰 靠北微國版 #{post_number} 已由用戶 {interaction.user.id} 匿名發布")
-
-    # ── 設定論壇頻道 ──────────────────────────────────────────────
+        super().__init__(name="kaobei", description="📰 靠北微國版管理")
 
     @app_commands.command(name="setup", description="設定靠北微國版論壇頻道（僅擁有者）")
     @app_commands.describe(channel="目標論壇頻道")
@@ -196,8 +191,6 @@ class KaobeiGroup(app_commands.Group):
             ephemeral=True,
         )
 
-    # ── 啟用/停用 ──────────────────────────────────────────────────
-
     @app_commands.command(name="toggle", description="啟用/停用靠北微國版（僅擁有者）")
     async def toggle(self, interaction: discord.Interaction):
         if not is_owner(interaction):
@@ -211,8 +204,6 @@ class KaobeiGroup(app_commands.Group):
             f"✅ 靠北微國版已{status}。",
             ephemeral=True,
         )
-
-    # ── 設定冷卻時間 ──────────────────────────────────────────────
 
     @app_commands.command(name="cooldown", description="設定投稿冷卻時間（僅擁有者）")
     @app_commands.describe(seconds="冷卻秒數（0 = 不限制，預設 300）")
@@ -233,8 +224,6 @@ class KaobeiGroup(app_commands.Group):
                 f"✅ 投稿冷卻已設為 {mins} 分 {secs} 秒。",
                 ephemeral=True,
             )
-
-    # ── 查看狀態 ──────────────────────────────────────────────────
 
     @app_commands.command(name="status", description="查看靠北微國版狀態")
     async def status(self, interaction: discord.Interaction):
@@ -272,3 +261,4 @@ class KaobeiGroup(app_commands.Group):
 load_kaobei_settings()
 
 KaobeiGroup_instance = KaobeiGroup()
+PostCommand_instance = post_command

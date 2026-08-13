@@ -456,7 +456,7 @@ async def main():
     # Load feature modules
     load_modules()
 
-    # Register any command groups that modules created
+    # Register any command groups or standalone commands that modules created
     for name, obj in list(_bot_globals.items()):
         if isinstance(obj, app_commands.Group):
             try:
@@ -464,6 +464,12 @@ async def main():
                 print(f"📝 已註冊指令群組：/{obj.name}")
             except Exception as e:
                 print(f"⚠️ 註冊指令群組 {name} 失敗：{e}")
+        elif isinstance(obj, app_commands.Command) and not isinstance(obj, app_commands.Group):
+            try:
+                tree.add_command(obj)
+                print(f"📝 已註冊指令：/{obj.name}")
+            except Exception as e:
+                print(f"⚠️ 註冊指令 {name} 失敗：{e}")
 
     # Start keep-alive HTTP server (for Render Web Service)
     try:
