@@ -58,6 +58,8 @@ _PERSIST_FILES = {
     "proposal_settings.json",
     "application_settings.json",
     "polls.json",
+    "ticket_settings.json",
+    "tickets.json",
 }
 
 # ─── Bot Instance ──────────────────────────────────────────────────────────
