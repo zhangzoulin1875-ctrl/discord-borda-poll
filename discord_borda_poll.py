@@ -32,6 +32,7 @@ import urllib.error
 import discord
 from discord import app_commands
 from aiohttp import web
+import aiohttp
 
 # ─── Line-buffered stdout (critical on Render — non-TTY blocks by default) ───
 try:
@@ -229,6 +230,35 @@ async def keep_alive_server():
     print(f"🌐 Keep-alive HTTP server started on port {port}")
 
 
+# ─── Self-Ping Loop (prevent Render free tier sleep) ────────────────────────
+async def self_ping_loop():
+    """Every ~4.5 min, ping our own /health endpoint to prevent Render from
+    spinning down the free-tier Web Service after 15 min of inactivity.
+
+    Uses SELF_URL or RENDER_EXTERNAL_URL env var (Render auto-injects the latter).
+    """
+    await asyncio.sleep(30)  # wait for bot to be fully online
+    base_url = os.getenv("SELF_URL") or os.getenv("RENDER_EXTERNAL_URL") or ""
+    if not base_url:
+        print("ℹ️ SELF_URL not set, self-ping disabled")
+        print("ℹ️ Add SELF_URL=https://your-service.onrender.com in Render env vars")
+        return
+    health_url = base_url.rstrip("/") + "/health"
+    print(f"🔁 Self-ping started: {health_url}")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(
+                    health_url,
+                    headers={"User-Agent": "SelfPing/1.0"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    pass  # status doesn't matter, just need to wake it
+            except Exception:
+                pass  # silently ignore, will retry
+            await asyncio.sleep(270)  # 4.5 min
+
+
 # ─── Module Loader ──────────────────────────────────────────────────────────
 _bot_globals = {}
 
@@ -305,6 +335,9 @@ async def on_ready():
                 await member.edit(nick="ICEA official")
         except Exception:
             pass
+
+    # Start self-ping loop (prevent Render free tier sleep)
+    asyncio.ensure_future(self_ping_loop())
 
 
 @bot.event
