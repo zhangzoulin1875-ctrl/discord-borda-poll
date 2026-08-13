@@ -15,6 +15,7 @@
 
 import re
 import time
+import json
 
 # ─── 設定 ──────────────────────────────────────────────────────────────────
 ticket_settings = {
@@ -55,11 +56,85 @@ def save_tickets():
     save_json("tickets.json", _tickets)
 
 
+async def _persist_tickets_now():
+    """立即寫入本地檔案並等待 GitHub 推送完成。
+
+    客服單建立/關閉/刪除這幾個關鍵時刻專用——一般 save_json() 只是把 GitHub
+    推送丟到背景（fire-and-forget），如果 Render 剛好在這幾秒內重啟（例如
+    我們自己 push 新程式碼觸發重新部署），背景推送可能還沒送到 GitHub 就被
+    砍掉，新程序拉到的還是舊資料，之後開單者按「結束」就會出現「找不到此
+    客服單記錄」。这裡改成寫本地檔之後直接 await 推送完成，確保回覆使用者
+    「已建立/已結束」的當下，GitHub 上的資料已經是最新的。
+    """
+    path = DATA_DIR / "tickets.json"
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(_tickets, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+    try:
+        await github_push_json("tickets.json", _tickets)
+    except Exception as e:
+        print(f"⚠️ 客服單資料 GitHub 同步失敗：{e}")
+
+
 def _find_ticket_by_channel(channel_id):
     for t in _tickets.get("entries", []):
         if str(t.get("channel_id")) == str(channel_id):
             return t
     return None
+
+
+def _reconstruct_entry_from_channel(channel):
+    """救援機制：當客服單記錄意外遺失（例如 GitHub 推送被重啟打斷）時，
+    管理員關閉客服單不該被硬擋死——從頻道名稱/topic/權限覆寫反推出一筆
+    最小可用的記錄，讓關閉流程可以繼續走完。"""
+    number = 0
+    m = re.match(r"^(?:closed-)?ticket-(\d+)-", channel.name or "")
+    if m:
+        number = int(m.group(1))
+
+    subject = channel.name or "（記錄遺失，已重建）"
+    topic = channel.topic or ""
+    m2 = re.search(r"主旨：(.+)$", topic)
+    if m2:
+        subject = m2.group(1).strip()
+
+    opener_id = None
+    opener_name = "未知使用者"
+    try:
+        bot_id = bot.user.id if bot.user else None
+        for target, overwrite in getattr(channel, "overwrites", {}).items():
+            if not isinstance(target, discord.Member):
+                continue
+            if bot_id and target.id == bot_id:
+                continue
+            if hasattr(target, "guild_permissions") and target.guild_permissions.administrator:
+                continue
+            if overwrite.send_messages is True:
+                opener_id = str(target.id)
+                opener_name = target.display_name
+                break
+    except Exception as e:
+        print(f"⚠️ 重建客服單記錄時解析權限失敗：{e}")
+
+    entry = {
+        "id": f"tk_recovered_{channel.id}",
+        "number": number,
+        "guild_id": str(channel.guild.id) if getattr(channel, "guild", None) else "",
+        "channel_id": str(channel.id),
+        "opener_id": opener_id or "0",
+        "opener_name": opener_name,
+        "subject": subject,
+        "content": "（原始記錄遺失，已從頻道資訊自動重建）",
+        "note": "",
+        "status": "open",
+        "created_at": now_str(),
+        "closed_at": None,
+        "closed_by": None,
+        "recovered": True,
+    }
+    _tickets["entries"].append(entry)
+    return entry
 
 
 def _find_open_ticket_by_user(user_id):
@@ -220,7 +295,7 @@ async def _create_ticket_channel(guild: discord.Guild, opener, subject: str, con
         "closed_by": None,
     }
     _tickets["entries"].append(entry)
-    save_tickets()
+    await _persist_tickets_now()
 
     return channel, entry
 
@@ -250,7 +325,7 @@ class TicketClosedView(discord.ui.View):
             entry = _find_ticket_by_channel(confirm_ia.channel.id)
             if entry:
                 entry["deleted_at"] = now_str()
-                save_tickets()
+                await _persist_tickets_now()
             await confirm_ia.response.send_message("🗑️ 頻道即將刪除…", ephemeral=True)
             try:
                 await confirm_ia.channel.delete(reason=f"客服單刪除 by {confirm_ia.user}")
@@ -282,8 +357,16 @@ class TicketCloseView(discord.ui.View):
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         entry = _find_ticket_by_channel(interaction.channel.id)
         if not entry:
-            await interaction.response.send_message("❌ 找不到此客服單記錄（可能已被清除）。", ephemeral=True)
-            return
+            if not is_admin(interaction):
+                await interaction.response.send_message(
+                    "❌ 找不到此客服單記錄（可能是機器人重啟時資料還沒同步完成），請聯絡管理員手動處理。",
+                    ephemeral=True,
+                )
+                return
+            # 管理員：記錄遺失也不硬擋，從頻道資訊重建一筆最小記錄後繼續關閉流程
+            entry = _reconstruct_entry_from_channel(interaction.channel)
+            await _persist_tickets_now()
+            print(f"⚠️ 客服單記錄遺失，已由管理員 {interaction.user} 強制重建並關閉：頻道 {interaction.channel.id}")
         if entry.get("status") == "closed":
             await interaction.response.send_message("⚠️ 此客服單已經結束。", ephemeral=True)
             return
@@ -296,7 +379,7 @@ class TicketCloseView(discord.ui.View):
         entry["status"] = "closed"
         entry["closed_at"] = now_str()
         entry["closed_by"] = interaction.user.display_name
-        save_tickets()
+        await _persist_tickets_now()
 
         # 開單者移除發言權限，保留可讀以留存紀錄
         try:
