@@ -19,6 +19,24 @@ from pathlib import Path
 
 # TZ_TAIPEI and DATA_DIR are available from the main globals
 
+
+def is_admin(interaction: discord.Interaction) -> bool:
+    """機器人擁有者 或 該伺服器管理員 皆視為管理員。"""
+    if interaction.user.id == OWNER_ID:
+        return True
+    if hasattr(interaction.user, "guild_permissions") and interaction.user.guild_permissions.administrator:
+        return True
+    return False
+
+
+def _has_role(member, role_id) -> bool:
+    if not role_id:
+        return True
+    if not hasattr(member, "roles"):
+        return False
+    return any(str(r.id) == str(role_id) for r in member.roles)
+
+
 # ── 資料檔案 ──
 POLLS_FILE = DATA_DIR / "polls.json"
 
@@ -312,8 +330,11 @@ def _build_poll_embed(poll):
         inline=False,
     )
 
+    if poll.get("restrict_role_id"):
+        embed.add_field(name="🔒 限定身分組", value=f"<@&{poll['restrict_role_id']}>", inline=True)
+
     if poll.get("deadline"):
-        embed.add_field(name="⏰ 截止時間", value=poll["deadline"], inline=False)
+        embed.add_field(name="⏰ 截止時間", value=poll["deadline"], inline=True)
 
     embed.set_footer(text=f"ID: {poll.get('id', '')} ・ ICEA official")
     return embed
@@ -342,6 +363,14 @@ class PollVoteView(discord.ui.View):
 
         poll_type = poll.get("type", "regular")
         user_id = str(interaction.user.id)
+
+        restrict_role_id = poll.get("restrict_role_id")
+        if restrict_role_id and not _has_role(interaction.user, restrict_role_id) and not is_admin(interaction):
+            await interaction.response.send_message(
+                f"❌ 此投票僅限 <@&{restrict_role_id}> 身分組成員投票。", ephemeral=True
+            )
+            return
+
         existing = [v for v in poll.get("votes", []) if v.get("user_id") == user_id]
         if existing and not poll.get("allow_revote", False):
             await interaction.response.send_message("⚠️ 你已經投過票了。", ephemeral=True)
@@ -564,8 +593,117 @@ def _create_poll_modal(mode="regular"):
     return modal
 
 
+def _build_draft_preview_embed(poll_draft):
+    """建立投票前的預覽面板：顯示目前設定，讓使用者選擇限定身分組後再發佈。"""
+    mode = poll_draft.get("type", "regular")
+    type_label = "🗳️ 波達計數投票" if mode == "borda" else "📊 一般投票"
+
+    embed = discord.Embed(
+        title=f"📝 建立預覽：{type_label}",
+        description=poll_draft.get("description") or "（無說明）",
+        color=discord.Color.orange(),
+    )
+    embed.add_field(name="標題", value=poll_draft.get("title", ""), inline=False)
+
+    if mode == "borda":
+        lines = [f"`{c['code']}` — {c['name']}" for c in poll_draft.get("candidates", [])]
+        embed.add_field(name=f"候選人（{len(lines)} 位）", value="\n".join(lines) or "無", inline=False)
+    else:
+        lines = [f"• {o['label']}" for o in poll_draft.get("options", [])]
+        embed.add_field(name=f"選項（{len(lines)} 個）", value="\n".join(lines) or "無", inline=False)
+
+    if poll_draft.get("deadline"):
+        embed.add_field(name="⏰ 截止時間", value=poll_draft["deadline"], inline=True)
+
+    role_id = poll_draft.get("restrict_role_id")
+    role_name = poll_draft.get("restrict_role_name")
+    embed.add_field(
+        name="🔒 限定投票身分組",
+        value=(f"<@&{role_id}>（{role_name}）" if role_id else "未限制（所有人可投票）"),
+        inline=True,
+    )
+    embed.set_footer(text="請確認以上內容，選擇限定身分組（可留空）後點「🚀 發佈投票」")
+    return embed
+
+
+def _build_poll_setup_view(poll_draft, mode):
+    """草稿確認面板：下拉選單直接選限定身分組 + 發佈/取消按鈕。"""
+    view = discord.ui.View(timeout=300)
+
+    role_select = discord.ui.RoleSelect(
+        placeholder="🔒 限定投票身分組（留空＝所有人可投票）",
+        min_values=0,
+        max_values=1,
+        row=0,
+    )
+
+    async def on_role_select(select_interaction: discord.Interaction):
+        if role_select.values:
+            chosen = role_select.values[0]
+            poll_draft["restrict_role_id"] = str(chosen.id)
+            poll_draft["restrict_role_name"] = chosen.name
+        else:
+            poll_draft.pop("restrict_role_id", None)
+            poll_draft.pop("restrict_role_name", None)
+        await select_interaction.response.edit_message(embed=_build_draft_preview_embed(poll_draft), view=view)
+
+    role_select.callback = on_role_select
+    view.add_item(role_select)
+
+    publish_btn = discord.ui.Button(label="🚀 發佈投票", style=discord.ButtonStyle.success, row=1)
+
+    async def on_publish(button_interaction: discord.Interaction):
+        await _finalize_and_post_poll(button_interaction, poll_draft, mode)
+
+    publish_btn.callback = on_publish
+    view.add_item(publish_btn)
+
+    cancel_btn = discord.ui.Button(label="❌ 取消", style=discord.ButtonStyle.danger, row=1)
+
+    async def on_cancel(button_interaction: discord.Interaction):
+        await button_interaction.response.edit_message(content="❌ 已取消建立投票。", embed=None, view=None)
+
+    cancel_btn.callback = on_cancel
+    view.add_item(cancel_btn)
+
+    return view
+
+
+async def _finalize_and_post_poll(interaction: discord.Interaction, poll_draft: dict, mode: str):
+    """使用者在草稿面板點「🚀 發佈投票」後：正式建立投票並發送公開面板。"""
+    try:
+        poll = dict(poll_draft)
+        poll["id"] = _new_poll_id()
+        poll["status"] = "open"
+        poll["author_id"] = str(interaction.user.id)
+        poll["author_name"] = interaction.user.display_name
+        poll["channel_id"] = str(interaction.channel_id)
+        poll["created_at"] = now_str()
+        poll["votes"] = []
+
+        embed = _build_poll_embed(poll)
+        view = PollVoteView(poll["id"])
+        poll_message = await interaction.channel.send(embed=embed, view=view)
+        poll["message_id"] = str(poll_message.id)
+
+        _polls.setdefault("entries", []).append(poll)
+        save_polls()
+
+        await interaction.response.edit_message(
+            content=f"✅ 投票「{poll['title']}」已發佈！",
+            embed=None,
+            view=None,
+        )
+    except Exception as e:
+        print(f"⚠️ 發佈投票失敗：{e}")
+        try:
+            await interaction.response.edit_message(content=f"❌ 發佈投票失敗：{e}", embed=None, view=None)
+        except Exception:
+            pass
+
+
 async def _handle_poll_create(modal_interaction: discord.Interaction, mode: str):
-    """Modal 提交後的處理邏輯。"""
+    """Modal 提交後的處理邏輯：解析欄位、建立投票草稿，顯示身分組限制設定面板（尚未發佈）。"""
     # 從 Modal 取值
     data = {}
     for row in modal_interaction.data["components"]:
@@ -580,19 +718,12 @@ async def _handle_poll_create(modal_interaction: discord.Interaction, mode: str)
         await modal_interaction.response.send_message("❌ 標題不可為空。", ephemeral=True)
         return
 
-    poll = {
-        "id": _new_poll_id(),
+    poll_draft = {
         "type": mode,
         "title": title,
         "description": desc,
-        "status": "open",
-        "author_id": str(modal_interaction.user.id),
-        "author_name": modal_interaction.user.display_name,
-        "channel_id": str(modal_interaction.channel_id),
-        "created_at": now_str(),
         "deadline": deadline or None,
         "allow_revote": False,
-        "votes": [],
     }
 
     if mode == "borda":
@@ -606,7 +737,7 @@ async def _handle_poll_create(modal_interaction: discord.Interaction, mode: str)
             return
 
         codes = _gen_candidate_codes(len(names))
-        poll["candidates"] = [
+        poll_draft["candidates"] = [
             {"code": codes[i], "name": name, "description": ""}
             for i, name in enumerate(names)
         ]
@@ -620,27 +751,16 @@ async def _handle_poll_create(modal_interaction: discord.Interaction, mode: str)
             await modal_interaction.response.send_message("❌ 選項不可超過 25 個。", ephemeral=True)
             return
 
-        poll["options"] = [
+        poll_draft["options"] = [
             {"label": label, "description": "", "emoji": None}
             for label in opt_labels
         ]
 
-    # 先用 ephemeral 回應確認（Modal 提交必須有 response）
-    await modal_interaction.response.send_message("✅ 投票建立中…", ephemeral=True)
-
-    # 發送投票面板到頻道
-    embed = _build_poll_embed(poll)
-    view = PollVoteView(poll["id"])
-    poll_message = await modal_interaction.channel.send(embed=embed, view=view)
-
-    poll["message_id"] = str(poll_message.id)
-
-    # 存檔
-    _polls.setdefault("entries", []).append(poll)
-    save_polls()
-
-    # 編輯 ephemeral 確認訊息
-    await modal_interaction.edit_original_response(content=f"✅ 投票「{title}」已建立！")
+    # Modal 提交必須用 ephemeral send_message 回應（絕不 edit_message 原面板）——
+    # 這裡直接送出草稿預覽面板，讓使用者用原生下拉選單選限定身分組後再發佈。
+    embed = _build_draft_preview_embed(poll_draft)
+    view = _build_poll_setup_view(poll_draft, mode)
+    await modal_interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -818,8 +938,8 @@ class PollGroup(app_commands.Group):
 
     @app_commands.command(name="create", description="建立一般投票（多選一）")
     async def create_regular(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
             return
         modal = _create_poll_modal(mode="regular")
 
@@ -831,8 +951,8 @@ class PollGroup(app_commands.Group):
 
     @app_commands.command(name="borda", description="建立波達計數投票（排序投票）")
     async def create_borda(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
             return
         modal = _create_poll_modal(mode="borda")
 
@@ -919,6 +1039,14 @@ async def handle_poll_message(message: discord.Message):
         if str(message.reference.message_id) == str(poll.get("message_id", "")):
             if poll.get("type") != "borda":
                 return  # 一般投票用按鈕，不處理回覆
+
+            restrict_role_id = poll.get("restrict_role_id")
+            if restrict_role_id and not _has_role(message.author, restrict_role_id):
+                try:
+                    await message.reply(f"❌ 此投票僅限 <@&{restrict_role_id}> 身分組成員投票。", delete_after=8)
+                except Exception:
+                    pass
+                return
 
             candidates = poll.get("candidates", [])
             codes = [c.get("code", "") for c in candidates]
