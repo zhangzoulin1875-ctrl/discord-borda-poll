@@ -57,6 +57,7 @@ _github_file_shas = {}
 _PERSIST_FILES = {
     "proposal_settings.json",
     "application_settings.json",
+    "polls.json",
 }
 
 # ─── Bot Instance ──────────────────────────────────────────────────────────
@@ -339,13 +340,13 @@ async def on_ready():
     # Start self-ping loop (prevent Render free tier sleep)
     asyncio.ensure_future(self_ping_loop())
 
-    # ── 模組 on_ready 掛鉤：重啟後偵測未結案提案/申請並重發面板 ──
-    handler = _bot_globals.get("handle_bot_ready")
-    if handler:
+    # ── 模組 on_ready 掛鉤：每個模組可各自註冊一個啟動後要跑的函式，
+    # 全部收集在 _bot_ready_hooks 清單裡（避免多個模組用同名函式互相覆蓋）──
+    for hook in _bot_globals.get("_bot_ready_hooks", []):
         try:
-            asyncio.ensure_future(handler())
+            asyncio.ensure_future(hook())
         except Exception as e:
-            print(f"⚠️ handle_bot_ready 錯誤：{e}")
+            print(f"⚠️ on_ready 掛鉤 {getattr(hook, '__name__', hook)} 錯誤：{e}")
 
 
 @bot.event
@@ -422,6 +423,7 @@ async def main():
         "app_commands": app_commands,
         "asyncio": asyncio,
         "github_push_json": github_push_json,
+        "_bot_ready_hooks": [],
     })
 
     # Pull persisted settings from GitHub (replaces Google Drive)
