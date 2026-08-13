@@ -28,12 +28,18 @@
       "assignee": "我",
       "description": "測試",
       "deadline": null,
-      "status": "pending",
+      "status": "completed",
       "created_by": "鐵道粉碎機",
       "created_by_id": "1422905119716151347",
       "created_at": "2026-08-13 17:44:59",
-      "updated_at": "2026-08-13 17:44:59",
-      "progress_logs": [],
+      "updated_at": "2026-08-13 17:45:18",
+      "progress_logs": [
+        {
+          "time": "2026-08-13 17:45:18",
+          "text": "狀態變更：待處理 → 已完成",
+          "by": "鐵道粉碎機"
+        }
+      ],
       "deleted": false
     }
   ]
