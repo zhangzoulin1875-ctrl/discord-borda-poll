@@ -45,7 +45,8 @@
       "created_at": "2026-08-13 13:34:15",
       "closed_at": "2026-08-13 13:34:16",
       "closed_by": "張作霖/副秘書長",
-      "recovered": true
+      "recovered": true,
+      "deleted_at": "2026-08-13 13:34:22"
     }
   ]
 }
