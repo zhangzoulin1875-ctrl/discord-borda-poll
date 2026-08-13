@@ -63,6 +63,7 @@ _PERSIST_FILES = {
     "task_settings.json",
     "tasks.json",
     "kaobei_settings.json",
+    "secretary_timer_settings.json",
 }
 
 # ─── Bot Instance ──────────────────────────────────────────────────────────
@@ -70,6 +71,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
+intents.presences = True
 
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
@@ -418,6 +420,17 @@ async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
             await handler(channel)
         except Exception as e:
             print(f"⚠️ handle_channel_delete 錯誤：{e}")
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """偵測成員狀態變化（上線/離線），派發到模組。"""
+    handler = _bot_globals.get("handle_member_update")
+    if handler:
+        try:
+            await handler(before, after)
+        except Exception as e:
+            print(f"⚠️ handle_member_update 錯誤：{e}")
 
 
 @bot.event
