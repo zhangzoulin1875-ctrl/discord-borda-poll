@@ -121,6 +121,35 @@ def _new_task_id():
     return f"TSK-{uuid.uuid4().hex[:8]}"
 
 
+def _safe_callback(func):
+    """裝飾器：攔截 callback 內任何未預期例外，回覆清楚的錯誤訊息給使用者，
+    而不是讓 Discord 顯示一句看不出原因的「應用程式未及時回應」。
+    這樣未來就算又有類似 bug，也能馬上看到錯誤內容，不會像編輯任務那樣卡死。"""
+    async def wrapper(*args, **kwargs):
+        interaction = None
+        for a in list(args) + list(kwargs.values()):
+            if isinstance(a, discord.Interaction):
+                interaction = a
+                break
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            import traceback
+            print(f"⚠️ 任務追蹤發生未預期錯誤（{getattr(func, '__name__', '?')}）：{e}")
+            traceback.print_exc()
+            if interaction is not None:
+                try:
+                    err_msg = f"❌ 操作失敗，請重試一次或聯絡管理員。\n錯誤：`{e}`"
+                    if interaction.response.is_done():
+                        await interaction.followup.send(err_msg, ephemeral=True)
+                    else:
+                        await interaction.response.send_message(err_msg, ephemeral=True)
+                except Exception:
+                    pass
+    wrapper.__name__ = getattr(func, "__name__", "callback")
+    return wrapper
+
+
 # ═════════════════════════════════════════════════════════════════
 # 工具函式
 # ═════════════════════════════════════════════════════════════════
@@ -228,6 +257,7 @@ class TaskPanelView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="➕ 新增任務", style=discord.ButtonStyle.success, custom_id="icea_task_add_btn", row=0)
+    @_safe_callback
     async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not _is_secretariat(interaction):
             await interaction.response.send_message("❌ 僅限秘書處成員使用。", ephemeral=True)
@@ -264,6 +294,7 @@ class TaskPanelView(discord.ui.View):
             custom_id="task_deadline",
         ))
 
+        @_safe_callback
         async def on_submit(modal_ia: discord.Interaction):
             values = {}
             for row in modal_ia.data.get("components", []):
@@ -313,6 +344,7 @@ class TaskPanelView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="📊 更新狀態", style=discord.ButtonStyle.primary, custom_id="icea_task_status_btn", row=0)
+    @_safe_callback
     async def status_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not _is_secretariat(interaction):
             await interaction.response.send_message("❌ 僅限秘書處成員使用。", ephemeral=True)
@@ -337,6 +369,7 @@ class TaskPanelView(discord.ui.View):
             ],
         )
 
+        @_safe_callback
         async def on_select_task(select_ia: discord.Interaction):
             task = _find_task(select.values[0])
             if not task:
@@ -358,6 +391,7 @@ class TaskPanelView(discord.ui.View):
                 ],
             )
 
+            @_safe_callback
             async def on_select_status(status_ia: discord.Interaction):
                 new_status = status_select.values[0]
                 old_label = _status_label(task.get("status", "pending"))
@@ -394,6 +428,7 @@ class TaskPanelView(discord.ui.View):
         await interaction.response.send_message("選擇要更新狀態的任務：", view=select_view, ephemeral=True)
 
     @discord.ui.button(label="📝 編輯任務", style=discord.ButtonStyle.secondary, custom_id="icea_task_edit_btn", row=0)
+    @_safe_callback
     async def edit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not _is_secretariat(interaction):
             await interaction.response.send_message("❌ 僅限秘書處成員使用。", ephemeral=True)
@@ -418,6 +453,7 @@ class TaskPanelView(discord.ui.View):
             ],
         )
 
+        @_safe_callback
         async def on_select(select_ia: discord.Interaction):
             task = _find_task(select.values[0])
             if not task:
@@ -427,21 +463,21 @@ class TaskPanelView(discord.ui.View):
             modal = discord.ui.Modal(title=f"📝 編輯任務 #{task.get('number', '')}")
             modal.add_item(discord.ui.TextInput(
                 label="任務標題",
-                default_value=task.get("title", ""),
+                default=task.get("title", ""),
                 required=True,
                 max_length=200,
                 custom_id="edit_title",
             ))
             modal.add_item(discord.ui.TextInput(
                 label="負責人",
-                default_value=task.get("assignee", ""),
+                default=task.get("assignee", ""),
                 required=True,
                 max_length=100,
                 custom_id="edit_assignee",
             ))
             modal.add_item(discord.ui.TextInput(
                 label="任務說明",
-                default_value=task.get("description", ""),
+                default=task.get("description", ""),
                 required=False,
                 max_length=500,
                 style=discord.TextStyle.paragraph,
@@ -449,7 +485,7 @@ class TaskPanelView(discord.ui.View):
             ))
             modal.add_item(discord.ui.TextInput(
                 label="截止日期",
-                default_value=task.get("deadline", "") or "",
+                default=task.get("deadline", "") or "",
                 required=False,
                 max_length=50,
                 custom_id="edit_deadline",
@@ -463,6 +499,7 @@ class TaskPanelView(discord.ui.View):
                 custom_id="edit_log",
             ))
 
+            @_safe_callback
             async def on_edit_submit(edit_ia: discord.Interaction):
                 values = {}
                 for row in edit_ia.data.get("components", []):
@@ -500,6 +537,7 @@ class TaskPanelView(discord.ui.View):
         await interaction.response.send_message("選擇要編輯的任務：", view=edit_view, ephemeral=True)
 
     @discord.ui.button(label="🗑️ 刪除任務", style=discord.ButtonStyle.danger, custom_id="icea_task_delete_btn", row=0)
+    @_safe_callback
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not _is_secretariat(interaction):
             await interaction.response.send_message("❌ 僅限秘書處成員使用。", ephemeral=True)
@@ -524,6 +562,7 @@ class TaskPanelView(discord.ui.View):
             ],
         )
 
+        @_safe_callback
         async def on_select(select_ia: discord.Interaction):
             task = _find_task(select.values[0])
             if not task:
@@ -533,6 +572,7 @@ class TaskPanelView(discord.ui.View):
             # 二次確認
             confirm_view = discord.ui.View(timeout=30)
 
+            @_safe_callback
             async def confirm_delete(confirm_ia: discord.Interaction):
                 if not _is_secretariat(confirm_ia):
                     await confirm_ia.response.send_message("❌ 僅限秘書處成員使用。", ephemeral=True)
@@ -547,6 +587,7 @@ class TaskPanelView(discord.ui.View):
                     ephemeral=True,
                 )
 
+            @_safe_callback
             async def cancel_delete(cancel_ia: discord.Interaction):
                 await cancel_ia.response.send_message("已取消刪除。", ephemeral=True)
 
@@ -572,6 +613,7 @@ class TaskPanelView(discord.ui.View):
         await interaction.response.send_message("選擇要刪除的任務：", view=del_view, ephemeral=True)
 
     @discord.ui.button(label="🔍 查看詳情", style=discord.ButtonStyle.secondary, custom_id="icea_task_detail_btn", row=1)
+    @_safe_callback
     async def detail_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not _is_secretariat(interaction):
             await interaction.response.send_message("❌ 僅限秘書處成員使用。", ephemeral=True)
@@ -596,6 +638,7 @@ class TaskPanelView(discord.ui.View):
             ],
         )
 
+        @_safe_callback
         async def on_select(select_ia: discord.Interaction):
             task = _find_task(select.values[0])
             if not task:
@@ -610,6 +653,7 @@ class TaskPanelView(discord.ui.View):
         await interaction.response.send_message("選擇要查看的任務：", view=detail_view, ephemeral=True)
 
     @discord.ui.button(label="🔄 重新整理", style=discord.ButtonStyle.secondary, custom_id="icea_task_refresh_btn", row=1)
+    @_safe_callback
     async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not _is_secretariat(interaction):
             await interaction.response.send_message("❌ 僅限秘書處成員使用。", ephemeral=True)
