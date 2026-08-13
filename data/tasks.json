@@ -7,12 +7,18 @@
       "assignee": "秘書長",
       "description": "",
       "deadline": null,
-      "status": "pending",
+      "status": "in_progress",
       "created_by": "張作霖/副秘書長",
       "created_by_id": "1482256878334640209",
       "created_at": "2026-08-13 15:40:16",
-      "updated_at": "2026-08-13 15:40:16",
-      "progress_logs": [],
+      "updated_at": "2026-08-13 15:45:18",
+      "progress_logs": [
+        {
+          "time": "2026-08-13 15:45:18",
+          "text": "狀態變更：待處理 → 進行中",
+          "by": "張作霖/副秘書長"
+        }
+      ],
       "deleted": false
     }
   ]
