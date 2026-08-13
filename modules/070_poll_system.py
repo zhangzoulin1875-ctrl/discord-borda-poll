@@ -365,7 +365,7 @@ class PollVoteView(discord.ui.View):
         user_id = str(interaction.user.id)
 
         restrict_role_id = poll.get("restrict_role_id")
-        if restrict_role_id and not _has_role(interaction.user, restrict_role_id) and not is_admin(interaction):
+        if restrict_role_id and not _has_role(interaction.user, restrict_role_id):
             await interaction.response.send_message(
                 f"❌ 此投票僅限 <@&{restrict_role_id}> 身分組成員投票。", ephemeral=True
             )
