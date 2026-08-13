@@ -2575,6 +2575,11 @@ async def handle_bot_ready():
         print("ℹ️ 沒有待審提案/申請需要重發面板")
 
 
+# 註冊到主程式的 on_ready 掛鉤清單（取代舊版單一 handle_bot_ready 具名查找，
+# 讓其他模組也能各自註冊自己的啟動後任務而不會互相覆蓋同名函式）
+_bot_ready_hooks.append(handle_bot_ready)
+
+
 # ─── 啟動時載入資料 ──────────────────────────────────────────────────────────
 load_proposal_settings()
 load_proposals()
