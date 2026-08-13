@@ -860,7 +860,7 @@ def _build_manage_view():
     list_btn = discord.ui.Button(label="📋 列出所有投票", style=discord.ButtonStyle.primary, row=0)
 
     async def list_cb(interaction: discord.Interaction):
-        if not is_owner(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
             return
         entries = _polls.get("entries", [])
@@ -881,7 +881,7 @@ def _build_manage_view():
     close_btn = discord.ui.Button(label="🔴 結束指定投票", style=discord.ButtonStyle.danger, row=0)
 
     async def close_cb(interaction: discord.Interaction):
-        if not is_owner(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
             return
         open_polls = [p for p in _polls.get("entries", []) if p.get("status") == "open"]
@@ -926,7 +926,7 @@ def _build_manage_view():
     delete_btn = discord.ui.Button(label="🗑️ 刪除投票", style=discord.ButtonStyle.danger, row=0)
 
     async def delete_cb(interaction: discord.Interaction):
-        if not is_owner(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
             return
         entries = _polls.get("entries", [])
@@ -978,10 +978,102 @@ def _build_manage_view():
     delete_btn.callback = delete_cb
     view.add_item(delete_btn)
 
+    tally_btn = discord.ui.Button(label="📈 查看計票結果", style=discord.ButtonStyle.secondary, row=0)
+
+    async def tally_cb(interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
+            return
+        entries = _polls.get("entries", [])
+        if not entries:
+            await interaction.response.send_message("📭 沒有任何投票可查看。", ephemeral=True)
+            return
+
+        select = discord.ui.Select(
+            placeholder="選擇要查看結果的投票…",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=p["title"][:100],
+                    value=p["id"],
+                    description=f"{'已結束' if p.get('status')=='closed' else '進行中'} | {len(p.get('votes', []))} 票 | {'波達計數' if p.get('type')=='borda' else '一般投票'}",
+                )
+                for p in entries[:25]
+            ],
+        )
+
+        async def on_select(select_ia: discord.Interaction):
+            poll_id = select.values[0]
+            poll = _find_poll(poll_id)
+            if not poll:
+                await select_ia.response.send_message("❌ 找不到此投票。", ephemeral=True)
+                return
+
+            poll_type = poll.get("type", "regular")
+            if poll_type == "borda":
+                result_text, summary = _format_borda_results(poll)
+            else:
+                result_text, summary = _format_regular_results(poll)
+
+            result_embed = discord.Embed(
+                title=f"📊 計票結果：{poll.get('title', '')}",
+                description=f"狀態：{'🟢 進行中' if poll.get('status')=='open' else '🔴 已結束'}",
+                color=discord.Color.gold(),
+            )
+            result_embed.add_field(name="結果", value=result_text[:1024], inline=False)
+            result_embed.add_field(name="統計", value=summary, inline=False)
+            _add_voter_breakdown_fields(result_embed, poll, max_fields=15)
+            result_embed.set_footer(text=f"ID: {poll_id}")
+
+            await select_ia.response.send_message(embed=result_embed, ephemeral=True)
+
+        select.callback = on_select
+        tally_view = discord.ui.View(timeout=120)
+        tally_view.add_item(select)
+        await interaction.response.send_message("選擇要查看結果的投票：", view=tally_view, ephemeral=True)
+
+    tally_btn.callback = tally_cb
+    view.add_item(tally_btn)
+
+    create_regular_btn = discord.ui.Button(label="📊 建立一般投票", style=discord.ButtonStyle.success, row=1)
+
+    async def create_regular_cb(interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
+            return
+        modal = _create_poll_modal(mode="regular")
+
+        async def on_submit(modal_ia: discord.Interaction):
+            await _handle_poll_create(modal_ia, "regular")
+
+        modal.on_submit = on_submit
+        await interaction.response.send_modal(modal)
+
+    create_regular_btn.callback = create_regular_cb
+    view.add_item(create_regular_btn)
+
+    create_borda_btn = discord.ui.Button(label="🗳️ 建立波達計數投票", style=discord.ButtonStyle.success, row=1)
+
+    async def create_borda_cb(interaction: discord.Interaction):
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
+            return
+        modal = _create_poll_modal(mode="borda")
+
+        async def on_submit(modal_ia: discord.Interaction):
+            await _handle_poll_create(modal_ia, "borda")
+
+        modal.on_submit = on_submit
+        await interaction.response.send_modal(modal)
+
+    create_borda_btn.callback = create_borda_cb
+    view.add_item(create_borda_btn)
+
     refresh_btn = discord.ui.Button(label="🔄 重新整理", style=discord.ButtonStyle.secondary, row=1)
 
     async def refresh_cb(interaction: discord.Interaction):
-        if not is_owner(interaction):
+        if not is_admin(interaction):
             await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
             return
         await interaction.response.edit_message(embed=_build_manage_embed(), view=_build_manage_view())
@@ -997,93 +1089,27 @@ def _build_manage_view():
 # ═════════════════════════════════════════════════════════════════
 
 class PollGroup(app_commands.Group):
+    """投票系統指令群組。
+
+    原本 create/borda/tally/close 分散成 4 個獨立指令，容易搞混、Discord 指令
+    列表也太長。整合成單一 /poll manage 面板（僅管理員能用）——建立一般投票、
+    建立波達計數投票、查看計票結果、結束投票、刪除投票全部收進面板按鈕/下拉
+    選單操作，不用再記一堆指令跟手動輸入投票 ID。
+    """
+
     def __init__(self):
         super().__init__(name="poll", description="投票系統")
 
-    @app_commands.command(name="create", description="建立一般投票（多選一）")
-    async def create_regular(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
-            return
-        modal = _create_poll_modal(mode="regular")
-
-        async def on_submit(modal_ia: discord.Interaction):
-            await _handle_poll_create(modal_ia, "regular")
-
-        modal.on_submit = on_submit
-        await interaction.response.send_modal(modal)
-
-    @app_commands.command(name="borda", description="建立波達計數投票（排序投票）")
-    async def create_borda(self, interaction: discord.Interaction):
-        if not is_admin(interaction):
-            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
-            return
-        modal = _create_poll_modal(mode="borda")
-
-        async def on_submit(modal_ia: discord.Interaction):
-            await _handle_poll_create(modal_ia, "borda")
-
-        modal.on_submit = on_submit
-        await interaction.response.send_modal(modal)
-
-    @app_commands.command(name="manage", description="投票管理面板（機器人擁有者專用）")
+    @app_commands.command(name="manage", description="投票管理面板：建立/查看/結束/刪除投票（管理員專用）")
     async def manage(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
+        if not is_admin(interaction):
+            await interaction.response.send_message("❌ 僅限管理員使用。", ephemeral=True)
             return
         await interaction.response.send_message(
             embed=_build_manage_embed(),
             view=_build_manage_view(),
             ephemeral=True,
         )
-
-    @app_commands.command(name="tally", description="手動計票（即時查看某投票的結果）")
-    @app_commands.describe(poll_id="投票 ID（可從 /poll manage 取得）")
-    async def tally(self, interaction: discord.Interaction, poll_id: str):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
-            return
-        poll = _find_poll(poll_id)
-        if not poll:
-            await interaction.response.send_message("❌ 找不到此投票 ID。", ephemeral=True)
-            return
-
-        poll_type = poll.get("type", "regular")
-        if poll_type == "borda":
-            result_text, summary = _format_borda_results(poll)
-        else:
-            result_text, summary = _format_regular_results(poll)
-
-        embed = discord.Embed(
-            title=f"📊 計票結果：{poll.get('title', '')}",
-            description=f"狀態：{'🟢 進行中' if poll.get('status')=='open' else '🔴 已結束'}",
-            color=discord.Color.gold(),
-        )
-        embed.add_field(name="結果", value=result_text[:1024], inline=False)
-        embed.add_field(name="統計", value=summary, inline=False)
-        _add_voter_breakdown_fields(embed, poll, max_fields=15)
-        embed.set_footer(text=f"ID: {poll_id}")
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="close", description="結束指定投票")
-    @app_commands.describe(poll_id="投票 ID")
-    async def close(self, interaction: discord.Interaction, poll_id: str):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
-            return
-        poll = _find_poll(poll_id)
-        if not poll:
-            await interaction.response.send_message("❌ 找不到此投票 ID。", ephemeral=True)
-            return
-        if poll.get("status") == "closed":
-            await interaction.response.send_message("⚠️ 此投票已經結束。", ephemeral=True)
-            return
-        poll["status"] = "closed"
-        poll["closed_at"] = now_str()
-        save_polls()
-        await _refresh_poll_message(poll)
-        await interaction.response.send_message(f"✅ 投票「{poll['title']}」已結束。", ephemeral=True)
 
 
 # ═════════════════════════════════════════════════════════════════
