@@ -1,6 +1,8 @@
 # 秘書長曠工計時器（Secretary Absence Timer）
-# /secretary manage — 管理面板（僅擁有者）
+# /secretary manage — 在公開頻道建立固定管理面板（僅擁有者可操作按鈕）
 # 追蹤指定秘書長的離線時長，上線時在指定頻道發布曠工紀錄。
+# 面板持久化：固定 custom_id + bot.add_view()，重啟後按鈕仍可用。
+# 面板每 60 秒自動刷新（秘書長離線時顯示即時離線時長）。
 #
 # ─── Shared globals injected by the main file ──────────────────────────────
 # bot, tree, save_json, load_json, is_owner, now_str, OWNER_ID, TZ_TAIPEI,
@@ -47,7 +49,9 @@ secretary_timer_settings = {
     "enabled": False,
     "log_channel_id": None,
     "secretary_id": None,
-    "offline_since": None,  # epoch float (time.time())
+    "offline_since": None,       # epoch float (time.time())
+    "panel_channel_id": None,    # 公開面板所在頻道
+    "panel_message_id": None,    # 公開面板訊息 ID
 }
 
 
@@ -129,7 +133,7 @@ def _build_status_embed():
     embed.add_field(
         name="紀錄頻道",
         value=f"<#{log_id}>" if log_id else "未設定",
-        inline=False,
+        inline=True,
     )
     # 即時狀態
     if secretary_timer_settings.get("enabled") and sec_id:
@@ -142,27 +146,130 @@ def _build_status_embed():
                     embed.add_field(
                         name="目前狀態",
                         value=f"🔴 離線中（已離線 {_format_duration(duration)}）",
-                        inline=False,
+                        inline=True,
                     )
                 else:
-                    embed.add_field(name="目前狀態", value="🔴 離線中", inline=False)
+                    embed.add_field(name="目前狀態", value="🔴 離線中", inline=True)
             else:
-                embed.add_field(name="目前狀態", value=f"🟢 上線中（{str(member.status)}）", inline=False)
+                status_emoji = {"online": "🟢", "idle": "🟡", "dnd": "🔴"}.get(str(member.status), "🟢")
+                embed.add_field(name="目前狀態", value=f"{status_emoji} 上線中（{str(member.status)}）", inline=True)
         else:
-            embed.add_field(name="目前狀態", value="⚠️ 找不到成員", inline=False)
-    embed.set_footer(text="ICEA 秘書長曠工計時器")
+            embed.add_field(name="目前狀態", value="⚠️ 找不到成員", inline=True)
+    else:
+        embed.add_field(name="目前狀態", value="—", inline=True)
+    embed.set_footer(text="ICEA 秘書長曠工計時器 • 僅擁有者可操作下方按鈕")
     return embed
 
 
 # ═════════════════════════════════════════════════════════════════
-# 管理面板
+# 面板刷新
+# ═════════════════════════════════════════════════════════════════
+
+async def _refresh_panel():
+    """更新公開面板的 embed（不動 view）。"""
+    panel_ch_id = secretary_timer_settings.get("panel_channel_id")
+    panel_msg_id = secretary_timer_settings.get("panel_message_id")
+    if not panel_ch_id or not panel_msg_id:
+        return
+    for guild in bot.guilds:
+        ch = guild.get_channel(int(panel_ch_id))
+        if ch:
+            try:
+                msg = await ch.fetch_message(int(panel_msg_id))
+                await msg.edit(embed=_build_status_embed())
+                return
+            except discord.NotFound:
+                print("⚠️ 秘書長面板訊息已不存在，清除紀錄")
+                secretary_timer_settings["panel_channel_id"] = None
+                secretary_timer_settings["panel_message_id"] = None
+                await _persist_settings()
+                return
+            except Exception as e:
+                print(f"⚠️ 面板更新失敗：{e}")
+                return
+
+
+async def _panel_refresh_loop():
+    """每 60 秒刷新面板（僅在秘書長離線時，顯示即時時長）。"""
+    await bot.wait_until_ready()
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if secretary_timer_settings.get("enabled") and secretary_timer_settings.get("offline_since"):
+                await _refresh_panel()
+        except Exception as e:
+            print(f"⚠️ 面板定時刷新失敗：{e}")
+
+
+# ═════════════════════════════════════════════════════════════════
+# 持久化管理面板（固定 custom_id，bot 啟動時 add_view 註冊）
+# ═════════════════════════════════════════════════════════════════
+
+class SecretaryManageView(discord.ui.View):
+    """持久化面板 View：timeout=None，固定 custom_id。"""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="啟用/停用",
+        style=discord.ButtonStyle.primary,
+        emoji="🔄",
+        custom_id="secretary_toggle_btn",
+    )
+    @_safe_callback
+    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者操作。", ephemeral=True)
+            return
+        secretary_timer_settings["enabled"] = not secretary_timer_settings.get("enabled", False)
+        if secretary_timer_settings["enabled"]:
+            member = _get_secretary_member()
+            if member and member.status == discord.Status.offline:
+                secretary_timer_settings["offline_since"] = time.time()
+            else:
+                secretary_timer_settings["offline_since"] = None
+        await _persist_settings()
+        status = "啟用" if secretary_timer_settings["enabled"] else "停用"
+        await interaction.response.edit_message(embed=_build_status_embed(), view=self)
+        await interaction.followup.send(f"✅ 秘書長計時器已{status}。", ephemeral=True)
+
+    @discord.ui.button(
+        label="紀錄頻道",
+        style=discord.ButtonStyle.secondary,
+        emoji="📋",
+        custom_id="secretary_channel_btn",
+    )
+    @_safe_callback
+    async def channel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者操作。", ephemeral=True)
+            return
+        view = SecretaryChannelSelectView()
+        await interaction.response.send_message("請選擇紀錄頻道：", view=view, ephemeral=True)
+
+    @discord.ui.button(
+        label="指定秘書長",
+        style=discord.ButtonStyle.secondary,
+        emoji="👤",
+        custom_id="secretary_user_btn",
+    )
+    @_safe_callback
+    async def secretary_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者操作。", ephemeral=True)
+            return
+        view = SecretaryUserSelectView()
+        await interaction.response.send_message("請選擇要追蹤的秘書長：", view=view, ephemeral=True)
+
+
+# ═════════════════════════════════════════════════════════════════
+# Ephemeral 選擇器（非持久化，從面板按鈕 ephemeral 發出）
 # ═════════════════════════════════════════════════════════════════
 
 class SecretaryUserSelectView(discord.ui.View):
-    """選擇秘書長的 UserSelect。"""
-    def __init__(self, parent_view):
+    def __init__(self):
         super().__init__(timeout=120)
-        self.parent_view = parent_view
 
     @discord.ui.select(
         cls=discord.ui.UserSelect,
@@ -189,31 +296,13 @@ class SecretaryUserSelectView(discord.ui.View):
         else:
             secretary_timer_settings["offline_since"] = None
         await _persist_settings()
-        await interaction.response.edit_message(
-            content=None,
-            embed=_build_status_embed(),
-            view=self.parent_view,
-        )
-        await interaction.followup.send(
-            f"✅ 已設定追蹤對象：{user.mention}",
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="返回", style=discord.ButtonStyle.secondary)
-    @_safe_callback
-    async def back_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content=None,
-            embed=_build_status_embed(),
-            view=self.parent_view,
-        )
+        await interaction.response.edit_message(content=f"✅ 已設定追蹤對象：{user.mention}", view=None)
+        await _refresh_panel()
 
 
 class SecretaryChannelSelectView(discord.ui.View):
-    """選擇紀錄頻道的 ChannelSelect。"""
-    def __init__(self, parent_view):
+    def __init__(self):
         super().__init__(timeout=120)
-        self.parent_view = parent_view
 
     @discord.ui.select(
         cls=discord.ui.ChannelSelect,
@@ -228,74 +317,8 @@ class SecretaryChannelSelectView(discord.ui.View):
         channel = select.values[0]
         secretary_timer_settings["log_channel_id"] = str(channel.id)
         await _persist_settings()
-        await interaction.response.edit_message(
-            content=None,
-            embed=_build_status_embed(),
-            view=self.parent_view,
-        )
-        await interaction.followup.send(
-            f"✅ 紀錄頻道已設定至 <#{channel.id}>。",
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="返回", style=discord.ButtonStyle.secondary)
-    @_safe_callback
-    async def back_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content=None,
-            embed=_build_status_embed(),
-            view=self.parent_view,
-        )
-
-
-class SecretaryManageView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=300)
-
-    @discord.ui.button(label="啟用/停用", style=discord.ButtonStyle.primary, emoji="🔄")
-    @_safe_callback
-    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
-            return
-        secretary_timer_settings["enabled"] = not secretary_timer_settings.get("enabled", False)
-        # 啟用時檢查目前狀態
-        if secretary_timer_settings["enabled"]:
-            member = _get_secretary_member()
-            if member and member.status == discord.Status.offline:
-                secretary_timer_settings["offline_since"] = time.time()
-            else:
-                secretary_timer_settings["offline_since"] = None
-        await _persist_settings()
-        status = "啟用" if secretary_timer_settings["enabled"] else "停用"
-        await interaction.response.edit_message(embed=_build_status_embed(), view=self)
-        await interaction.followup.send(f"✅ 秘書長計時器已{status}。", ephemeral=True)
-
-    @discord.ui.button(label="紀錄頻道", style=discord.ButtonStyle.secondary, emoji="📋")
-    @_safe_callback
-    async def channel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
-            return
-        view = SecretaryChannelSelectView(self)
-        await interaction.response.edit_message(
-            content="請選擇紀錄頻道：",
-            embed=None,
-            view=view,
-        )
-
-    @discord.ui.button(label="指定秘書長", style=discord.ButtonStyle.secondary, emoji="👤")
-    @_safe_callback
-    async def secretary_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
-            return
-        view = SecretaryUserSelectView(self)
-        await interaction.response.edit_message(
-            content="請選擇要追蹤的秘書長：",
-            embed=None,
-            view=view,
-        )
+        await interaction.response.edit_message(content=f"✅ 紀錄頻道已設定至 <#{channel.id}>。", view=None)
+        await _refresh_panel()
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -306,14 +329,43 @@ class SecretaryGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="secretary", description="⏱️ 秘書長曠工計時器")
 
-    @app_commands.command(name="manage", description="秘書長曠工計時器管理面板（僅擁有者）")
+    @app_commands.command(name="manage", description="在當前頻道建立/更新秘書長曠工計時器管理面板（僅擁有者）")
     async def manage(self, interaction: discord.Interaction):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
             return
+
+        # 刪除舊面板（如有）
+        old_ch_id = secretary_timer_settings.get("panel_channel_id")
+        old_msg_id = secretary_timer_settings.get("panel_message_id")
+        if old_ch_id and old_msg_id:
+            for guild in bot.guilds:
+                ch = guild.get_channel(int(old_ch_id))
+                if ch:
+                    try:
+                        old_msg = await ch.fetch_message(int(old_msg_id))
+                        await old_msg.delete()
+                    except Exception:
+                        pass
+                    break
+
+        # 發送公開面板
         view = SecretaryManageView()
         embed = _build_status_embed()
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(
+            content="⏱️ 秘書長曠工計時器面板已建立。",
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )
+        # 取得剛發的 ephemeral 訊息 → 不行，要在公開頻道發
+        # 改用 followup 在公開頻道發面板
+        panel_msg = await interaction.channel.send(embed=embed, view=view)
+
+        secretary_timer_settings["panel_channel_id"] = str(interaction.channel_id)
+        secretary_timer_settings["panel_message_id"] = str(panel_msg.id)
+        await _persist_settings()
+        print(f"⏱️ 秘書長面板已建立：{interaction.channel_id}/{panel_msg.id}")
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -331,7 +383,6 @@ async def handle_member_update(before: discord.Member, after: discord.Member):
     before_offline = before.status == discord.Status.offline
     after_offline = after.status == discord.Status.offline
 
-    # 狀態沒變就不處理
     if before_offline == after_offline:
         return
 
@@ -339,6 +390,7 @@ async def handle_member_update(before: discord.Member, after: discord.Member):
         # ── 秘書長離線 ──
         secretary_timer_settings["offline_since"] = time.time()
         await _persist_settings()
+        await _refresh_panel()
         print(f"⏱️ 秘書長 {after.display_name} ({after.id}) 已離線於 {now_str()}")
 
     elif not after_offline and before_offline:
@@ -346,15 +398,14 @@ async def handle_member_update(before: discord.Member, after: discord.Member):
         since = secretary_timer_settings.get("offline_since")
         secretary_timer_settings["offline_since"] = None
         await _persist_settings()
+        await _refresh_panel()
 
         if not since:
-            # 沒有離線紀錄（可能 bot 重啟前就離線了），只記上線事件
             print(f"⏱️ 秘書長 {after.display_name} 上線，但無離線紀錄可計時")
             return
 
         duration = time.time() - since
 
-        # 發送曠工紀錄到 log 頻道
         log_id = secretary_timer_settings.get("log_channel_id")
         if not log_id:
             print("⚠️ 秘書長計時器未設定 log 頻道")
@@ -371,30 +422,14 @@ async def handle_member_update(before: discord.Member, after: discord.Member):
             print(f"⚠️ 秘書長計時器 log 頻道 {log_id} 找不到")
             return
 
-        embed = discord.Embed(
-            title="⏱️ 秘書長曠工紀錄",
-            color=discord.Color.orange(),
-        )
+        embed = discord.Embed(title="⏱️ 秘書長曠工紀錄", color=discord.Color.orange())
         embed.add_field(
             name="秘書長",
             value=f"{after.mention}\n`{after.display_name}` (`{after.id}`)",
             inline=False,
         )
-        embed.add_field(
-            name="離線時長",
-            value=_format_duration(duration),
-            inline=False,
-        )
-        embed.add_field(
-            name="離線時間",
-            value=now_str(),
-            inline=True,
-        )
-        embed.add_field(
-            name="上線時間",
-            value=now_str(),
-            inline=True,
-        )
+        embed.add_field(name="離線時長", value=_format_duration(duration), inline=False)
+        embed.add_field(name="上線時間", value=now_str(), inline=True)
         embed.set_footer(text="ICEA 秘書長曠工計時器")
 
         try:
@@ -409,5 +444,17 @@ async def handle_member_update(before: discord.Member, after: discord.Member):
 # ═════════════════════════════════════════════════════════════════
 
 load_secretary_timer_settings()
+
+# 註冊持久化管理面板（重啟後舊面板按鈕仍可用）
+bot.add_view(SecretaryManageView())
+
+# 啟動後刷新面板 + 定時刷新迴圈
+async def _secretary_ready_hook():
+    await bot.wait_until_ready()
+    await asyncio.sleep(5)
+    await _refresh_panel()
+
+_bot_ready_hooks.append(_secretary_ready_hook)
+_bot_ready_hooks.append(_panel_refresh_loop)
 
 SecretaryGroup_instance = SecretaryGroup()
