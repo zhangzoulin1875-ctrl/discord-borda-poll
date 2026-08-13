@@ -238,6 +238,72 @@ def _format_regular_results(poll):
     return "\n".join(lines), f"📊 總投票數：{total}"
 
 
+def _format_voter_breakdown(poll):
+    """回傳逐一投票者的投票內容（每個人投了什麼），供結果面板顯示明細用。"""
+    poll_type = poll.get("type", "regular")
+    votes = poll.get("votes", [])
+    if not votes:
+        return []
+
+    lines = []
+    if poll_type == "borda":
+        candidates = poll.get("candidates", [])
+        n = len(candidates)
+        code_to_name = {c.get("code"): c.get("name", "") for c in candidates}
+        for v in votes:
+            name = v.get("user_name", "未知")
+            ranking = v.get("ranking", [])
+            if n > 0 and len(ranking) == n:
+                parts = []
+                for code in ranking:
+                    cname = code_to_name.get(code, code)
+                    parts.append(code if not cname or cname == code else f"{code}（{cname}）")
+                lines.append(f"• **{name}**：{' > '.join(parts)}")
+            else:
+                lines.append(f"• **{name}**：❌ 廢票（格式不完整）")
+    else:
+        for v in votes:
+            name = v.get("user_name", "未知")
+            choice = v.get("choice", "未知")
+            lines.append(f"• **{name}**：{choice}")
+    return lines
+
+
+def _chunk_lines_for_fields(lines, max_len=1000):
+    """把一串文字行切成多個 <=max_len 的區塊，供多個 embed field 分頁顯示。"""
+    chunks = []
+    current = ""
+    for line in lines:
+        candidate = (current + "\n" + line) if current else line
+        if len(candidate) > max_len and current:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _add_voter_breakdown_fields(embed, poll, max_fields=8):
+    """在結果 embed 上附加「誰投了什麼」的明細欄位（自動分頁，避免超過單欄字數限制）。"""
+    lines = _format_voter_breakdown(poll)
+    if not lines:
+        return
+    chunks = _chunk_lines_for_fields(lines)
+    total = len(chunks)
+    if total > max_fields:
+        # 太多人時，只顯示前 max_fields 頁，其餘用文字提示
+        shown = chunks[:max_fields]
+        remaining_people = sum(len(c.split("\n")) for c in chunks[max_fields:])
+        shown[-1] += f"\n…以及其他 {remaining_people} 人（請用 /poll tally 查看完整明細）"
+        chunks = shown
+        total = len(chunks)
+    for i, chunk in enumerate(chunks):
+        field_name = "🧾 投票明細" if total == 1 else f"🧾 投票明細（{i+1}/{total}）"
+        embed.add_field(name=field_name, value=chunk[:1024], inline=False)
+
+
 # ═════════════════════════════════════════════════════════════════
 # Embed 建構
 # ═════════════════════════════════════════════════════════════════
@@ -484,6 +550,7 @@ class PollVoteView(discord.ui.View):
         )
         embed.add_field(name="結果", value=result_text[:1024], inline=False)
         embed.add_field(name="統計", value=summary, inline=False)
+        _add_voter_breakdown_fields(embed, poll)
         embed.set_footer(text=f"ID: {poll.get('id', '')}")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -997,6 +1064,7 @@ class PollGroup(app_commands.Group):
         )
         embed.add_field(name="結果", value=result_text[:1024], inline=False)
         embed.add_field(name="統計", value=summary, inline=False)
+        _add_voter_breakdown_fields(embed, poll, max_fields=15)
         embed.set_footer(text=f"ID: {poll_id}")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
