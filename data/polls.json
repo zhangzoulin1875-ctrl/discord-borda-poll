@@ -1,0 +1,51 @@
+{
+  "entries": [
+    {
+      "id": "b15edb22246d",
+      "type": "borda",
+      "title": "測試用",
+      "description": "測試投票系統，你各位幫忙投票測試",
+      "status": "open",
+      "author_id": "1482256878334640209",
+      "author_name": "張作霖/副秘書長",
+      "channel_id": "1425422745151209663",
+      "created_at": "2026-08-13 11:24:37",
+      "deadline": "2026-08-13 12:00",
+      "allow_revote": false,
+      "votes": [],
+      "candidates": [
+        {
+          "code": "A",
+          "name": "A",
+          "description": ""
+        },
+        {
+          "code": "B",
+          "name": "B",
+          "description": ""
+        },
+        {
+          "code": "C",
+          "name": "C",
+          "description": ""
+        },
+        {
+          "code": "D",
+          "name": "D",
+          "description": ""
+        },
+        {
+          "code": "E",
+          "name": "E",
+          "description": ""
+        },
+        {
+          "code": "F",
+          "name": "F",
+          "description": ""
+        }
+      ],
+      "message_id": "1537300822684340315"
+    }
+  ]
+}
