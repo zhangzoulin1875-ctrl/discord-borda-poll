@@ -371,6 +371,14 @@ async def on_message(message: discord.Message):
         except Exception as e:
             print(f"⚠️ handle_application_message 錯誤：{e}")
 
+    # ── 投票回覆偵測 ──
+    handler = _bot_globals.get("handle_poll_message")
+    if handler:
+        try:
+            await handler(message)
+        except Exception as e:
+            print(f"⚠️ handle_poll_message 錯誤：{e}")
+
 
 @bot.event
 async def on_message_edit(before: discord.Message, after: discord.Message):
