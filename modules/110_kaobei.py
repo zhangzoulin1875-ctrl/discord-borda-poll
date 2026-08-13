@@ -426,11 +426,10 @@ class PostGroup(app_commands.Group):
         thread_name = f"#{post_number} {title}"[:100]
 
         try:
-            result = await forum_channel.create_thread(
-                name=thread_name,
-                content=content,
-                files=files if files else None,
-            )
+            create_kwargs = {"name": thread_name, "content": content}
+            if files:
+                create_kwargs["files"] = files
+            result = await forum_channel.create_thread(**create_kwargs)
         except discord.Forbidden:
             await interaction.followup.send(
                 "❌ 建立貼文失敗：機器人缺少「管理頻道」或「發送訊息」權限。",
