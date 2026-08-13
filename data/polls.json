@@ -5,7 +5,7 @@
       "type": "borda",
       "title": "測試用",
       "description": "測試投票系統，你各位幫忙投票測試",
-      "status": "open",
+      "status": "closed",
       "author_id": "1482256878334640209",
       "author_name": "張作霖/副秘書長",
       "channel_id": "1425422745151209663",
@@ -59,7 +59,8 @@
           "description": ""
         }
       ],
-      "message_id": "1537300822684340315"
+      "message_id": "1537300822684340315",
+      "closed_at": "2026-08-13 14:11:04"
     },
     {
       "type": "regular",
