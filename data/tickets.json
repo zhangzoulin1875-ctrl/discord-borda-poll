@@ -30,6 +30,22 @@
       "created_at": "2026-08-13 13:26:13",
       "closed_at": null,
       "closed_by": null
+    },
+    {
+      "id": "tk_recovered_1537331580597567509",
+      "number": 3,
+      "guild_id": "1425065927027720286",
+      "channel_id": "1537331580597567509",
+      "opener_id": "0",
+      "opener_name": "未知使用者",
+      "subject": "a",
+      "content": "（原始記錄遺失，已從頻道資訊自動重建）",
+      "note": "",
+      "status": "open",
+      "created_at": "2026-08-13 13:34:15",
+      "closed_at": null,
+      "closed_by": null,
+      "recovered": true
     }
   ]
 }
