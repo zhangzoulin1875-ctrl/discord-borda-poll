@@ -6,3 +6,7 @@ data/*.json
 blobs/
 incoming_files/
 .agents/
+.agents/.env
+node_modules/
+.npm/
+.cache/
