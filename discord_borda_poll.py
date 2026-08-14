@@ -453,73 +453,160 @@ async def on_error(event_name: str, *args, **kwargs):
 
 
 # ─── Bot Status Command ─────────────────────────────────────────────────────
-class BotStatusGroup(app_commands.Group):
-    def __init__(self):
-        super().__init__(name="botstatus", description="🤖 機器人狀態設定（僅擁有者）")
 
-    @app_commands.command(name="set", description="設定機器人活動狀態")
-    @app_commands.choices(activity_type=[
-        app_commands.Choice(name="🎮 正在遊玩", value="playing"),
-        app_commands.Choice(name="👀 正在觀看", value="watching"),
-        app_commands.Choice(name="🎧 正在聆聽", value="listening"),
-        app_commands.Choice(name="🏆 正在競爭", value="competing"),
-    ])
-    async def set_status(
-        self,
-        interaction: discord.Interaction,
-        text: str,
-        activity_type: app_commands.Choice[str] | None = None,
-    ):
+_ACTIVITY_TYPES = {
+    "playing": discord.ActivityType.playing,
+    "watching": discord.ActivityType.watching,
+    "listening": discord.ActivityType.listening,
+    "competing": discord.ActivityType.competing,
+}
+
+_ACTIVITY_LABELS = {
+    "playing": "🎮 正在遊玩",
+    "watching": "👀 正在觀看",
+    "listening": "🎧 正在聆聽",
+    "competing": "🏆 正在競爭",
+}
+
+
+def _build_botstatus_embed():
+    status_data = load_json("bot_status.json", {})
+    activity = status_data.get("activity")
+    atype = status_data.get("type", "playing")
+    embed = discord.Embed(title="🤖 機器人狀態設定", color=discord.Color.blurple())
+    if activity:
+        embed.add_field(
+            name="目前狀態",
+            value=f"{_ACTIVITY_LABELS.get(atype, '🎮 正在遊玩')} **{activity}**",
+            inline=False,
+        )
+    else:
+        embed.add_field(name="目前狀態", value="（未設定）", inline=False)
+    embed.add_field(
+        name="操作說明",
+        value="📝 設定狀態 → 輸入文字\n下拉選單 → 切換類型\n🗑️ → 清除狀態",
+        inline=False,
+    )
+    embed.set_footer(text="僅限機器人擁有者操作")
+    return embed
+
+
+async def _apply_botstatus(text, atype_str):
+    """Apply the bot status and persist to JSON + GitHub."""
+    atype = _ACTIVITY_TYPES.get(atype_str, discord.ActivityType.playing)
+    if text:
+        await bot.change_presence(activity=discord.Activity(type=atype, name=text))
+        save_json("bot_status.json", {"activity": text, "type": atype_str})
+        await github_push_json("bot_status.json", {"activity": text, "type": atype_str})
+    else:
+        await bot.change_presence(activity=None)
+        save_json("bot_status.json", {"activity": None, "type": None})
+        await github_push_json("bot_status.json", {"activity": None, "type": None})
+
+
+class BotStatusModal(discord.ui.Modal, title="📝 設定機器人狀態文字"):
+    def __init__(self, parent_view):
+        super().__init__(timeout=120)
+        self.parent_view = parent_view
+
+    status_text = discord.ui.TextInput(
+        label="狀態文字",
+        placeholder="輸入要顯示的文字，例如：ICEA 投票與行政系統",
+        max_length=128,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
             return
-        atype_str = activity_type.value if activity_type else "playing"
-        types = {
-            "playing": discord.ActivityType.playing,
-            "watching": discord.ActivityType.watching,
-            "listening": discord.ActivityType.listening,
-            "competing": discord.ActivityType.competing,
-        }
-        atype = types.get(atype_str, discord.ActivityType.playing)
+        text = self.status_text.value
+        atype_str = self.parent_view.selected_type
         try:
-            await bot.change_presence(activity=discord.Activity(type=atype, name=text))
-            save_json("bot_status.json", {"activity": text, "type": atype_str})
-            await github_push_json("bot_status.json", {"activity": text, "type": atype_str})
-            label = {"playing": "正在遊玩", "watching": "正在觀看", "listening": "正在聆聽", "competing": "正在競爭"}
-            await interaction.response.send_message(
-                f"✅ 狀態已更新：{label.get(atype_str, '正在遊玩')} **{text}**",
-                ephemeral=True,
+            await _apply_botstatus(text, atype_str)
+            await interaction.response.edit_message(
+                content=f"✅ 狀態已更新：{_ACTIVITY_LABELS.get(atype_str, '正在遊玩')} **{text}**",
+                embed=_build_botstatus_embed(),
+                view=self.parent_view,
             )
         except Exception as e:
             await interaction.response.send_message(f"❌ 設定失敗：`{e}`", ephemeral=True)
 
-    @app_commands.command(name="clear", description="清除機器人活動狀態")
-    async def clear_status(self, interaction: discord.Interaction):
+
+class BotStatusManageView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        status_data = load_json("bot_status.json", {})
+        self.selected_type = status_data.get("type", "playing")
+
+    @discord.ui.select(
+        cls=discord.ui.Select,
+        placeholder="選擇活動類型...",
+        options=[
+            discord.SelectOption(label="🎮 正在遊玩", value="playing"),
+            discord.SelectOption(label="👀 正在觀看", value="watching"),
+            discord.SelectOption(label="🎧 正在聆聽", value="listening"),
+            discord.SelectOption(label="🏆 正在競爭", value="competing"),
+        ],
+    )
+    async def type_select(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
+            return
+        self.selected_type = select.values[0]
+        # If there's a current status text, update with the new type immediately
+        status_data = load_json("bot_status.json", {})
+        current_text = status_data.get("activity")
+        if current_text:
+            try:
+                await _apply_botstatus(current_text, self.selected_type)
+            except Exception as e:
+                print(f"⚠️ 切換類型失敗：{e}")
+        await interaction.response.edit_message(embed=_build_botstatus_embed(), view=self)
+
+    @discord.ui.button(label="設定狀態文字", style=discord.ButtonStyle.primary, emoji="📝")
+    async def set_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
+            return
+        modal = BotStatusModal(self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="清除狀態", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def clear_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
             return
         try:
-            await bot.change_presence(activity=None)
-            save_json("bot_status.json", {"activity": None, "type": None})
-            await github_push_json("bot_status.json", {"activity": None, "type": None})
-            await interaction.response.send_message("✅ 已清除機器人狀態。", ephemeral=True)
+            await _apply_botstatus(None, None)
+            await interaction.response.edit_message(
+                content="✅ 已清除機器人狀態。",
+                embed=_build_botstatus_embed(),
+                view=self,
+            )
         except Exception as e:
             await interaction.response.send_message(f"❌ 清除失敗：`{e}`", ephemeral=True)
 
-    @app_commands.command(name="show", description="顯示目前機器人狀態")
-    async def show_status(self, interaction: discord.Interaction):
+    @discord.ui.button(label="刷新", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
             return
-        status_data = load_json("bot_status.json", {})
-        activity = status_data.get("activity", "ICEA 投票與行政系統")
-        atype = status_data.get("type", "playing")
-        label = {"playing": "🎮 正在遊玩", "watching": "👀 正在觀看", "listening": "🎧 正在聆聽", "competing": "🏆 正在競爭"}
-        display = label.get(atype, "🎮 正在遊玩")
-        await interaction.response.send_message(
-            f"目前狀態：{display} **{activity}**",
-            ephemeral=True,
-        )
+        await interaction.response.edit_message(embed=_build_botstatus_embed(), view=self)
+
+
+class BotStatusGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="botstatus", description="🤖 機器人狀態設定（僅擁有者）")
+
+    @app_commands.command(name="manage", description="開啟機器人狀態管理面板")
+    async def manage(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者使用。", ephemeral=True)
+            return
+        view = BotStatusManageView()
+        embed = _build_botstatus_embed()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 BotStatusGroup_instance = BotStatusGroup()
