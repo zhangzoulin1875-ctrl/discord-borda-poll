@@ -64,6 +64,7 @@ _PERSIST_FILES = {
     "tasks.json",
     "kaobei_settings.json",
     "secretary_timer_settings.json",
+    "bot_status.json",
 }
 
 # ─── Bot Instance ──────────────────────────────────────────────────────────
@@ -335,11 +336,15 @@ async def on_ready():
     except Exception as e:
         print(f"⚠️ 指令同步失敗：{e}")
 
-    # Set bot activity status ("Playing XXX")
+    # Set bot activity status (from persisted settings or default)
     try:
-        activity_name = os.getenv("BOT_ACTIVITY", "ICEA 投票與行政系統")
-        await bot.change_presence(activity=discord.Game(name=activity_name))
-        print(f"🎮 狀態已設定：正在遊玩 {activity_name}")
+        status_data = load_json("bot_status.json", {})
+        activity_name = status_data.get("activity", "ICEA 投票與行政系統")
+        activity_type = status_data.get("type", "playing")
+        types = {"playing": discord.ActivityType.playing, "watching": discord.ActivityType.watching, "listening": discord.ActivityType.listening, "competing": discord.ActivityType.competing}
+        atype = types.get(activity_type, discord.ActivityType.playing)
+        await bot.change_presence(activity=discord.Activity(type=atype, name=activity_name))
+        print(f"🎮 狀態已設定：{activity_name} (type={activity_type})")
     except Exception as e:
         print(f"⚠️ 狀態設定失敗：{e}")
 
@@ -445,6 +450,79 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 async def on_error(event_name: str, *args, **kwargs):
     print(f"⚠️ 事件 '{event_name}' 發生例外：")
     traceback.print_exc()
+
+
+# ─── Bot Status Command ─────────────────────────────────────────────────────
+class BotStatusGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="botstatus", description="🤖 機器人狀態設定（僅擁有者）")
+
+    @app_commands.command(name="set", description="設定機器人活動狀態")
+    @app_commands.choices(activity_type=[
+        app_commands.Choice(name="🎮 正在遊玩", value="playing"),
+        app_commands.Choice(name="👀 正在觀看", value="watching"),
+        app_commands.Choice(name="🎧 正在聆聽", value="listening"),
+        app_commands.Choice(name="🏆 正在競爭", value="competing"),
+    ])
+    async def set_status(
+        self,
+        interaction: discord.Interaction,
+        text: str,
+        activity_type: app_commands.Choice[str] | None = None,
+    ):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
+            return
+        atype_str = activity_type.value if activity_type else "playing"
+        types = {
+            "playing": discord.ActivityType.playing,
+            "watching": discord.ActivityType.watching,
+            "listening": discord.ActivityType.listening,
+            "competing": discord.ActivityType.competing,
+        }
+        atype = types.get(atype_str, discord.ActivityType.playing)
+        try:
+            await bot.change_presence(activity=discord.Activity(type=atype, name=text))
+            save_json("bot_status.json", {"activity": text, "type": atype_str})
+            await github_push_json("bot_status.json", {"activity": text, "type": atype_str})
+            label = {"playing": "正在遊玩", "watching": "正在觀看", "listening": "正在聆聽", "competing": "正在競爭"}
+            await interaction.response.send_message(
+                f"✅ 狀態已更新：{label.get(atype_str, '正在遊玩')} **{text}**",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 設定失敗：`{e}`", ephemeral=True)
+
+    @app_commands.command(name="clear", description="清除機器人活動狀態")
+    async def clear_status(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
+            return
+        try:
+            await bot.change_presence(activity=None)
+            save_json("bot_status.json", {"activity": None, "type": None})
+            await github_push_json("bot_status.json", {"activity": None, "type": None})
+            await interaction.response.send_message("✅ 已清除機器人狀態。", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ 清除失敗：`{e}`", ephemeral=True)
+
+    @app_commands.command(name="show", description="顯示目前機器人狀態")
+    async def show_status(self, interaction: discord.Interaction):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
+            return
+        status_data = load_json("bot_status.json", {})
+        activity = status_data.get("activity", "ICEA 投票與行政系統")
+        atype = status_data.get("type", "playing")
+        label = {"playing": "🎮 正在遊玩", "watching": "👀 正在觀看", "listening": "🎧 正在聆聽", "competing": "🏆 正在競爭"}
+        display = label.get(atype, "🎮 正在遊玩")
+        await interaction.response.send_message(
+            f"目前狀態：{display} **{activity}**",
+            ephemeral=True,
+        )
+
+
+BotStatusGroup_instance = BotStatusGroup()
 
 
 # ─── Main Entry ──────────────────────────────────────────────────────────────
