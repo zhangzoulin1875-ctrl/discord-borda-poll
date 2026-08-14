@@ -642,6 +642,10 @@ async def main():
     # Load feature modules
     load_modules()
 
+    # Register main-file commands (defined outside module namespace)
+    if "BotStatusGroup_instance" not in _bot_globals:
+        _bot_globals["BotStatusGroup_instance"] = BotStatusGroup_instance
+
     # Register any command groups or standalone commands that modules created
     for name, obj in list(_bot_globals.items()):
         if isinstance(obj, app_commands.Group):
