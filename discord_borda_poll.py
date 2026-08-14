@@ -335,6 +335,14 @@ async def on_ready():
     except Exception as e:
         print(f"⚠️ 指令同步失敗：{e}")
 
+    # Set bot activity status ("Playing XXX")
+    try:
+        activity_name = os.getenv("BOT_ACTIVITY", "ICEA 投票與行政系統")
+        await bot.change_presence(activity=discord.Game(name=activity_name))
+        print(f"🎮 狀態已設定：正在遊玩 {activity_name}")
+    except Exception as e:
+        print(f"⚠️ 狀態設定失敗：{e}")
+
     # Set nickname to ICEA official
     for guild in bot.guilds:
         try:
