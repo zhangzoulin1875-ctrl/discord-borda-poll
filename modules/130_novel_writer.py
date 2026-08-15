@@ -268,7 +268,7 @@ def _check_auth(request):
 
 async def _handle_page(request):
     """提供 novel.html 頁面。"""
-    html_path = Path(__file__).parent.parent / "novel.html"
+    html_path = DATA_DIR.parent / "novel.html"
     if not html_path.exists():
         return web.Response(text="novel.html 不存在", status=404)
     return web.FileResponse(html_path)
