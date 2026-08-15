@@ -299,6 +299,7 @@ def load_modules():
         try:
             with open(mod_file, "r", encoding="utf-8") as f:
                 code = f.read()
+            _bot_globals["__file__"] = str(mod_file)
             exec(compile(code, str(mod_file), "exec"), _bot_globals)
             print(f"✅ 已載入模組：{mod_file.name}")
         except Exception as e:
