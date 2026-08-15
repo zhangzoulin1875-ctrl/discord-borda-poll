@@ -70,6 +70,14 @@
         "relationship_type": "上司下屬",
         "description": "",
         "direction": "mutual"
+      },
+      {
+        "id": "c7e5bf6b-22c6-4e0b-b0f9-6afc484a00fe",
+        "character_a": "124503de-0c8b-4d43-a25f-e9594a3ab944",
+        "character_b": "3245585c-9685-4f54-90eb-f9a65614e418",
+        "relationship_type": "敵人",
+        "description": "",
+        "direction": "mutual"
       }
     ],
     "outline": [],
@@ -80,6 +88,6 @@
     },
     "chapters": [],
     "created_at": "2026-08-15 16:04:40",
-    "updated_at": "2026-08-15 16:15:25"
+    "updated_at": "2026-08-15 16:23:08"
   }
 ]
