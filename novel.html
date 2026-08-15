@@ -277,6 +277,10 @@ th{color:var(--accent)}
 <button onclick="saveOutline()" id="btn-save-outline">儲存大綱</button>
 <button onclick="confirmOutline()" id="btn-confirm-outline">✅ 確認大綱並開始生成</button>
 </div>
+<div id="gen-outline-progress" style="display:none;margin-bottom:10px">
+<div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>
+<p class="progress-text muted" style="margin-top:4px">準備中...</p>
+</div>
 <div id="outline-editor"></div>
 </div>
 
@@ -676,13 +680,53 @@ function updateOutlineField(idx,field,val){
 async function generateOutline(){
   const btn=document.getElementById('btn-gen-outline');
   btn.disabled=true;btn.textContent='生成中...';
+  const prog=document.getElementById('gen-outline-progress');
+  const progBar=prog.querySelector('.progress-fill');
+  const progText=prog.querySelector('.progress-text');
+  prog.style.display='block';
+  progBar.style.width='10%';
+  progText.textContent='準備中...';
   try{
-    const r=await api(`/api/novel/projects/${currentProject.id}/generate-outline`,'POST');
-    if(r.error){toast(r.error);return}
-    currentProject.outline=r.outline;
-    renderOutline();
-    toast('✅ 大綱已生成');
-  }catch(e){toast('生成失敗：'+e.message)}
+    const resp=await fetch(`/api/novel/projects/${currentProject.id}/generate-outline-sse`,{
+      method:'POST',
+      headers:{'X-Auth':AUTH_TOKEN,'Content-Type':'application/json'},
+    });
+    const reader=resp.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buffer+=decoder.decode(value,{stream:true});
+      const events=buffer.split('\n\n');
+      buffer=events.pop();
+      for(const evt of events){
+        const lines=evt.split('\n');
+        let etype='',edata='';
+        for(const ln of lines){
+          if(ln.startsWith('event: '))etype=ln.slice(7);
+          if(ln.startsWith('data: '))edata=ln.slice(6);
+        }
+        if(!etype)continue;
+        const data=JSON.parse(edata);
+        if(etype==='progress'){
+          const pctMap={'building_prompt':20,'calling_ai':50,'parsing':80,'saving':90};
+          progBar.style.width=(pctMap[data.stage]||85)+'%';
+          progText.textContent=data.message;
+        }else if(etype==='done'){
+          progBar.style.width='100%';
+          progText.textContent='完成！';
+          currentProject.outline=data.outline;
+          renderOutline();
+          toast(`✅ 大綱已生成（${data.count} 章）`);
+          setTimeout(()=>prog.style.display='none',1500);
+        }else if(etype==='error'){
+          toast(data.error);
+          prog.style.display='none';
+        }
+      }
+    }
+  }catch(e){toast('生成失敗：'+e.message);prog.style.display='none'}
   finally{btn.disabled=false;btn.textContent='🤖 AI 生成大綱'}
 }
 async function saveOutline(){
@@ -719,18 +763,53 @@ function renderChapters(){
       </div>
     </div>`).join('');
 }
-async function generateChapter(num,btn){
+async function generateChapter(num,btn,progressCb){
   if(btn){btn.disabled=true;btn.textContent='生成中...'}
   try{
-    const r=await api(`/api/novel/projects/${currentProject.id}/generate-chapter`,'POST',{chapter:num});
-    if(r.error){toast(r.error);return}
-    const idx=currentProject.chapters.findIndex(c=>c.chapter===r.chapter);
-    if(idx>=0)currentProject.chapters[idx]=r;
-    else{currentProject.chapters.push(r);currentProject.chapters.sort((a,b)=>a.chapter-b.chapter)}
-    renderChapters();
-    updateProgress();
-    toast(`✅ 第 ${r.chapter} 章已生成（${r.word_count} 字）`);
-    return r;
+    const resp=await fetch(`/api/novel/projects/${currentProject.id}/generate-chapter-sse`,{
+      method:'POST',
+      headers:{'X-Auth':AUTH_TOKEN,'Content-Type':'application/json'},
+      body:JSON.stringify({chapter:num}),
+    });
+    const reader=resp.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    let result=null;
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      buffer+=decoder.decode(value,{stream:true});
+      const events=buffer.split('\n\n');
+      buffer=events.pop();
+      for(const evt of events){
+        const lines=evt.split('\n');
+        let etype='',edata='';
+        for(const ln of lines){
+          if(ln.startsWith('event: '))etype=ln.slice(7);
+          if(ln.startsWith('data: '))edata=ln.slice(6);
+        }
+        if(!etype)continue;
+        const data=JSON.parse(edata);
+        if(etype==='progress'){
+          if(progressCb)progressCb(data);
+          else if(btn)btn.textContent=data.message;
+        }else if(etype==='done'){
+          result=data.chapter;
+        }else if(etype==='error'){
+          toast(data.error);
+          return null;
+        }
+      }
+    }
+    if(result){
+      const idx=currentProject.chapters.findIndex(c=>c.chapter===result.chapter);
+      if(idx>=0)currentProject.chapters[idx]=result;
+      else{currentProject.chapters.push(result);currentProject.chapters.sort((a,b)=>a.chapter-b.chapter)}
+      renderChapters();
+      updateProgress();
+      toast(`✅ 第 ${result.chapter} 章已生成（${result.word_count} 字）`);
+    }
+    return result;
   }catch(e){toast('生成失敗：'+e.message);return null}
   finally{if(btn){btn.disabled=false;btn.textContent='🔄 重新生成'}}
 }
@@ -746,16 +825,20 @@ async function generateAllChapters(){
   if(!toGen.length){toast('所有章節已生成');return}
   const btn=document.getElementById('btn-gen-all');
   btn.disabled=true;
-  document.getElementById('gen-status').textContent=`正在生成第 ${toGen[0]} 章...`;
   for(let i=0;i<toGen.length;i++){
     const ch=toGen[i];
+    const pct=Math.round(i/toGen.length*100);
     document.getElementById('gen-status').textContent=`正在生成第 ${ch} 章（${i+1}/${toGen.length}）...`;
-    const r=await generateChapter(ch,null);
+    updateProgress(pct);
+    const r=await generateChapter(ch,null,(data)=>{
+      const subPct=Math.round((i+(data.stage==='building_prompt'?0.2:data.stage==='calling_ai'?0.5:data.stage==='summarizing'?0.8:0.9))/toGen.length*100);
+      updateProgress(subPct);
+      document.getElementById('gen-status').textContent=`第 ${ch} 章：${data.message}`;
+    });
     if(!r){toast(`第 ${ch} 章生成失敗，已停止`);break}
-    updateProgress((i+1)/toGen.length*100);
   }
   btn.disabled=false;btn.textContent='生成全部章節';
-  document.getElementById('gen-status').textContent='生成完成';
+  document.getElementById('gen-status').textContent='生成完成！';
   updateProgress(100);
 }
 function updateProgress(pct){

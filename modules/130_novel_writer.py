@@ -613,6 +613,76 @@ async def _handle_project_rels_delete(request):
 
 # ─── AI 生成 ─────────────────────────────────────────────────────
 
+def _parse_outline_response(raw):
+    """從 AI 回應中穩健地解析大綱。支援 JSON、markdown code block、純文字。"""
+    import re
+
+    # 嘗試 1: markdown code block
+    code_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw)
+    json_text = None
+    if code_match:
+        json_text = code_match.group(1).strip()
+    else:
+        # 嘗試 2: 找 JSON 陣列或物件（先試陣列，因為物件 regex 會吃到陣列內的 {}）
+        arr_match = re.search(r'\[[\s\S]*\]', raw)
+        obj_match = re.search(r'\{[\s\S]*\}', raw)
+        for match in [arr_match, obj_match]:
+            if match:
+                try:
+                    data = json.loads(match.group())
+                    if isinstance(data, list):
+                        json_text = match.group()
+                        break
+                    elif isinstance(data, dict):
+                        for key in ["outline", "chapters", "大綱", "result", "data"]:
+                            if key in data and isinstance(data[key], list):
+                                json_text = match.group()
+                                break
+                        if json_text:
+                            break
+                except json.JSONDecodeError:
+                    continue
+
+    if json_text:
+        try:
+            data = json.loads(json_text)
+            if isinstance(data, dict):
+                for key in ["outline", "chapters", "大綱", "result", "data"]:
+                    if key in data and isinstance(data[key], list):
+                        return data[key]
+                list_vals = [v for v in data.values() if isinstance(v, list)]
+                if len(list_vals) == 1:
+                    return list_vals[0]
+            elif isinstance(data, list):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    # 嘗試 3: 純文字解析（修復：最後一章也要 append）
+    outline = []
+    lines = raw.strip().split("\n")
+    current = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (stripped.startswith("第") and "章" in stripped) or re.match(r'^Chapter\s+\d+', stripped, re.I) or re.match(r'^\d+[\.、\)]\s*\S', stripped):
+            if current:
+                outline.append(current)
+            current = {"title": stripped, "summary": "", "characters": [], "mood": ""}
+        elif current and not current["summary"]:
+            current["summary"] = stripped
+    if current:
+        outline.append(current)
+    if outline:
+        return outline
+
+    # 嘗試 4: 最後手段，把整段文字當成一個大綱項目
+    if raw.strip():
+        return [{"title": "大綱", "summary": raw.strip()[:500], "characters": [], "mood": ""}]
+    return []
+
+
 async def _handle_generate_outline(request):
     if not _check_auth(request):
         return web.json_response({"error": "未授權"}, status=401)
@@ -626,22 +696,10 @@ async def _handle_generate_outline(request):
         system_prompt, messages = _build_outline_prompt(project)
         raw = await _ai_generate(messages, system_prompt=system_prompt, max_tokens=8192, temperature=0.7)
 
-        import re
-        json_match = re.search(r'\{[\s\S]*\}', raw)
-        if json_match:
-            outline_data = json.loads(json_match.group())
-            outline = outline_data.get("outline", [])
-        else:
-            outline = []
-            lines = raw.strip().split("\n")
-            current = {}
-            for line in lines:
-                if line.strip().startswith("第") and "章" in line:
-                    if current:
-                        outline.append(current)
-                    current = {"title": line.strip(), "summary": "", "characters": [], "mood": ""}
-                elif current and not current["summary"]:
-                    current["summary"] = line.strip()
+        outline = _parse_outline_response(raw)
+
+        if not outline:
+            return web.json_response({"error": f"AI 回應無法解析為大綱。原始回應前 500 字：{raw[:500]}"}, status=500)
 
         project["outline"] = outline
         project["outline_confirmed"] = False
@@ -649,6 +707,8 @@ async def _handle_generate_outline(request):
         await _persist("novel_projects.json", novel_projects)
         return web.json_response({"outline": outline})
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return web.json_response({"error": str(e)}, status=500)
 
 
@@ -725,7 +785,141 @@ async def _handle_export(request):
 
 # ═════════════════════════════════════════════════════════════════
 # 路由註冊
-# ═════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+
+# ─── SSE 進度串流 ──────────────────────────────────────────────────
+
+async def _handle_generate_outline_sse(request):
+    """SSE 端點：生成大綱並即時回傳進度。"""
+    if not _check_auth(request):
+        return web.json_response({"error": "未授權"}, status=401)
+
+    pid = request.match_info["id"]
+    project = next((p for p in novel_projects if p["id"] == pid), None)
+    if not project:
+        return web.json_response({"error": "找不到專案"}, status=404)
+    _migrate_project(project)
+
+    response = web.StreamResponse()
+    response.headers["Content-Type"] = "text/event-stream"
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Connection"] = "keep-alive"
+    await response.prepare(request)
+
+    async def send_event(event_type, data):
+        msg = json.dumps(data, ensure_ascii=False)
+        await response.write(f"event: {event_type}\ndata: {msg}\n\n".encode())
+
+    try:
+        await send_event("progress", {"stage": "building_prompt", "message": "正在建構提示詞..."})
+        system_prompt, messages = _build_outline_prompt(project)
+
+        await send_event("progress", {"stage": "calling_ai", "message": "正在呼叫 AI 生成大綱..."})
+        raw = await _ai_generate(messages, system_prompt=system_prompt, max_tokens=8192, temperature=0.7)
+
+        await send_event("progress", {"stage": "parsing", "message": f"AI 回應 {len(raw)} 字，正在解析大綱..."})
+        outline = _parse_outline_response(raw)
+
+        if not outline:
+            await send_event("error", {"error": f"AI 回應無法解析為大綱。原始回應前 300 字：{raw[:300]}"})
+            await response.write_eof()
+            return response
+
+        await send_event("progress", {"stage": "saving", "message": f"解析出 {len(outline)} 章大綱，正在儲存..."})
+        project["outline"] = outline
+        project["outline_confirmed"] = False
+        project["updated_at"] = _now()
+        await _persist("novel_projects.json", novel_projects)
+
+        await send_event("done", {"outline": outline, "count": len(outline)})
+        await response.write_eof()
+        return response
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await send_event("error", {"error": str(e)})
+        await response.write_eof()
+        return response
+
+
+async def _handle_generate_chapter_sse(request):
+    """SSE 端點：生成單一章節並即時回傳進度。"""
+    if not _check_auth(request):
+        return web.json_response({"error": "未授權"}, status=401)
+
+    pid = request.match_info["id"]
+    project = next((p for p in novel_projects if p["id"] == pid), None)
+    if not project:
+        return web.json_response({"error": "找不到專案"}, status=404)
+    _migrate_project(project)
+
+    body = await request.json()
+    chapter_num = body.get("chapter", 1)
+    outline = project.get("outline", [])
+    if not outline or chapter_num > len(outline):
+        return web.json_response({"error": "大綱不存在或章節號無效"}, status=400)
+    chapter_outline = outline[chapter_num - 1]
+
+    response = web.StreamResponse()
+    response.headers["Content-Type"] = "text/event-stream"
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Connection"] = "keep-alive"
+    await response.prepare(request)
+
+    async def send_event(event_type, data):
+        msg = json.dumps(data, ensure_ascii=False)
+        await response.write(f"event: {event_type}\ndata: {msg}\n\n".encode())
+
+    try:
+        await send_event("progress", {"stage": "building_prompt", "message": f"正在建構第 {chapter_num} 章提示詞..."})
+        chapters = project.get("chapters", [])
+        prev_summaries = []
+        for ch in sorted(chapters, key=lambda x: x["chapter"]):
+            if ch["chapter"] < chapter_num:
+                prev_summaries.append(ch.get("summary", ch.get("content", "")[:300]))
+
+        system_prompt, messages = _build_chapter_prompt(project, chapter_num, chapter_outline, prev_summaries)
+
+        await send_event("progress", {"stage": "calling_ai", "message": f"正在呼叫 AI 撰寫第 {chapter_num} 章..."})
+        content = await _ai_generate(messages, system_prompt=system_prompt, max_tokens=8192, temperature=0.85)
+
+        await send_event("progress", {"stage": "summarizing", "message": "正在生成章節摘要..."})
+        summary = await _ai_summarize(content)
+
+        chapter_data = {
+            "chapter": chapter_num,
+            "title": chapter_outline.get("title", f"第 {chapter_num} 章"),
+            "content": content,
+            "summary": summary,
+            "word_count": len(content),
+            "generated_at": _now(),
+        }
+
+        existing = next((ch for ch in chapters if ch["chapter"] == chapter_num), None)
+        if existing:
+            existing.update(chapter_data)
+        else:
+            chapters.append(chapter_data)
+            chapters.sort(key=lambda x: x["chapter"])
+
+        project["chapters"] = chapters
+        project["updated_at"] = _now()
+        await _persist("novel_projects.json", novel_projects)
+
+        await send_event("done", {"chapter": chapter_data})
+        await response.write_eof()
+        return response
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await send_event("error", {"error": str(e)})
+        await response.write_eof()
+        return response
+
+
+# ═════════════════════════════════════════════════════
+# 路由註冊
+# ═════════════════════════════════════════════════════
 
 def setup_novel_routes(app):
     app.router.add_get("/novel", _handle_page)
@@ -750,7 +944,10 @@ def setup_novel_routes(app):
     app.router.add_get("/api/novel/projects/{id}/relationships", _handle_project_rels_get)
     app.router.add_post("/api/novel/projects/{id}/relationships", _handle_project_rels_post)
     app.router.add_delete("/api/novel/projects/{id}/relationships/{rel_id}", _handle_project_rels_delete)
-    # AI 生成
+    # AI 生成（SSE 版本，即時進度）
+    app.router.add_post("/api/novel/projects/{id}/generate-outline-sse", _handle_generate_outline_sse)
+    app.router.add_post("/api/novel/projects/{id}/generate-chapter-sse", _handle_generate_chapter_sse)
+    # AI 生成（普通版本，向後相容）
     app.router.add_post("/api/novel/projects/{id}/generate-outline", _handle_generate_outline)
     app.router.add_post("/api/novel/projects/{id}/generate-chapter", _handle_generate_chapter)
     app.router.add_get("/api/novel/projects/{id}/export", _handle_export)
