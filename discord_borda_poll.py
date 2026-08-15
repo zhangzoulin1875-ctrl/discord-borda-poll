@@ -65,6 +65,10 @@ _PERSIST_FILES = {
     "kaobei_settings.json",
     "secretary_timer_settings.json",
     "bot_status.json",
+    "novel_settings.json",
+    "novel_characters.json",
+    "novel_relationships.json",
+    "novel_projects.json",
 }
 
 # ─── Bot Instance ──────────────────────────────────────────────────────────
@@ -231,6 +235,15 @@ async def keep_alive_server():
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
+
+    # Let modules register HTTP routes
+    for name, func in list(_bot_globals.items()):
+        if name.startswith("setup_") and name.endswith("_routes") and callable(func):
+            try:
+                func(app)
+                print(f"🌐 已註冊路由：{name}")
+            except Exception as e:
+                print(f"⚠️ 路由註冊失敗 {name}：{e}")
 
     runner = web.AppRunner(app)
     await runner.setup()
