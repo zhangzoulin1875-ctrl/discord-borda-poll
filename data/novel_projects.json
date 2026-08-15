@@ -54,6 +54,14 @@
         "relationship_type": "戰友",
         "description": "一戰時期在壕溝內認識的老友",
         "direction": "mutual"
+      },
+      {
+        "id": "3ef67651-3645-4842-89ad-2a74f2a7948b",
+        "character_a": "15d8a5fb-9832-405a-a6a7-1784b189b6ef",
+        "character_b": "3245585c-9685-4f54-90eb-f9a65614e418",
+        "relationship_type": "敵人",
+        "description": "",
+        "direction": "mutual"
       }
     ],
     "outline": [],
@@ -64,6 +72,6 @@
     },
     "chapters": [],
     "created_at": "2026-08-15 16:04:40",
-    "updated_at": "2026-08-15 16:07:20"
+    "updated_at": "2026-08-15 16:07:33"
   }
 ]
