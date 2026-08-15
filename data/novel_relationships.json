@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "id": "4ca66ae2-e471-4725-81c9-9bfd73c8a991",
+    "character_a": "124503de-0c8b-4d43-a25f-e9594a3ab944",
+    "character_b": "23fa0a4d-5256-47db-921b-9df20752ba6e",
+    "relationship_type": "上司下屬",
+    "description": "施密特是威廉二世流亡後的貼身護衛",
+    "direction": "mutual"
+  }
+]
