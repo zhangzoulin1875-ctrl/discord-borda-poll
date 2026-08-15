@@ -6,5 +6,13 @@
     "relationship_type": "上司下屬",
     "description": "施密特是威廉二世流亡後的貼身護衛",
     "direction": "mutual"
+  },
+  {
+    "id": "7e406334-d4fc-4318-b138-3f6b74e24847",
+    "character_a": "124503de-0c8b-4d43-a25f-e9594a3ab944",
+    "character_b": "6cac4c21-9803-4bac-a0ae-dcbf8c66e2b0",
+    "relationship_type": "親戚",
+    "description": "",
+    "direction": "mutual"
   }
 ]
