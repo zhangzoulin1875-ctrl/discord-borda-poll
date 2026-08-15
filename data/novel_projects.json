@@ -38,7 +38,16 @@
         "role": "supporting"
       }
     ],
-    "relationships": [],
+    "relationships": [
+      {
+        "id": "7654c368-1f01-4229-8cc9-348ff72952c9",
+        "character_a": "124503de-0c8b-4d43-a25f-e9594a3ab944",
+        "character_b": "23fa0a4d-5256-47db-921b-9df20752ba6e",
+        "relationship_type": "上司下屬",
+        "description": "",
+        "direction": "mutual"
+      }
+    ],
     "outline": [],
     "outline_confirmed": false,
     "generation_config": {
@@ -47,6 +56,6 @@
     },
     "chapters": [],
     "created_at": "2026-08-15 16:04:40",
-    "updated_at": "2026-08-15 16:04:40"
+    "updated_at": "2026-08-15 16:05:27"
   }
 ]
