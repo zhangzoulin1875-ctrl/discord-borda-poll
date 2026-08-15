@@ -19,9 +19,18 @@ from pathlib import Path
 # ═════════════════════════════════════════════════════════════════
 
 novel_settings = {}
-novel_characters = []
+novel_characters = []      # 全域角色庫（名字、性格、背景等基本資料）
+novel_projects = []         # 每個專案內含 characters（含 per-project role）和 relationships
+
+# 相容舊資料：全域關係鏈（僅用於遷移）
 novel_relationships = []
-novel_projects = []
+
+ROLE_LABELS = {
+    "protagonist": "主角",
+    "supporting": "配角",
+    "antagonist": "反派",
+    "minor": "次要角色",
+}
 
 
 def load_novel_data():
@@ -37,7 +46,23 @@ def load_novel_data():
     novel_characters = load_json("novel_characters.json", [])
     novel_relationships = load_json("novel_relationships.json", [])
     novel_projects = load_json("novel_projects.json", [])
-    print(f"📖 小說工具已載入：{len(novel_characters)} 角色, {len(novel_relationships)} 關係, {len(novel_projects)} 專案")
+    # 遷移舊資料：把全域 character_ids + role 轉成 per-project characters 陣列
+    for p in novel_projects:
+        _migrate_project(p)
+    print(f"📖 小說工具已載入：{len(novel_characters)} 角色, {len(novel_projects)} 專案")
+
+
+def _migrate_project(p):
+    """把舊格式（character_ids + 全域 role）遷移成新格式（characters 陣列含 per-project role）。"""
+    if "characters" not in p or not isinstance(p.get("characters"), list):
+        char_ids = p.pop("character_ids", [])
+        p["characters"] = []
+        for cid in char_ids:
+            char = next((c for c in novel_characters if c["id"] == cid), None)
+            default_role = char.get("role", "supporting") if char else "supporting"
+            p["characters"].append({"id": cid, "role": default_role})
+    if "relationships" not in p or not isinstance(p.get("relationships"), list):
+        p["relationships"] = []
 
 
 async def _persist(filename, data):
@@ -60,15 +85,15 @@ def _now():
     return _time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _get_char(char_id):
+    return next((c for c in novel_characters if c["id"] == char_id), None)
+
+
 # ═════════════════════════════════════════════════════════════════
 # AI API 呼叫（OpenAI 相容 / Gemini）
 # ═════════════════════════════════════════════════════════════════
 
 async def _ai_generate(messages, system_prompt="", max_tokens=None, temperature=None):
-    """呼叫 AI API 生成文字。支援 OpenAI 相容格式與 Gemini 格式。
-    messages: [{"role": "user"/"assistant", "content": "..."}]
-    回傳生成的文字字串。
-    """
     s = novel_settings
     api_type = s.get("api_type", "openai")
     api_url = s.get("api_url", "").rstrip("/")
@@ -87,22 +112,13 @@ async def _ai_generate(messages, system_prompt="", max_tokens=None, temperature=
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["x-goog-api-key"] = api_key
-
         contents = []
         for msg in messages:
             role = "user" if msg["role"] == "user" else "model"
             contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-
-        body = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": temp,
-                "maxOutputTokens": max_tok,
-            },
-        }
+        body = {"contents": contents, "generationConfig": {"temperature": temp, "maxOutputTokens": max_tok}}
         if system_prompt:
             body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
-
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=body, headers=headers) as resp:
                 if resp.status != 200:
@@ -113,25 +129,14 @@ async def _ai_generate(messages, system_prompt="", max_tokens=None, temperature=
                     return data["candidates"][0]["content"]["parts"][0]["text"]
                 except (KeyError, IndexError):
                     raise ValueError(f"Gemini 回應格式異常: {json.dumps(data)[:500]}")
-
     else:
         url = f"{api_url}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         full_messages = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
         full_messages.extend(messages)
-
-        body = {
-            "model": model,
-            "messages": full_messages,
-            "temperature": temp,
-            "max_tokens": max_tok,
-        }
-
+        body = {"model": model, "messages": full_messages, "temperature": temp, "max_tokens": max_tok}
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=body, headers=headers) as resp:
                 if resp.status != 200:
@@ -145,13 +150,11 @@ async def _ai_generate(messages, system_prompt="", max_tokens=None, temperature=
 
 
 async def _ai_summarize(text, max_len=300):
-    """讓 AI 濃縮一段文字成摘要。"""
     try:
         summary = await _ai_generate(
             [{"role": "user", "content": f"請將以下小說章節濃縮成 {max_len} 字以內的摘要，保留關鍵劇情、角色行動和重要轉折：\n\n{text}"}],
             system_prompt="你是一個專業的小說摘要助手。",
-            max_tokens=1024,
-            temperature=0.3,
+            max_tokens=1024, temperature=0.3,
         )
         return summary.strip()
     except Exception as e:
@@ -160,26 +163,26 @@ async def _ai_summarize(text, max_len=300):
 
 
 # ═════════════════════════════════════════════════════════════════
-# Prompt 建構
+# Prompt 建構（使用 per-project 角色定位和關係鏈）
 # ═════════════════════════════════════════════════════════════════
 
-def _build_character_context(char_ids):
-    """從角色 ID 列表建構角色資料文字。"""
-    char_map = {c["id"]: c for c in novel_characters if c["id"] in char_ids}
+def _build_character_context(project):
+    """從專案的 characters 陣列建構角色資料文字（使用 per-project role）。"""
     lines = []
-    for cid in char_ids:
-        c = char_map.get(cid)
+    for pc in project.get("characters", []):
+        c = _get_char(pc["id"])
         if not c:
             continue
-        role_label = {"protagonist": "主角", "supporting": "配角", "antagonist": "反派", "minor": "次要角色"}.get(c.get("role", "supporting"), "配角")
+        role_label = ROLE_LABELS.get(pc.get("role", "supporting"), "配角")
         lines.append(f"  • {c['name']}（{role_label}）：{c.get('personality', '')}。{c.get('background', '')}")
     return "\n".join(lines) if lines else "  （未指定角色）"
 
 
-def _build_relationship_context(char_ids):
-    """建構角色之間的關係鏈文字。"""
+def _build_relationship_context(project):
+    """建構專案內角色之間的關係鏈文字。"""
+    char_ids = {pc["id"] for pc in project.get("characters", [])}
     lines = []
-    for r in novel_relationships:
+    for r in project.get("relationships", []):
         if r["character_a"] in char_ids and r["character_b"] in char_ids:
             a_name = next((c["name"] for c in novel_characters if c["id"] == r["character_a"]), r["character_a"])
             b_name = next((c["name"] for c in novel_characters if c["id"] == r["character_b"]), r["character_b"])
@@ -188,19 +191,17 @@ def _build_relationship_context(char_ids):
 
 
 def _build_outline_prompt(project):
-    """建構生成大綱的 system prompt + user message。"""
-    char_ids = project.get("character_ids", [])
+    char_ctx = _build_character_context(project)
+    rel_ctx = _build_relationship_context(project)
+    total_chapters = project.get("generation_config", {}).get("total_chapters", 10)
+    words_per_chapter = project.get("generation_config", {}).get("words_per_chapter", 3000)
+
     system_prompt = (
         "你是一個專業小說大綱編劇。根據使用者提供的題材、角色和概念，"
         "設計一個完整的分章大綱。每章包含：標題、劇情摘要、主要出場角色、情緒基調。"
         "確保劇情有起承轉合，角色有發展空間，整體節奏合理。"
         "用 JSON 格式輸出，結構為：{\"outline\": [{\"title\": \"章節標題\", \"summary\": \"劇情摘要\", \"characters\": [\"角色名\"], \"mood\": \"情緒基調\"}]}"
     )
-    char_ctx = _build_character_context(char_ids)
-    rel_ctx = _build_relationship_context(char_ids)
-    total_chapters = project.get("generation_config", {}).get("total_chapters", 10)
-    words_per_chapter = project.get("generation_config", {}).get("words_per_chapter", 3000)
-
     user_msg = (
         f"題材類型：{project.get('genre', '不限')}\n"
         f"整體概念：{project.get('concept', '')}\n"
@@ -214,8 +215,8 @@ def _build_outline_prompt(project):
 
 
 def _build_chapter_prompt(project, chapter_num, chapter_outline, prev_summaries):
-    """建構生成單一章節的 prompt。"""
-    char_ids = project.get("character_ids", [])
+    char_ctx = _build_character_context(project)
+    rel_ctx = _build_relationship_context(project)
     words = project.get("generation_config", {}).get("words_per_chapter", 3000)
 
     system_prompt = (
@@ -223,9 +224,6 @@ def _build_chapter_prompt(project, chapter_num, chapter_outline, prev_summaries)
         "文字要生動、有畫面感，角色對話自然。"
         f"本章目標字數：約 {words} 字。"
     )
-
-    char_ctx = _build_character_context(char_ids)
-    rel_ctx = _build_relationship_context(char_ids)
 
     prev_text = ""
     if prev_summaries:
@@ -257,7 +255,6 @@ def _build_chapter_prompt(project, chapter_num, chapter_outline, prev_summaries)
 # ═════════════════════════════════════════════════════════════════
 
 def _check_auth(request):
-    """檢查請求者的 owner 身分。"""
     token = request.headers.get("X-Auth", "")
     return token == str(OWNER_ID)
 
@@ -267,7 +264,6 @@ def _check_auth(request):
 # ═════════════════════════════════════════════════════════════════
 
 async def _handle_page(request):
-    """提供 novel.html 頁面。"""
     html_path = DATA_DIR.parent / "novel.html"
     if not html_path.exists():
         return web.Response(text="novel.html 不存在", status=404)
@@ -300,6 +296,8 @@ async def _handle_settings_put(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+# ─── 全域角色庫 CRUD ─────────────────────────────────────────────
+
 async def _handle_characters_get(request):
     if not _check_auth(request):
         return web.json_response({"error": "未授權"}, status=401)
@@ -314,7 +312,7 @@ async def _handle_characters_post(request):
         char = {
             "id": _gen_id(),
             "name": data.get("name", ""),
-            "role": data.get("role", "supporting"),
+            "role": data.get("role", "supporting"),  # 全域預設 role，專案可覆寫
             "personality": data.get("personality", ""),
             "background": data.get("background", ""),
             "appearance": data.get("appearance", ""),
@@ -351,65 +349,25 @@ async def _handle_characters_delete(request):
     try:
         char_id = request.match_info["id"]
         novel_characters[:] = [c for c in novel_characters if c["id"] != char_id]
-        novel_relationships[:] = [r for r in novel_relationships if r["character_a"] != char_id and r["character_b"] != char_id]
+        # 同時從所有專案中移除該角色和相關關係
+        for p in novel_projects:
+            p["characters"] = [pc for pc in p.get("characters", []) if pc["id"] != char_id]
+            p["relationships"] = [r for r in p.get("relationships", []) if r["character_a"] != char_id and r["character_b"] != char_id]
         await _persist("novel_characters.json", novel_characters)
-        await _persist("novel_relationships.json", novel_relationships)
+        await _persist("novel_projects.json", novel_projects)
         return web.json_response({"ok": True})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
 
-async def _handle_relationships_get(request):
-    if not _check_auth(request):
-        return web.json_response({"error": "未授權"}, status=401)
-    char_map = {c["id"]: c["name"] for c in novel_characters}
-    result = []
-    for r in novel_relationships:
-        rr = dict(r)
-        rr["character_a_name"] = char_map.get(r["character_a"], "?")
-        rr["character_b_name"] = char_map.get(r["character_b"], "?")
-        result.append(rr)
-    return web.json_response(result)
-
-
-async def _handle_relationships_post(request):
-    if not _check_auth(request):
-        return web.json_response({"error": "未授權"}, status=401)
-    try:
-        data = await request.json()
-        rel = {
-            "id": _gen_id(),
-            "character_a": data.get("character_a", ""),
-            "character_b": data.get("character_b", ""),
-            "relationship_type": data.get("relationship_type", ""),
-            "description": data.get("description", ""),
-            "direction": data.get("direction", "mutual"),
-        }
-        novel_relationships.append(rel)
-        await _persist("novel_relationships.json", novel_relationships)
-        return web.json_response(rel)
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
-
-
-async def _handle_relationships_delete(request):
-    if not _check_auth(request):
-        return web.json_response({"error": "未授權"}, status=401)
-    try:
-        rel_id = request.match_info["id"]
-        novel_relationships[:] = [r for r in novel_relationships if r["id"] != rel_id]
-        await _persist("novel_relationships.json", novel_relationships)
-        return web.json_response({"ok": True})
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
-
+# ─── 專案 CRUD ───────────────────────────────────────────────────
 
 async def _handle_projects_get(request):
     if not _check_auth(request):
         return web.json_response({"error": "未授權"}, status=401)
     result = []
     for p in novel_projects:
-        pp = {
+        result.append({
             "id": p["id"],
             "title": p.get("title", ""),
             "genre": p.get("genre", ""),
@@ -418,10 +376,11 @@ async def _handle_projects_get(request):
             "outline_count": len(p.get("outline", [])),
             "chapters_count": len(p.get("chapters", [])),
             "total_chapters": p.get("generation_config", {}).get("total_chapters", 0),
+            "characters_count": len(p.get("characters", [])),
+            "relationships_count": len(p.get("relationships", [])),
             "created_at": p.get("created_at", ""),
             "updated_at": p.get("updated_at", ""),
-        }
-        result.append(pp)
+        })
     return web.json_response(result)
 
 
@@ -431,12 +390,18 @@ async def _handle_project_get(request):
     pid = request.match_info["id"]
     for p in novel_projects:
         if p["id"] == pid:
-            char_map = {c["id"]: c for c in novel_characters}
+            _migrate_project(p)
             p_copy = json.loads(json.dumps(p))
-            p_copy["characters"] = [
-                {"id": cid, "name": char_map.get(cid, {}).get("name", "?"), "role": char_map.get(cid, {}).get("role", "")}
-                for cid in p.get("character_ids", [])
-            ]
+            # 附加角色名稱和 per-project role
+            for pc in p_copy.get("characters", []):
+                c = _get_char(pc["id"])
+                pc["name"] = c["name"] if c else "?"
+                pc["personality"] = c.get("personality", "") if c else ""
+                pc["background"] = c.get("background", "") if c else ""
+            # 附加關係中的角色名稱
+            for r in p_copy.get("relationships", []):
+                r["character_a_name"] = next((c["name"] for c in novel_characters if c["id"] == r["character_a"]), "?")
+                r["character_b_name"] = next((c["name"] for c in novel_characters if c["id"] == r["character_b"]), "?")
             return web.json_response(p_copy)
     return web.json_response({"error": "找不到專案"}, status=404)
 
@@ -446,12 +411,20 @@ async def _handle_projects_post(request):
         return web.json_response({"error": "未授權"}, status=401)
     try:
         data = await request.json()
+        # 把 character_ids 轉成 characters 陣列（含 per-project role）
+        char_ids = data.get("character_ids", [])
+        characters_config = []
+        for cid in char_ids:
+            char = _get_char(cid)
+            default_role = char.get("role", "supporting") if char else "supporting"
+            characters_config.append({"id": cid, "role": default_role})
         project = {
             "id": _gen_id(),
             "title": data.get("title", ""),
             "genre": data.get("genre", ""),
             "concept": data.get("concept", ""),
-            "character_ids": data.get("character_ids", []),
+            "characters": characters_config,
+            "relationships": [],
             "outline": [],
             "outline_confirmed": False,
             "generation_config": {
@@ -477,7 +450,8 @@ async def _handle_project_put(request):
         data = await request.json()
         for p in novel_projects:
             if p["id"] == pid:
-                for key in ["title", "genre", "concept", "character_ids", "outline", "outline_confirmed", "generation_config"]:
+                _migrate_project(p)
+                for key in ["title", "genre", "concept", "characters", "relationships", "outline", "outline_confirmed", "generation_config"]:
                     if key in data:
                         p[key] = data[key]
                 p["updated_at"] = _now()
@@ -500,6 +474,145 @@ async def _handle_project_delete(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+# ─── 專案內角色定位（per-project role）────────────────────────────
+
+async def _handle_project_char_role(request):
+    """更新某角色在某專案中的定位。"""
+    if not _check_auth(request):
+        return web.json_response({"error": "未授權"}, status=401)
+    try:
+        pid = request.match_info["id"]
+        char_id = request.match_info["char_id"]
+        data = await request.json()
+        new_role = data.get("role", "supporting")
+        project = next((p for p in novel_projects if p["id"] == pid), None)
+        if not project:
+            return web.json_response({"error": "找不到專案"}, status=404)
+        _migrate_project(project)
+        for pc in project.get("characters", []):
+            if pc["id"] == char_id:
+                pc["role"] = new_role
+                project["updated_at"] = _now()
+                await _persist("novel_projects.json", novel_projects)
+                return web.json_response({"ok": True, "role": new_role})
+        return web.json_response({"error": "角色不在專案中"}, status=404)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def _handle_project_chars_add(request):
+    """把角色加入專案。"""
+    if not _check_auth(request):
+        return web.json_response({"error": "未授權"}, status=401)
+    try:
+        pid = request.match_info["id"]
+        data = await request.json()
+        char_id = data.get("character_id", "")
+        if not char_id:
+            return web.json_response({"error": "缺少 character_id"}, status=400)
+        project = next((p for p in novel_projects if p["id"] == pid), None)
+        if not project:
+            return web.json_response({"error": "找不到專案"}, status=404)
+        _migrate_project(project)
+        # 避免重複加入
+        if any(pc["id"] == char_id for pc in project.get("characters", [])):
+            return web.json_response({"error": "角色已在專案中"}, status=400)
+        char = _get_char(char_id)
+        default_role = char.get("role", "supporting") if char else "supporting"
+        project["characters"].append({"id": char_id, "role": default_role})
+        project["updated_at"] = _now()
+        await _persist("novel_projects.json", novel_projects)
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def _handle_project_chars_remove(request):
+    """從專案中移除角色（同時移除相關關係）。"""
+    if not _check_auth(request):
+        return web.json_response({"error": "未授權"}, status=401)
+    try:
+        pid = request.match_info["id"]
+        char_id = request.match_info["char_id"]
+        project = next((p for p in novel_projects if p["id"] == pid), None)
+        if not project:
+            return web.json_response({"error": "找不到專案"}, status=404)
+        _migrate_project(project)
+        project["characters"] = [pc for pc in project.get("characters", []) if pc["id"] != char_id]
+        project["relationships"] = [r for r in project.get("relationships", []) if r["character_a"] != char_id and r["character_b"] != char_id]
+        project["updated_at"] = _now()
+        await _persist("novel_projects.json", novel_projects)
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# ─── 專案內關係鏈 CRUD ────────────────────────────────────────────
+
+async def _handle_project_rels_get(request):
+    if not _check_auth(request):
+        return web.json_response({"error": "未授權"}, status=401)
+    pid = request.match_info["id"]
+    project = next((p for p in novel_projects if p["id"] == pid), None)
+    if not project:
+        return web.json_response({"error": "找不到專案"}, status=404)
+    _migrate_project(project)
+    char_map = {c["id"]: c["name"] for c in novel_characters}
+    result = []
+    for r in project.get("relationships", []):
+        rr = dict(r)
+        rr["character_a_name"] = char_map.get(r["character_a"], "?")
+        rr["character_b_name"] = char_map.get(r["character_b"], "?")
+        result.append(rr)
+    return web.json_response(result)
+
+
+async def _handle_project_rels_post(request):
+    if not _check_auth(request):
+        return web.json_response({"error": "未授權"}, status=401)
+    try:
+        pid = request.match_info["id"]
+        data = await request.json()
+        project = next((p for p in novel_projects if p["id"] == pid), None)
+        if not project:
+            return web.json_response({"error": "找不到專案"}, status=404)
+        _migrate_project(project)
+        rel = {
+            "id": _gen_id(),
+            "character_a": data.get("character_a", ""),
+            "character_b": data.get("character_b", ""),
+            "relationship_type": data.get("relationship_type", ""),
+            "description": data.get("description", ""),
+            "direction": data.get("direction", "mutual"),
+        }
+        project["relationships"].append(rel)
+        project["updated_at"] = _now()
+        await _persist("novel_projects.json", novel_projects)
+        return web.json_response(rel)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def _handle_project_rels_delete(request):
+    if not _check_auth(request):
+        return web.json_response({"error": "未授權"}, status=401)
+    try:
+        pid = request.match_info["id"]
+        rel_id = request.match_info["rel_id"]
+        project = next((p for p in novel_projects if p["id"] == pid), None)
+        if not project:
+            return web.json_response({"error": "找不到專案"}, status=404)
+        _migrate_project(project)
+        project["relationships"] = [r for r in project.get("relationships", []) if r["id"] != rel_id]
+        project["updated_at"] = _now()
+        await _persist("novel_projects.json", novel_projects)
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# ─── AI 生成 ─────────────────────────────────────────────────────
+
 async def _handle_generate_outline(request):
     if not _check_auth(request):
         return web.json_response({"error": "未授權"}, status=401)
@@ -508,6 +621,7 @@ async def _handle_generate_outline(request):
         project = next((p for p in novel_projects if p["id"] == pid), None)
         if not project:
             return web.json_response({"error": "找不到專案"}, status=404)
+        _migrate_project(project)
 
         system_prompt, messages = _build_outline_prompt(project)
         raw = await _ai_generate(messages, system_prompt=system_prompt, max_tokens=8192, temperature=0.7)
@@ -528,15 +642,12 @@ async def _handle_generate_outline(request):
                     current = {"title": line.strip(), "summary": "", "characters": [], "mood": ""}
                 elif current and not current["summary"]:
                     current["summary"] = line.strip()
-            if current:
-                outline.append(current)
 
         project["outline"] = outline
+        project["outline_confirmed"] = False
         project["updated_at"] = _now()
         await _persist("novel_projects.json", novel_projects)
         return web.json_response({"outline": outline})
-    except json.JSONDecodeError as e:
-        return web.json_response({"error": f"AI 回應無法解析為 JSON：{e}", "raw": raw[:1000]}, status=500)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
@@ -546,17 +657,16 @@ async def _handle_generate_chapter(request):
         return web.json_response({"error": "未授權"}, status=401)
     try:
         pid = request.match_info["id"]
-        data = await request.json()
-        chapter_num = data.get("chapter", 1)
-
         project = next((p for p in novel_projects if p["id"] == pid), None)
         if not project:
             return web.json_response({"error": "找不到專案"}, status=404)
+        _migrate_project(project)
 
+        data = await request.json()
+        chapter_num = data.get("chapter", 1)
         outline = project.get("outline", [])
-        if chapter_num < 1 or chapter_num > len(outline):
-            return web.json_response({"error": f"章節數超出範圍（1-{len(outline)}）"}, status=400)
-
+        if not outline or chapter_num > len(outline):
+            return web.json_response({"error": "大綱不存在或章節號無效"}, status=400)
         chapter_outline = outline[chapter_num - 1]
 
         chapters = project.get("chapters", [])
@@ -567,7 +677,6 @@ async def _handle_generate_chapter(request):
 
         system_prompt, messages = _build_chapter_prompt(project, chapter_num, chapter_outline, prev_summaries)
         content = await _ai_generate(messages, system_prompt=system_prompt, max_tokens=8192, temperature=0.85)
-
         summary = await _ai_summarize(content)
 
         chapter_data = {
@@ -589,7 +698,6 @@ async def _handle_generate_chapter(request):
         project["chapters"] = chapters
         project["updated_at"] = _now()
         await _persist("novel_projects.json", novel_projects)
-
         return web.json_response(chapter_data)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -602,7 +710,6 @@ async def _handle_export(request):
     project = next((p for p in novel_projects if p["id"] == pid), None)
     if not project:
         return web.json_response({"error": "找不到專案"}, status=404)
-
     chapters = sorted(project.get("chapters", []), key=lambda x: x["chapter"])
     lines = [project.get("title", ""), ""]
     for ch in chapters:
@@ -621,22 +728,29 @@ async def _handle_export(request):
 # ═════════════════════════════════════════════════════════════════
 
 def setup_novel_routes(app):
-    """向 aiohttp app 註冊小說工具的所有路由。"""
     app.router.add_get("/novel", _handle_page)
     app.router.add_get("/api/novel/settings", _handle_settings_get)
     app.router.add_put("/api/novel/settings", _handle_settings_put)
+    # 全域角色庫
     app.router.add_get("/api/novel/characters", _handle_characters_get)
     app.router.add_post("/api/novel/characters", _handle_characters_post)
     app.router.add_put("/api/novel/characters/{id}", _handle_characters_put)
     app.router.add_delete("/api/novel/characters/{id}", _handle_characters_delete)
-    app.router.add_get("/api/novel/relationships", _handle_relationships_get)
-    app.router.add_post("/api/novel/relationships", _handle_relationships_post)
-    app.router.add_delete("/api/novel/relationships/{id}", _handle_relationships_delete)
+    # 專案
     app.router.add_get("/api/novel/projects", _handle_projects_get)
     app.router.add_post("/api/novel/projects", _handle_projects_post)
     app.router.add_get("/api/novel/projects/{id}", _handle_project_get)
     app.router.add_put("/api/novel/projects/{id}", _handle_project_put)
     app.router.add_delete("/api/novel/projects/{id}", _handle_project_delete)
+    # 專案內角色管理（per-project role）
+    app.router.add_put("/api/novel/projects/{id}/characters/{char_id}/role", _handle_project_char_role)
+    app.router.add_post("/api/novel/projects/{id}/characters", _handle_project_chars_add)
+    app.router.add_delete("/api/novel/projects/{id}/characters/{char_id}", _handle_project_chars_remove)
+    # 專案內關係鏈
+    app.router.add_get("/api/novel/projects/{id}/relationships", _handle_project_rels_get)
+    app.router.add_post("/api/novel/projects/{id}/relationships", _handle_project_rels_post)
+    app.router.add_delete("/api/novel/projects/{id}/relationships/{rel_id}", _handle_project_rels_delete)
+    # AI 生成
     app.router.add_post("/api/novel/projects/{id}/generate-outline", _handle_generate_outline)
     app.router.add_post("/api/novel/projects/{id}/generate-chapter", _handle_generate_chapter)
     app.router.add_get("/api/novel/projects/{id}/export", _handle_export)
