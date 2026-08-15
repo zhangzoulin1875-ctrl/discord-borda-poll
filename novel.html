@@ -52,7 +52,14 @@ th{color:var(--accent)}
 .checkbox-group input{width:auto}
 .char-select{display:flex;gap:10px;align-items:center;margin-bottom:8px}
 .char-select select{width:auto;flex:1}
+.role-select{width:auto;min-width:100px}
+.char-row{display:flex;align-items:center;gap:10px;padding:8px;border-bottom:1px solid var(--border)}
+.char-row .char-info{flex:1}
+.char-row select{width:auto;min-width:100px}
+.rel-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)}
+.rel-row .rel-info{flex:1}
 #toast{position:fixed;bottom:20px;right:20px;padding:12px 20px;border-radius:8px;background:var(--card);color:var(--text);border:1px solid var(--accent);display:none;z-index:999;max-width:350px}
+.pd-section{margin-bottom:20px}
 </style>
 </head>
 <body>
@@ -80,7 +87,6 @@ th{color:var(--accent)}
 <div class="tabs">
 <div class="tab active" onclick="showTab('settings')">⚙️ 設定</div>
 <div class="tab" onclick="showTab('characters')">👤 角色庫</div>
-<div class="tab" onclick="showTab('relationships')">🔗 關係鏈</div>
 <div class="tab" onclick="showTab('projects')">📚 專案</div>
 </div>
 
@@ -132,7 +138,7 @@ th{color:var(--accent)}
 <input type="text" id="char-name">
 </div>
 <div class="form-group">
-<label>定位</label>
+<label>預設定位</label>
 <select id="char-role">
 <option value="protagonist">主角</option>
 <option value="supporting">配角</option>
@@ -166,40 +172,6 @@ th{color:var(--accent)}
 </div>
 </div>
 
-<!-- 關係鏈 -->
-<div id="tab-relationships" class="tab-content">
-<div class="card">
-<h2>新增關係</h2>
-<div class="char-select">
-<select id="rel-a"></select>
-<span>→</span>
-<select id="rel-b"></select>
-</div>
-<div class="form-group">
-<label>關係類型</label>
-<input type="text" id="rel-type" placeholder="例：戀人、仇敵、主僕、父子...">
-</div>
-<div class="form-group">
-<label>關係描述</label>
-<input type="text" id="rel-desc" placeholder="關係的具體描述">
-</div>
-<div class="form-group">
-<label>方向性</label>
-<select id="rel-direction">
-<option value="mutual">雙向</option>
-<option value="a_to_b">A → B</option>
-<option value="b_to_a">B → A</option>
-</select>
-</div>
-<button onclick="addRelationship()">新增關係</button>
-</div>
-
-<div id="rel-list" class="card">
-<h2>關係列表</h2>
-<p class="muted">載入中...</p>
-</div>
-</div>
-
 <!-- 專案 -->
 <div id="tab-projects" class="tab-content">
 <div id="projects-list-view">
@@ -228,7 +200,7 @@ th{color:var(--accent)}
 <textarea id="proj-concept" placeholder="描述這部小說的核心概念、主要劇情方向、世界觀等"></textarea>
 </div>
 <div class="form-group">
-<label>使用角色</label>
+<label>使用角色（可在專案中再調整定位）</label>
 <div id="proj-char-select" class="checkbox-group"></div>
 </div>
 <button onclick="createProject()">建立專案</button>
@@ -246,6 +218,55 @@ th{color:var(--accent)}
 <div class="card">
 <h2 id="pd-title"></h2>
 <p id="pd-info" class="muted"></p>
+</div>
+
+<!-- 專案角色管理（per-project role） -->
+<div class="card pd-section">
+<h2>👤 專案角色與定位</h2>
+<p class="muted">每個角色可在不同專案中設定不同定位（主角/配角/反派等）</p>
+<div style="margin:10px 0">
+<div class="row" style="align-items:flex-end">
+<div class="form-group" style="flex:1">
+<label>加入角色到專案</label>
+<select id="pd-add-char-select"></select>
+</div>
+<button class="small" onclick="addCharToProject()" style="width:auto;margin-bottom:10px">加入</button>
+</div>
+</div>
+<div id="pd-char-list"></div>
+</div>
+
+<!-- 專案關係鏈（per-project） -->
+<div class="card pd-section">
+<h2>🔗 專案關係鏈</h2>
+<p class="muted">在此專案中角色之間的關係，獨立於其他專案</p>
+<div style="margin:10px 0">
+<div class="char-select">
+<select id="pd-rel-a"></select>
+<span>→</span>
+<select id="pd-rel-b"></select>
+</div>
+<div class="row">
+<div class="form-group">
+<label>關係類型</label>
+<input type="text" id="pd-rel-type" placeholder="例：戀人、仇敵、主僕、父子...">
+</div>
+<div class="form-group">
+<label>方向性</label>
+<select id="pd-rel-direction">
+<option value="mutual">雙向</option>
+<option value="a_to_b">A → B</option>
+<option value="b_to_a">B → A</option>
+</select>
+</div>
+</div>
+<div class="form-group">
+<label>關係描述</label>
+<input type="text" id="pd-rel-desc" placeholder="關係的具體描述">
+</div>
+<button class="small" onclick="addProjectRelationship()">新增關係</button>
+</div>
+<div id="pd-rel-list"></div>
 </div>
 
 <!-- 大綱區 -->
@@ -278,7 +299,9 @@ th{color:var(--accent)}
 <script>
 const OWNER_ID="1482256878334640209";
 let AUTH_TOKEN=localStorage.getItem('novel_auth')||"";
-let characters=[],relationships=[],projects=[],currentProject=null;
+let characters=[],projects=[],currentProject=null;
+
+const ROLE_LABELS={protagonist:'主角',supporting:'配角',antagonist:'反派',minor:'次要角色'};
 
 // ─── API helper ───
 async function api(path,method='GET',body=null){
@@ -321,13 +344,12 @@ function showMain(){
 // ─── Tabs ───
 function showTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{
-    const tabs=['settings','characters','relationships','projects'];
+    const tabs=['settings','characters','projects'];
     t.classList.toggle('active',tabs[i]===name);
   });
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
   document.getElementById('tab-'+name).classList.add('active');
   if(name==='characters')loadCharacters();
-  if(name==='relationships')loadRelationships();
   if(name==='projects')loadProjects();
 }
 
@@ -360,23 +382,22 @@ async function saveSettings(){
   }catch(e){toast('儲存失敗')}
 }
 
-// ─── Characters ───
+// ─── Characters (全域角色庫) ───
 async function loadCharacters(){
   try{
     characters=await api('/api/novel/characters');
     renderCharacters();
-    updateCharSelects();
+    updateProjCharSelect();
   }catch(e){toast('載入角色失敗')}
 }
 function renderCharacters(){
   const div=document.getElementById('char-list');
   if(!characters.length){div.innerHTML='<h2>角色列表</h2><p class="muted">尚無角色</p>';return}
-  const roleLabels={protagonist:'主角',supporting:'配角',antagonist:'反派',minor:'次要'};
   div.innerHTML='<h2>角色列表</h2>'+characters.map(c=>`
     <div class="card" style="border-color:var(--accent)">
       <div style="display:flex;justify-content:space-between;align-items:start">
         <div style="flex:1">
-          <h3>${esc(c.name)} <span class="tag tag-${c.role}">${roleLabels[c.role]||c.role}</span></h3>
+          <h3>${esc(c.name)} <span class="tag tag-${c.role}">${ROLE_LABELS[c.role]||c.role}</span></h3>
           ${c.personality?`<p><span class="muted">性格：</span>${esc(c.personality)}</p>`:''}
           ${c.background?`<p><span class="muted">背景：</span>${esc(c.background)}</p>`:''}
           ${c.appearance?`<p><span class="muted">外貌：</span>${esc(c.appearance)}</p>`:''}
@@ -400,67 +421,19 @@ async function addCharacter(){
   }catch(e){toast('新增失敗')}
 }
 async function deleteCharacter(id){
-  if(!confirm('確定刪除？相關關係也會被刪除'))return;
-  try{await api('/api/novel/characters/'+id,'DELETE');toast('已刪除');loadCharacters();loadRelationships()}
-  catch(e){toast('刪除失敗')}
-}
-
-// ─── Relationships ───
-function updateCharSelects(){
-  const opts=characters.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');
-  ['rel-a','rel-b'].forEach(id=>{
-    const el=document.getElementById(id);
-    const cur=el.value;
-    el.innerHTML=opts;
-    if(cur)el.value=cur;
-  });
-  // also update project character checkboxes
-  const pcs=document.getElementById('proj-char-select');
-  if(pcs){
-    const checked=Array.from(pcs.querySelectorAll('input:checked')).map(i=>i.value);
-    pcs.innerHTML=characters.map(c=>`<label><input type="checkbox" value="${c.id}" ${checked.includes(c.id)?'checked':''}> ${esc(c.name)}</label>`).join('');
-  }
-}
-async function loadRelationships(){
-  try{
-    relationships=await api('/api/novel/relationships');
-    renderRelationships();
-  }catch(e){toast('載入關係失敗')}
-}
-function renderRelationships(){
-  const div=document.getElementById('rel-list');
-  if(!relationships.length){div.innerHTML='<h2>關係列表</h2><p class="muted">尚無關係</p>';return}
-  div.innerHTML='<h2>關係列表</h2>'+relationships.map(r=>`
-    <div class="card" style="border-color:var(--border)">
-      <div style="display:flex;justify-content:space-between;align-items:start">
-        <div>
-          <strong>${esc(r.character_a_name)} → ${esc(r.character_b_name)}</strong>
-          <span class="tag" style="background:var(--card)">${esc(r.relationship_type)}</span>
-          ${r.description?`<p class="muted">${esc(r.description)}</p>`:''}
-        </div>
-        <button class="small danger" onclick="deleteRelationship('${r.id}')">刪除</button>
-      </div>
-    </div>`).join('');
-}
-async function addRelationship(){
-  const data={
-    character_a:val('rel-a'),character_b:val('rel-b'),
-    relationship_type:val('rel-type'),description:val('rel-desc'),direction:val('rel-direction')
-  };
-  if(!data.character_a||!data.character_b||!data.relationship_type){toast('請填寫角色和關係類型');return}
-  try{
-    await api('/api/novel/relationships','POST',data);
-    clear('rel-type');clear('rel-desc');
-    toast('✅ 關係已新增');
-    loadRelationships();
-  }catch(e){toast('新增失敗')}
-}
-async function deleteRelationship(id){
-  try{await api('/api/novel/relationships/'+id,'DELETE');toast('已刪除');loadRelationships()}
+  if(!confirm('確定刪除？所有專案中的此角色和相關關係也會被移除'))return;
+  try{await api('/api/novel/characters/'+id,'DELETE');toast('已刪除');loadCharacters()}
   catch(e){toast('刪除失敗')}
 }
 
 // ─── Projects ───
+function updateProjCharSelect(){
+  const pcs=document.getElementById('proj-char-select');
+  if(!pcs)return;
+  const checked=Array.from(pcs.querySelectorAll('input:checked')).map(i=>i.value);
+  pcs.innerHTML=characters.map(c=>`<label><input type="checkbox" value="${c.id}" ${checked.includes(c.id)?'checked':''}> ${esc(c.name)}</label>`).join('');
+}
+
 async function loadProjects(){
   try{
     projects=await api('/api/novel/projects');
@@ -476,6 +449,8 @@ function renderProjects(){
         <div>
           <h3>${esc(p.title)}</h3>
           <span class="stat">題材：${esc(p.genre)}</span>
+          <span class="stat">角色：${p.characters_count||0}</span>
+          <span class="stat">關係：${p.relationships_count||0}</span>
           <span class="stat">大綱：${p.outline_count} 章 ${p.outline_confirmed?'✅':'⏳'}</span>
           <span class="stat">已生成：${p.chapters_count}/${p.total_chapters} 章</span>
           <span class="stat">建立：${esc(p.created_at)}</span>
@@ -507,26 +482,176 @@ async function deleteProject(id){
   try{await api('/api/novel/projects/'+id,'DELETE');toast('已刪除');loadProjects()}
   catch(e){toast('刪除失敗')}
 }
+
+// ─── Project Detail ───
 async function openProject(id){
   try{
     currentProject=await api('/api/novel/projects/'+id);
     document.getElementById('projects-list-view').style.display='none';
     document.getElementById('project-detail-view').style.display='block';
     document.getElementById('pd-title').textContent=currentProject.title;
-    const chars=currentProject.characters||[];
-    document.getElementById('pd-info').innerHTML=
-      `題材：${esc(currentProject.genre)} | 角色：${chars.map(c=>esc(c.name)).join(', ')||'無'} | `+
-      `大綱：${currentProject.outline.length} 章 ${currentProject.outline_confirmed?'✅已確認':'⏳未確認'} | `+
-      `已生成：${currentProject.chapters.length}/${currentProject.generation_config.total_chapters} 章`;
+    updateProjectInfo();
+    renderProjectChars();
+    renderProjectRels();
     renderOutline();
     renderChapters();
     updateGenUI();
+    updatePdAddCharSelect();
+    updatePdRelSelects();
   }catch(e){toast('載入專案失敗')}
+}
+function updateProjectInfo(){
+  const chars=currentProject.characters||[];
+  document.getElementById('pd-info').innerHTML=
+    `題材：${esc(currentProject.genre)} | 角色：${chars.length} 人 | `+
+    `關係：${(currentProject.relationships||[]).length} 條 | `+
+    `大綱：${currentProject.outline.length} 章 ${currentProject.outline_confirmed?'✅已確認':'⏳未確認'} | `+
+    `已生成：${currentProject.chapters.length}/${currentProject.generation_config.total_chapters} 章`;
 }
 function backToProjects(){
   document.getElementById('projects-list-view').style.display='block';
   document.getElementById('project-detail-view').style.display='none';
   currentProject=null;loadProjects();
+}
+
+// ─── 專案角色管理（per-project role）───
+function getCharName(id){
+  const c=characters.find(c=>c.id===id);
+  return c?c.name:'?';
+}
+function getCharInfo(id){
+  const c=characters.find(c=>c.id===id);
+  return c||null;
+}
+
+function updatePdAddCharSelect(){
+  const sel=document.getElementById('pd-add-char-select');
+  const inProject=new Set((currentProject.characters||[]).map(c=>c.id));
+  const available=characters.filter(c=>!inProject.has(c.id));
+  sel.innerHTML=available.length
+    ? available.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')
+    : '<option value="">（所有角色已加入）</option>';
+}
+
+function renderProjectChars(){
+  const div=document.getElementById('pd-char-list');
+  const chars=currentProject.characters||[];
+  if(!chars.length){div.innerHTML='<p class="muted">尚無角色，請從上方加入</p>';return}
+  div.innerHTML=chars.map(pc=>{
+    const info=getCharInfo(pc.id);
+    const name=info?info.name:'?（已刪除）';
+    return `
+    <div class="char-row">
+      <div class="char-info">
+        <strong>${esc(name)}</strong>
+        ${info&&info.personality?`<br><span class="muted">${esc(info.personality.substring(0,60))}${info.personality.length>60?'...':''}</span>`:''}
+      </div>
+      <select onchange="updateCharRole('${pc.id}',this.value)" class="role-select">
+        <option value="protagonist" ${pc.role==='protagonist'?'selected':''}>主角</option>
+        <option value="supporting" ${pc.role==='supporting'?'selected':''}>配角</option>
+        <option value="antagonist" ${pc.role==='antagonist'?'selected':''}>反派</option>
+        <option value="minor" ${pc.role==='minor'?'selected':''}>次要角色</option>
+      </select>
+      <button class="small danger" onclick="removeCharFromProject('${pc.id}')" style="width:auto">移除</button>
+    </div>`;
+  }).join('');
+}
+
+async function updateCharRole(charId,newRole){
+  try{
+    await api(`/api/novel/projects/${currentProject.id}/characters/${charId}/role`,'PUT',{role:newRole});
+    const pc=(currentProject.characters||[]).find(c=>c.id===charId);
+    if(pc)pc.role=newRole;
+    toast('✅ 定位已更新');
+  }catch(e){toast('更新失敗')}
+}
+async function addCharToProject(){
+  const sel=document.getElementById('pd-add-char-select');
+  const charId=sel.value;
+  if(!charId){toast('沒有可加入的角色');return}
+  try{
+    await api(`/api/novel/projects/${currentProject.id}/characters`,'POST',{character_id:charId});
+    // 更新本地資料
+    const c=characters.find(c=>c.id===charId);
+    currentProject.characters=currentProject.characters||[];
+    currentProject.characters.push({id:charId,role:c?c.role:'supporting'});
+    updatePdAddCharSelect();
+    renderProjectChars();
+    updateProjectInfo();
+    updatePdRelSelects();
+    toast('✅ 角色已加入');
+  }catch(e){toast('加入失敗')}
+}
+async function removeCharFromProject(charId){
+  if(!confirm('確定從此專案移除？相關關係也會被刪除'))return;
+  try{
+    await api(`/api/novel/projects/${currentProject.id}/characters/${charId}`,'DELETE');
+    currentProject.characters=(currentProject.characters||[]).filter(c=>c.id!==charId);
+    currentProject.relationships=(currentProject.relationships||[]).filter(r=>r.character_a!==charId&&r.character_b!==charId);
+    updatePdAddCharSelect();
+    renderProjectChars();
+    renderProjectRels();
+    updateProjectInfo();
+    updatePdRelSelects();
+    toast('已移除');
+  }catch(e){toast('移除失敗')}
+}
+
+// ─── 專案關係鏈（per-project）───
+function updatePdRelSelects(){
+  const chars=currentProject.characters||[];
+  const opts=chars.map(pc=>`<option value="${pc.id}">${esc(getCharName(pc.id))}</option>`).join('');
+  ['pd-rel-a','pd-rel-b'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    const cur=el.value;
+    el.innerHTML=opts;
+    if(cur)el.value=cur;
+  });
+}
+
+function renderProjectRels(){
+  const div=document.getElementById('pd-rel-list');
+  const rels=currentProject.relationships||[];
+  if(!rels.length){div.innerHTML='<p class="muted">尚無關係</p>';return}
+  div.innerHTML=rels.map(r=>`
+    <div class="rel-row">
+      <div class="rel-info">
+        <strong>${esc(r.character_a_name||getCharName(r.character_a))} → ${esc(r.character_b_name||getCharName(r.character_b))}</strong>
+        <span class="tag" style="background:var(--card)">${esc(r.relationship_type)}</span>
+        ${r.description?`<br><span class="muted">${esc(r.description)}</span>`:''}
+      </div>
+      <button class="small danger" onclick="deleteProjectRelationship('${r.id}')" style="width:auto">刪除</button>
+    </div>`).join('');
+}
+
+async function addProjectRelationship(){
+  const data={
+    character_a:val('pd-rel-a'),character_b:val('pd-rel-b'),
+    relationship_type:val('pd-rel-type'),description:val('pd-rel-desc'),direction:val('pd-rel-direction')
+  };
+  if(!data.character_a||!data.character_b||!data.relationship_type){toast('請填寫角色和關係類型');return}
+  if(data.character_a===data.character_b){toast('不能選相同的角色');return}
+  try{
+    const r=await api(`/api/novel/projects/${currentProject.id}/relationships`,'POST',data);
+    currentProject.relationships=currentProject.relationships||[];
+    r.character_a_name=getCharName(r.character_a);
+    r.character_b_name=getCharName(r.character_b);
+    currentProject.relationships.push(r);
+    renderProjectRels();
+    updateProjectInfo();
+    clear('pd-rel-type');clear('pd-rel-desc');
+    toast('✅ 關係已新增');
+  }catch(e){toast('新增失敗')}
+}
+async function deleteProjectRelationship(relId){
+  try{
+    await api(`/api/novel/projects/${currentProject.id}/relationships/${relId}`,'DELETE');
+    currentProject.relationships=(currentProject.relationships||[]).filter(r=>r.id!==relId);
+    renderProjectRels();
+    updateProjectInfo();
+    toast('已刪除');
+  }catch(e){toast('刪除失敗')}
 }
 
 // ─── Outline ───
@@ -599,7 +724,6 @@ async function generateChapter(num,btn){
   try{
     const r=await api(`/api/novel/projects/${currentProject.id}/generate-chapter`,'POST',{chapter:num});
     if(r.error){toast(r.error);return}
-    // 更新本地資料
     const idx=currentProject.chapters.findIndex(c=>c.chapter===r.chapter);
     if(idx>=0)currentProject.chapters[idx]=r;
     else{currentProject.chapters.push(r);currentProject.chapters.sort((a,b)=>a.chapter-b.chapter)}
@@ -660,6 +784,11 @@ function clear(id){document.getElementById(id).value=''}
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
 // ─── Init ───
+async function loadAll(){
+  await loadSettings();
+  await loadCharacters();
+  await loadProjects();
+}
 if(AUTH_TOKEN===OWNER_ID)showMain();
 </script>
 </body>
