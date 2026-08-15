@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: discord-borda-poll-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python discord_borda_poll.py
+    healthCheckPath: /health
+    envVars:
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: SELF_URL
+        sync: false
