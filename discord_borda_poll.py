@@ -65,10 +65,6 @@ _PERSIST_FILES = {
     "kaobei_settings.json",
     "secretary_timer_settings.json",
     "bot_status.json",
-    "novel_settings.json",
-    "novel_characters.json",
-    "novel_relationships.json",
-    "novel_projects.json",
 }
 
 # ─── Bot Instance ──────────────────────────────────────────────────────────
