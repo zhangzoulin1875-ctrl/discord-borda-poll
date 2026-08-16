@@ -1,8 +1,0 @@
-{
-  "api_type": "openai",
-  "api_url": "https://api.ltzy.top/v1",
-  "api_key": "sk-52dd603dab7d705016bcd06daa116b0f1830f42b2ecc914c69d7835169c0f430",
-  "model": "deepseek-ai/deepseek-v4-flash-0731",
-  "temperature": 0.8,
-  "max_tokens": 1048576
-}
