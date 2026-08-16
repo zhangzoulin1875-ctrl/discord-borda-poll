@@ -390,7 +390,10 @@ async def ww1_start(interaction):
 
 
 @ww1_group.command(name="join", description="加入遊戲（選擇國家）")
-@app_commands.autocomplete(country=lambda interaction, current: [app_commands.Choice(name=c, value=c) for c in _get_country_list() if current.lower() in c.lower()][:25])
+async def _country_autocomplete(interaction: discord.Interaction, current: str):
+    return [app_commands.Choice(name=c, value=c) for c in _get_country_list() if current.lower() in c.lower()][:25]
+
+@app_commands.autocomplete(country=_country_autocomplete)
 async def ww1_join(interaction, country: str):
     try:
         if ww1_state["phase"] != "lobby":
