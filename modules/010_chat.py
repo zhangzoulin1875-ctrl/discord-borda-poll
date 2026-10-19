@@ -21,7 +21,7 @@ import json as _json
 import aiohttp
 
 # ─── 預設人設（通用聊天機器人，不預設任何社群背景） ───────────────────────
-DEFAULT_CHAT_PROMPT = """你是一個友善、反應機靈的 Discord 聊天機器人，主要使用繁體中文與人交談，對方用其他語言時就用對方的語言回答。
+DEFAULT_CHAT_PROMPT = """你是一個友善、反應機靈的 Discord 聊天機器人，一律使用繁體中文回答。只有當使用者「本則訊息」整句都是其他語言、或明確要求換語言時，才用該語言回答；歷史對話或你自己先前的用語不構成換語言的理由，下一則恢復繁體中文。
 
 風格：
 - 口吻自然輕鬆，像朋友聊天，不要客服腔，不要過度使用表情符號
@@ -105,6 +105,7 @@ chat_ai_settings = load_json("chat_ai_settings.json") or {
 
 # 舊版預設人設（若存檔仍是這份，代表使用者沒自訂過，自動升級成新預設）
 _OLD_DEFAULT_PROMPTS = {
+    '你是一個友善、反應機靈的 Discord 聊天機器人，主要使用繁體中文與人交談，對方用其他語言時就用對方的語言回答。\n\n風格：\n- 口吻自然輕鬆，像朋友聊天，不要客服腔，不要過度使用表情符號\n- 回覆簡短有力，通常 1-4 句話；對方追問細節或需要完整說明時才寫長\n- 直接給出答案，不要展示思考過程，不要寫「讓我想想」「首先」之類的開場白',
     "你是一個友善、反應機靈的 Discord 聊天機器人，主要使用繁體中文與人交談。\n\n行為準則：\n- 口吻自然輕鬆，像朋友聊天，不要客服腔，不要過度使用表情符號\n- 回覆簡短有力，通常 1-4 句話；除非對方追問細節，否則不寫長篇大論\n- 不確定的事就直說不確定，不要瞎編\n- 直接給出答案，不要在回覆中展示思考過程、推理步驟或分析邏輯\n- 不要寫「讓我想想」「我來分析一下」「首先」等思考性開場白\n- 你的回覆必須是一個自然的對話回應，不是思考筆記",
 }
 if chat_ai_settings.get("system_prompt", "").strip() in _OLD_DEFAULT_PROMPTS:
@@ -573,19 +574,24 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
 
 # ─── 對話上下文（每頻道，只保留同一使用者 + 機器人的訊息） ─────────────────
 _chat_context = {}   # channel_id -> list[{"role": "user"/"assistant", "content": str, "uid": int}]
-_CTX_MAX_CHANNELS = 300
+_CTX_MAX_CHANNELS = 600       # 現在是 (頻道,使用者) 為單位
+_user_locks = {}   # (頻道, 使用者) -> asyncio.Lock，同一人訊息串行處理
+_CTX_IDLE_SEC = 1800          # 30 分鐘沒互動就視為新話題
 
 
-def _ctx_key(message) -> int:
-    return getattr(message.channel, "id", 0) or 0
+def _ctx_key(message):
+    """對話串的 key = (頻道, 使用者)。不同人的對話完全隔離，
+    避免甲乙交錯發言時乙拿到甲的問答（問A答B、張冠李戴）。"""
+    return (getattr(message.channel, "id", 0) or 0, getattr(message.author, "id", 0) or 0)
 
 
-def _ctx_push(channel_id: int, entry: dict):
+def _ctx_push(channel_id, entry: dict):
+    entry["ts"] = _time.time()
     _chat_context.setdefault(channel_id, []).append(entry)
-    # 每頻道上限
+    # 每串上限
     lst = _chat_context[channel_id]
-    if len(lst) > 30:
-        del lst[: len(lst) - 30]
+    if len(lst) > 20:
+        del lst[: len(lst) - 20]
     # 頻道數上限（簡單 LRU：超過就砍最舊的 key）
     if len(_chat_context) > _CTX_MAX_CHANNELS:
         for k in list(_chat_context.keys())[: len(_chat_context) - _CTX_MAX_CHANNELS]:
@@ -597,9 +603,21 @@ def _build_context_messages(message, user_text: str) -> list:
     過濾規則（舊版教訓）：只帶同一使用者與機器人自己的訊息，不注入他人聊天。"""
     s = chat_ai_settings
     msgs = [{"role": "system", "content": _system_prompt()}]
-    hist = _chat_context.get(_ctx_key(message), [])[-s["context_messages"]:]
-    for h in hist:
-        msgs.append({"role": h["role"], "content": h["content"]})
+    hist = _chat_context.get(_ctx_key(message), [])
+    # 超過 30 分鐘沒互動 → 當作新話題，不帶舊內容（舊話題是「越聊越亂」的主因）
+    if hist and _time.time() - hist[-1].get("ts", 0) > _CTX_IDLE_SEC:
+        _chat_context.pop(_ctx_key(message), None)
+        hist = []
+    hist = hist[-s["context_messages"]:]
+    # 單則上限 600 字、總量上限 2400 字（從最新往回算），避免長歷史壓垮弱模型
+    picked, total = [], 0
+    for h in reversed(hist):
+        c = h["content"][:600]
+        if total + len(c) > 2400:
+            break
+        picked.append({"role": h["role"], "content": c})
+        total += len(c)
+    msgs.extend(reversed(picked))
     msgs.append({"role": "user", "content": user_text[:4000]})
     return msgs
 
@@ -763,6 +781,20 @@ async def handle_chat_message(message: discord.Message):
     img_desc = await _describe_images(message)
     user_text = (text + img_desc).strip() or "（使用者傳了一個非文字內容）"
 
+    # 同一人在同頻道連發時排隊：等前一則回覆寫進上下文後，才組這一則的 messages
+    # （否則兩則同時拿到同一份舊上下文，回覆會對錯題、順序顛倒）
+    _lock = _user_locks.setdefault(_ctx_key(message), asyncio.Lock())
+    await _lock.acquire()
+    try:
+        await _handle_chat_locked(message, user_text, is_dm, mentioned, replied_to_bot)
+    finally:
+        _lock.release()
+        if len(_user_locks) > 800:
+            for k in [k for k, v in _user_locks.items() if not v.locked()][:400]:
+                _user_locks.pop(k, None)
+
+
+async def _handle_chat_locked(message, user_text, is_dm, mentioned, replied_to_bot):
     # ── 呼叫 AI ──
     messages = _build_context_messages(message, user_text)
     try:
@@ -786,7 +818,7 @@ async def handle_chat_message(message: discord.Message):
     # ── 記錄上下文並回覆 ──
     cid = _ctx_key(message)
     _ctx_push(cid, {"role": "user", "content": user_text[:1500], "uid": message.author.id})
-    _ctx_push(cid, {"role": "assistant", "content": reply_text[:1500], "uid": bot.user.id})
+    _ctx_push(cid, {"role": "assistant", "content": reply_text[:1500], "uid": message.author.id})
     await _send_reply(message, reply_text)
 
 
@@ -1018,13 +1050,21 @@ class ChatGroup(app_commands.Group):
             lines.append(f"\n建議：`/chat model {ok[0][0]}`")
         await interaction.followup.send("\n".join(lines)[:1990])
 
-    @app_commands.command(name="reset", description="清空這個頻道的 AI 對話記憶")
-    async def reset(self, interaction: discord.Interaction):
+    @app_commands.command(name="reset", description="清空 AI 對話記憶（預設清這個頻道所有人；可指定單一使用者）")
+    @app_commands.describe(user="只清這位使用者在本頻道的對話記憶；留空=清本頻道所有人")
+    async def reset(self, interaction: discord.Interaction, user: discord.User = None):
         if not is_owner(interaction):
             await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
             return
-        _chat_context.pop(interaction.channel_id, None)
-        await interaction.response.send_message("🧹 這個頻道的對話記憶已清空", ephemeral=True)
+        cid = interaction.channel_id
+        if user is not None:
+            n = 1 if _chat_context.pop((cid, user.id), None) is not None else 0
+            await interaction.response.send_message(f"🧹 已清空 {user.display_name} 在本頻道的對話記憶（{n} 串）", ephemeral=True)
+            return
+        keys = [k for k in _chat_context if isinstance(k, tuple) and k[0] == cid]
+        for k in keys:
+            _chat_context.pop(k, None)
+        await interaction.response.send_message(f"🧹 這個頻道的對話記憶已清空（{len(keys)} 串）", ephemeral=True)
 
 
 ChatGroup_instance = ChatGroup()
