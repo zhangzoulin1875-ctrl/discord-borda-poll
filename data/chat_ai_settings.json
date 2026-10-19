@@ -2,7 +2,7 @@
   "enabled": true,
   "api_url": "https://integrate.api.nvidia.com/v1",
   "api_key": "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",
-  "model": "z-ai/glm-5.2",
+  "model": "z-ai/glm-5-3-flash",
   "model_fallback_chain": "",
   "backup_api_url": "",
   "backup_api_key": "",
