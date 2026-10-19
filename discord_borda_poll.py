@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-ICEA Discord Bot — Base Framework
-===================================
-A clean starting point for the rewritten bot.
+General-Purpose Discord Bot — Base Framework (v3)
+===================================================
+A clean starting point for the rewritten, general-purpose bot
+(no longer tied to any specific community).
 
 Architecture:
   - Single main file (discord_borda_poll.py) — bot init, event loop, shared state
   - modules/ — feature modules loaded at startup
-  - data/ — JSON persistence (auto-created)
+  - data/ — JSON persistence (auto-created, synced to GitHub)
 
 Design Principles:
   1. Every async handler has try/except — no silent crashes
-  2. All data persists to data/*.json with atomic writes
+  2. All data persists to data/*.json with atomic writes (+ GitHub sync)
   3. All times are GMT+8 (Asia/Taipei)
   4. ephemeral messages for personal interactions
   5. Owner-only management commands (Discord ID in env or hardcoded)
   6. Supports Render Web Service mode (built-in HTTP keep-alive server)
+  7. All AI calls run the FULL fallback chain (primary → model chain → backup API)
 """
 
 import asyncio
@@ -55,15 +57,7 @@ GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
 _github_file_shas = {}
 # Files to persist to GitHub (settings only - records are rebuildable from Discord)
 _PERSIST_FILES = {
-    "proposal_settings.json",
-    "application_settings.json",
-    "polls.json",
-    "ticket_settings.json",
-    "tickets.json",
-    "task_settings.json",
-    "tasks.json",
-    "kaobei_settings.json",
-    "secretary_timer_settings.json",
+    "chat_ai_settings.json",
     "bot_status.json",
 }
 
@@ -118,7 +112,7 @@ def is_owner(interaction: discord.Interaction) -> bool:
     return interaction.user.id == OWNER_ID
 
 
-# ─── GitHub Persistence (replaces Google Drive) ──────────────────────────
+# ─── GitHub Persistence ──────────────────────────────────────────────────
 def _github_api_url(filename: str) -> str:
     return f"https://api.github.com/repos/{GITHUB_REPO}/contents/data/{filename}"
 
@@ -346,114 +340,80 @@ async def on_ready():
     except Exception as e:
         print(f"⚠️ 指令同步失敗：{e}")
 
-    # Set bot activity status (from persisted settings or default)
+    # Set bot activity status (from persisted settings)
     try:
         status_data = load_json("bot_status.json", {})
-        activity_name = status_data.get("activity", "ICEA 投票與行政系統")
-        activity_type = status_data.get("type", "playing")
-        types = {"playing": discord.ActivityType.playing, "watching": discord.ActivityType.watching, "listening": discord.ActivityType.listening, "competing": discord.ActivityType.competing}
-        atype = types.get(activity_type, discord.ActivityType.playing)
-        await bot.change_presence(activity=discord.Activity(type=atype, name=activity_name))
-        print(f"🎮 狀態已設定：{activity_name} (type={activity_type})")
+        activity_name = status_data.get("activity")
+        if activity_name:
+            activity_type = status_data.get("type", "playing")
+            types = {"playing": discord.ActivityType.playing, "watching": discord.ActivityType.watching, "listening": discord.ActivityType.listening, "competing": discord.ActivityType.competing}
+            atype = types.get(activity_type, discord.ActivityType.playing)
+            await bot.change_presence(activity=discord.Activity(type=atype, name=activity_name))
+            print(f"🎮 狀態已設定：{activity_name} (type={activity_type})")
     except Exception as e:
         print(f"⚠️ 狀態設定失敗：{e}")
-
-    # Set nickname to ICEA official
-    for guild in bot.guilds:
-        try:
-            member = guild.get_member(bot.user.id)
-            if member and member.nick != "ICEA official":
-                await member.edit(nick="ICEA official")
-        except Exception:
-            pass
 
     # Start self-ping loop (prevent Render free tier sleep)
     asyncio.ensure_future(self_ping_loop())
 
-    # ── 模組 on_ready 掛鉤：每個模組可各自註冊一個啟動後要跑的函式，
-    # 全部收集在 _bot_ready_hooks 清單裡（避免多個模組用同名函式互相覆蓋）──
-    for hook in _bot_globals.get("_bot_ready_hooks", []):
+    # ── 模組 on_ready 掛鉤 ──
+    for hook in list(_bot_globals.get("_bot_ready_hooks", [])):
         try:
-            asyncio.ensure_future(hook())
+            await hook()
         except Exception as e:
-            print(f"⚠️ on_ready 掛鉤 {getattr(hook, '__name__', hook)} 錯誤：{e}")
+            print(f"⚠️ on_ready hook 錯誤：{e}")
+            traceback.print_exc()
 
 
 @bot.event
 async def on_message(message: discord.Message):
-    """Central message handler — dispatches to module hooks."""
-    if message.author.bot or message.author == bot.user:
+    """派發訊息到所有模組註冊的 handler（有序、互相獨立）。"""
+    if message.author.bot:
         return
-
-    # ── 提案區偵測 ──
-    handler = _bot_globals.get("handle_proposal_message")
-    if handler:
+    for handler in list(_bot_globals.get("_bot_message_handlers", [])):
         try:
             await handler(message)
         except Exception as e:
-            print(f"⚠️ handle_proposal_message 錯誤：{e}")
-
-    # ── 入盟申請區偵測 ──
-    handler = _bot_globals.get("handle_application_message")
-    if handler:
-        try:
-            await handler(message)
-        except Exception as e:
-            print(f"⚠️ handle_application_message 錯誤：{e}")
-
-    # ── 投票回覆偵測 ──
-    handler = _bot_globals.get("handle_poll_message")
-    if handler:
-        try:
-            await handler(message)
-        except Exception as e:
-            print(f"⚠️ handle_poll_message 錯誤：{e}")
+            print(f"⚠️ on_message handler 錯誤：{e}")
+            traceback.print_exc()
 
 
 @bot.event
 async def on_message_edit(before: discord.Message, after: discord.Message):
-    """Detect edits to application posts and re-check them."""
     if after.author.bot:
         return
-    handler = _bot_globals.get("handle_application_edit")
-    if handler:
+    for handler in list(_bot_globals.get("_bot_message_edit_handlers", [])):
         try:
             await handler(before, after)
         except Exception as e:
-            print(f"⚠️ handle_application_edit 錯誤：{e}")
+            print(f"⚠️ on_message_edit handler 錯誤：{e}")
 
 
 @bot.event
 async def on_thread_create(thread: discord.Thread):
-    """Detect new forum threads in proposal/application channels."""
-    handler = _bot_globals.get("handle_thread_create")
-    if handler:
+    for handler in list(_bot_globals.get("_bot_thread_create_handlers", [])):
         try:
             await handler(thread)
         except Exception as e:
-            print(f"⚠️ handle_thread_create 錯誤：{e}")
+            print(f"⚠️ on_thread_create handler 錯誤：{e}")
 
 
 @bot.event
 async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
-    """頻道被刪除時，通知模組做清理（例如客服單頻道被手動刪除）。"""
-    handler = _bot_globals.get("handle_channel_delete")
-    if handler:
+    for handler in list(_bot_globals.get("_bot_channel_delete_handlers", [])):
         try:
             await handler(channel)
         except Exception as e:
-            print(f"⚠️ handle_channel_delete 錯誤：{e}")
+            print(f"⚠️ on_guild_channel_delete handler 錯誤：{e}")
 
 
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
-    """偵測成員狀態變化（上線/離線），派發到模組。"""
-    handler = _bot_globals.get("handle_member_update")
-    if handler:
+    for handler in list(_bot_globals.get("_bot_member_update_handlers", [])):
         try:
             await handler(before, after)
         except Exception as e:
-            print(f"⚠️ handle_member_update 錯誤：{e}")
+            print(f"⚠️ on_member_update handler 錯誤：{e}")
 
 
 @bot.event
@@ -521,7 +481,7 @@ class BotStatusModal(discord.ui.Modal, title="📝 設定機器人狀態文字")
 
     status_text = discord.ui.TextInput(
         label="狀態文字",
-        placeholder="輸入要顯示的文字，例如：ICEA 投票與行政系統",
+        placeholder="輸入要顯示的文字",
         max_length=128,
         required=True,
     )
@@ -564,7 +524,6 @@ class BotStatusManageView(discord.ui.View):
             await interaction.response.send_message("❌ 僅限機器人擁有者。", ephemeral=True)
             return
         self.selected_type = select.values[0]
-        # If there's a current status text, update with the new type immediately
         status_data = load_json("bot_status.json", {})
         current_text = status_data.get("activity")
         if current_text:
@@ -644,9 +603,14 @@ async def main():
         "asyncio": asyncio,
         "github_push_json": github_push_json,
         "_bot_ready_hooks": [],
+        "_bot_message_handlers": [],
+        "_bot_message_edit_handlers": [],
+        "_bot_thread_create_handlers": [],
+        "_bot_channel_delete_handlers": [],
+        "_bot_member_update_handlers": [],
     })
 
-    # Pull persisted settings from GitHub (replaces Google Drive)
+    # Pull persisted settings from GitHub
     github_pull_all()
 
     # Load feature modules
@@ -667,7 +631,7 @@ async def main():
         elif isinstance(obj, app_commands.Command) and not isinstance(obj, app_commands.Group):
             try:
                 tree.add_command(obj)
-                print(f"📝 已註冊指令：/{obj.name}")
+                print(f"📝 已註冊指令：/{name}")
             except Exception as e:
                 print(f"⚠️ 註冊指令 {name} 失敗：{e}")
 
@@ -675,12 +639,15 @@ async def main():
     try:
         await keep_alive_server()
     except Exception as e:
-        print(f"⚠️ Keep-alive server 啟動失敗（不影響 bot 運行）：{e}")
+        print(f"⚠️ Keep-alive server 啟動失敗：{e}")
 
-    # Start bot
+    # Login and run
     async with bot:
         await bot.start(BOT_TOKEN)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 機器人已關閉")
