@@ -165,6 +165,78 @@ def _geminibench():
             out.append(f"❌ {mdl}: {type(e).__name__} ({time.time()-t0:.1f}s)")
     return "\n".join(out)
 
+
+def _failover_test():
+    """端到端驗證：在 bot 的 event loop 裡呼叫真正的 call_chat_api，
+    (1) 正常路徑  (2) 強制主鏈失效（把主 API 指向不存在的位址）→ 看備援鏈實際多久回覆。測完還原設定。"""
+    import asyncio as _a
+    g = discord_borda_poll._bot_globals
+    S = g["chat_ai_settings"]
+    out = []
+
+    async def _go():
+        msgs = [{"role": "system", "content": g["_system_prompt"]()}, {"role": "user", "content": "推薦南極洲的旅遊景點"}]
+        t = time.time(); r = await g["call_chat_api"](msgs)
+        out.append(f"① 正常路徑: {'✅' if r.get('content') else '❌'} {time.time()-t:.1f}s {len(r.get('content',''))}字 {r.get('error','')}")
+        saved = dict(S)
+        try:
+            S["api_url"] = "http://10.255.255.1:9/v1"      # 黑洞位址：連線永遠卡住，模擬主供應商整個掛掉
+            g["_model_slow_until"].clear(); g["_ai_circuit"].update(fail_streak=0, trip_time=0.0)
+            t = time.time(); r = await g["call_chat_api"](msgs)
+            out.append(f"② 主鏈失效→備援: {'✅' if r.get('content') else '❌'} {time.time()-t:.1f}s {len(r.get('content',''))}字 {r.get('error','')}")
+        finally:
+            S.clear(); S.update(saved)
+            g["_model_slow_until"].clear(); g["_ai_circuit"].update(fail_streak=0, trip_time=0.0)
+        out.append(f"備援鏈: {S.get('backup_model')}")
+
+    fut = asyncio.run_coroutine_threadsafe(_go(), discord_borda_poll.bot.loop)
+    fut.result(timeout=120)
+    return "\n".join(out)
+
+
+def _searchbench():
+    """在 Space 內實測各搜尋來源（HF 出口 IP 可能被擋，必須在這裡測才準）。"""
+    import re as _re, json as _j, urllib.request, urllib.parse
+    out = []
+    UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
+    def get(u, h=None, t=15, data=None):
+        req = urllib.request.Request(u, headers=h or UA, data=data)
+        return urllib.request.urlopen(req, timeout=t).read().decode("utf-8", "ignore")
+    q = "台灣 最新 新聞"
+    t0 = time.time()
+    try:
+        h = get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(q))
+        n = len(_re.findall(r'class="result__a"', h))
+        out.append(f"{'✅' if n else '❌'} DuckDuckGo HTML: {n} 筆 {time.time()-t0:.1f}s" + ("（疑似被擋）" if (not n and ("anomaly" in h or "captcha" in h.lower())) else ""))
+    except Exception as e:
+        out.append(f"❌ DuckDuckGo HTML: {type(e).__name__} {str(e)[:60]}")
+    t0 = time.time()
+    try:
+        x = get("https://news.google.com/rss/search?q=" + urllib.parse.quote(q) + "&hl=zh-TW&gl=TW&ceid=TW:zh-Hant")
+        out.append(f"✅ Google News RSS: {len(_re.findall('<item>', x))} 筆 {time.time()-t0:.1f}s")
+    except Exception as e:
+        out.append(f"❌ Google News RSS: {type(e).__name__} {str(e)[:60]}")
+    t0 = time.time()
+    try:
+        j = _j.loads(get("https://zh.wikipedia.org/w/api.php?action=query&list=search&srsearch=" + urllib.parse.quote("台灣") + "&format=json&srlimit=3"))
+        out.append(f"✅ Wikipedia API: {len(j['query']['search'])} 筆 {time.time()-t0:.1f}s")
+    except Exception as e:
+        out.append(f"❌ Wikipedia API: {type(e).__name__} {str(e)[:60]}")
+    bk = os.environ.get("CHAT_BACKUP_API_KEY", "")
+    for mdl in ("gemini-3.5-flash", "gemini-3-flash-preview"):
+        t0 = time.time()
+        try:
+            body = {"contents": [{"parts": [{"text": "今天台灣有什麼重要新聞？用繁體中文兩句話回答"}]}], "tools": [{"google_search": {}}]}
+            r = _j.loads(get(f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent", {"Content-Type": "application/json", "x-goog-api-key": bk}, 40, _j.dumps(body).encode()))
+            cand = r["candidates"][0]; txt = "".join(p.get("text", "") for p in cand["content"]["parts"])
+            gm = cand.get("groundingMetadata", {}); srcs = len(gm.get("groundingChunks", []))
+            out.append(f"{'✅' if srcs else '⚠️無來源'} Gemini 內建 Google 搜尋 [{mdl}]: {srcs} 個來源 {time.time()-t0:.1f}s ｜ {txt[:70]!r}")
+        except urllib.error.HTTPError as e:
+            out.append(f"❌ Gemini grounding [{mdl}]: HTTP {e.code} {e.read().decode()[:120]}")
+        except Exception as e:
+            out.append(f"❌ Gemini grounding [{mdl}]: {type(e).__name__} {str(e)[:60]}")
+    return "\n".join(out)
+
 with gr.Blocks(title="Discord Bot") as demo:
     gr.Markdown("# 🤖 Discord Bot 控制頁")
     gr.Markdown("這個頁面只是讓 Space 保持服務的殼，bot 本體在背景執行。")
@@ -176,5 +248,9 @@ with gr.Blocks(title="Discord Bot") as demo:
     net_btn.click(fn=_netcheck, outputs=net_out, api_name="netcheck")
     gb_btn = gr.Button("測備援模型速度")
     gb_btn.click(fn=_geminibench, outputs=net_out, api_name="geminibench")
+    fo_btn = gr.Button("容錯演練")
+    fo_btn.click(fn=_failover_test, outputs=net_out, api_name="failover")
+    sb_btn = gr.Button("搜尋來源測試")
+    sb_btn.click(fn=_searchbench, outputs=net_out, api_name="searchbench")
 
 demo.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", 7860)))
