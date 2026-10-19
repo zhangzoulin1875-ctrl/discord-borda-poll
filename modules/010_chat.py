@@ -54,7 +54,14 @@ BASE_RULES = """
 
 拒絕的方式：
 - 拒絕時簡短、不說教、不指責對方，一句話說明不能做，可能的話提供安全的替代方案
-- 灰色地帶優先從善意解讀並提供有幫助的部分，只拒絕真正有害的部分"""
+- 灰色地帶優先從善意解讀並提供有幫助的部分，只拒絕真正有害的部分
+
+【輸出格式（你在 Discord 裡，不是網頁）】
+Discord 只支援這些：**粗體**、*斜體*、__底線__、~~刪除線~~、`行內程式碼`、``` 程式碼區塊 ```、> 引用、- 清單、1. 編號清單、# ## ### 標題、[文字](網址)。
+Discord「不支援」且會顯示成亂碼的：Markdown 表格（| 欄 | 欄 |）、水平線（---）、HTML 標籤、圖片語法、待辦清單（- [ ]）。
+- 絕對不要輸出表格。要比較多個項目或排時間表時，改用條列：每個項目一行粗體標題，底下用 - 列出屬性
+- 一般聊天直接用自然語句，不必每次都加標題或粗體；標題只在長篇說明時使用
+- 程式碼一律放進有語言標記的 ``` 區塊"""
 
 
 def _system_prompt() -> str:
@@ -664,15 +671,167 @@ async def _describe_images(message) -> str:
     return "\n" + "\n".join(parts)
 
 
+# ─── Discord 格式修正（模型常輸出網頁版 Markdown，Discord 不支援會變亂碼） ──────────
+import re as _re
+import unicodedata as _ud
+
+
+def _disp_width(t: str) -> int:
+    """顯示寬度：全形/中日韓字元算 2，其他算 1（程式碼區塊是等寬字型，中文佔兩格）。"""
+    w = 0
+    for ch in t:
+        if _ud.combining(ch):
+            continue
+        w += 2 if _ud.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def _pad(t: str, width: int) -> str:
+    return t + " " * max(0, width - _disp_width(t))
+
+
+def _strip_inline_md(t: str) -> str:
+    """程式碼區塊裡不會渲染 Markdown，儲存格內的 **粗體**、`碼`、[文字](網址) 要先還原成純文字。"""
+    t = _re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", t)
+    t = _re.sub(r"(\*\*|__|~~)(.+?)\1", r"\2", t)
+    t = _re.sub(r"(?<![*\w])\*(?!\s)(.+?)(?<!\s)\*(?![*\w])", r"\1", t)
+    t = t.replace("`", "").replace("<br>", " ").replace("<br/>", " ").replace("<br />", " ")
+    return t.strip()
+
+
+_TABLE_SEP = _re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _split_row(line: str) -> list:
+    line = line.strip()
+    if line.startswith("|"):
+        line = line[1:]
+    if line.endswith("|") and not line.endswith("\\|"):
+        line = line[:-1]
+    cells, cur, i = [], "", 0
+    while i < len(line):
+        if line[i] == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            cur += "|"; i += 2; continue
+        if line[i] == "|":
+            cells.append(cur); cur = ""
+        else:
+            cur += line[i]
+        i += 1
+    cells.append(cur)
+    return [c.strip() for c in cells]
+
+
+def _render_table(rows: list) -> str:
+    """rows[0] 是表頭。窄表格 → 對齊的程式碼區塊；寬表格 → 手機好讀的條列。"""
+    header = [_strip_inline_md(c) for c in rows[0]]
+    body = [[_strip_inline_md(c) for c in r] for r in rows[1:]]
+    ncol = len(header)
+    body = [(r + [""] * ncol)[:ncol] for r in body]
+    widths = [max(_disp_width(x) for x in [header[i]] + [r[i] for r in body]) for i in range(ncol)]
+    total = sum(widths) + 3 * (ncol - 1)
+    # 手機版程式碼區塊約 38 格就要橫向捲動；超過就改條列（每格長句子的比較表幾乎都會走這條）
+    if total <= 40 and ncol <= 6:
+        def line(cells):
+            return " │ ".join(_pad(cells[i], widths[i]) for i in range(ncol)).rstrip()
+        sep = "─┼─".join("─" * widths[i] for i in range(ncol))
+        return "```\n" + "\n".join([line(header), sep] + [line(r) for r in body]) + "\n```"
+    out = []
+    for r in body:
+        title = _strip_inline_md(r[0]) or "（空）"
+        out.append(f"**{title}**")
+        for i in range(1, ncol):
+            if r[i]:
+                out.append(f"- {header[i]}：{r[i]}" if header[i] else f"- {r[i]}")
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
+def discord_format(text: str) -> str:
+    """把網頁版 Markdown 轉成 Discord 能正確顯示的格式。程式碼區塊內的內容一律不動。"""
+    if not text:
+        return text
+    lines = text.replace("\r\n", "\n").split("\n")
+    out, i, in_code = [], 0, False
+    while i < len(lines):
+        ln = lines[i]
+        if ln.lstrip().startswith("```"):
+            in_code = not in_code
+            out.append(ln); i += 1; continue
+        if in_code:
+            out.append(ln); i += 1; continue
+        # 表格：表頭列 + 分隔列 + 若干資料列
+        if "|" in ln and i + 1 < len(lines) and _TABLE_SEP.match(lines[i + 1]) and "-" in lines[i + 1]:
+            hdr = _split_row(ln)
+            if len(hdr) >= 2:
+                rows, j = [hdr], i + 2
+                while j < len(lines) and "|" in lines[j] and lines[j].strip():
+                    rows.append(_split_row(lines[j])); j += 1
+                out.append(_render_table(rows))
+                i = j; continue
+        # 水平線 --- *** ___：Discord 會顯示成文字
+        if _re.fullmatch(r"\s*([-*_])(\s*\1){2,}\s*", ln):
+            i += 1; continue
+        # #### 以上的標題 Discord 不支援 → 改粗體
+        m = _re.match(r"^\s{0,3}#{4,6}\s+(.*?)\s*#*\s*$", ln)
+        if m:
+            out.append(f"**{m.group(1)}**"); i += 1; continue
+        # 待辦清單 - [ ] / - [x]
+        m = _re.match(r"^(\s*)[-*]\s+\[( |x|X)\]\s+(.*)$", ln)
+        if m:
+            out.append(f"{m.group(1)}- {'✅' if m.group(2) != ' ' else '⬜'} {m.group(3)}"); i += 1; continue
+        # 圖片 ![alt](url) → 只留連結（Discord 會自己展開預覽）
+        ln = _re.sub(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)", lambda mm: (mm.group(1) + " " if mm.group(1) else "") + mm.group(2), ln)
+        # 常見 HTML 換行/粗斜體
+        ln = _re.sub(r"<br\s*/?>", "\n", ln, flags=_re.I)
+        ln = _re.sub(r"</?(b|strong)>", "**", ln, flags=_re.I)
+        ln = _re.sub(r"</?(i|em)>", "*", ln, flags=_re.I)
+        out.append(ln); i += 1
+    res = "\n".join(out)
+    res = _re.sub(r"\n{3,}", "\n\n", res)      # 連續空行壓成一個
+    return res.strip()
+
+
 # ─── 回覆傳送（長訊息分塊） ─────────────────────────────────────────────────
+def _split_discord(text: str, limit: int = 1990) -> list:
+    """切成 ≤limit 字的多塊。優先在空行/換行處切；若切點落在程式碼區塊內，
+    該塊結尾補 ``` 、下一塊開頭重開同語言的 ```，避免格式整個錯亂。"""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    chunks, reopen = [], ""
+    while text:
+        body = reopen + text
+        if len(body) <= limit:
+            chunks.append(body); break
+        budget = limit - 4                       # 留位置給可能補上的結尾 ```
+        cut = body.rfind("\n\n", int(budget * 0.5), budget)
+        if cut < 0:
+            cut = body.rfind("\n", int(budget * 0.5), budget)
+        if cut < 0:
+            cut = budget
+        piece, rest = body[:cut].rstrip("\n"), body[cut:].lstrip("\n")
+        # 數 piece 裡尚未關閉的 ```
+        fences = [l for l in piece.split("\n") if l.lstrip().startswith("```")]
+        if len(fences) % 2 == 1:                 # 切在程式碼區塊中間
+            lang = fences[-1].lstrip()[3:].strip()
+            piece += "\n```"
+            reopen = f"```{lang}\n"
+        else:
+            reopen = ""
+        chunks.append(piece)
+        text = rest
+        if not text:
+            break
+    return [c for c in chunks if c.strip()]
+
+
 async def _send_reply(message, text: str):
-    text = text.strip()
+    text = discord_format((text or "").strip())      # 先轉成 Discord 能顯示的格式，再分塊
     if not text:
         return
-    chunks = []
-    while text:
-        chunks.append(text[:2000])
-        text = text[2000:]
+    chunks = _split_discord(text)
+    if not chunks:
+        return
     try:
         await message.reply(chunks[0], mention_author=False)
         for c in chunks[1:]:
