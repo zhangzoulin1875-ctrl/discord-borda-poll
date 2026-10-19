@@ -15,5 +15,5 @@
   "max_tokens": 800,
   "ai_timeout": 25,
   "context_messages": 6,
-  "auto_reply_chance": 3
+  "auto_reply_chance": 0
 }
