@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "api_url": "https://ltzy.top/v1/chat/completions",
-  "api_key": "",
+  "api_key": "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",
   "model": "z-ai/glm-5.2",
   "model_fallback_chain": "",
   "backup_api_url": "",
