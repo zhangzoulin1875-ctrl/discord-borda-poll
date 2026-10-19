@@ -510,9 +510,14 @@ async def handle_chat_message(message: discord.Message):
     user_text = (text + img_desc).strip() or "（使用者傳了一個非文字內容）"
 
     # ── 呼叫 AI ──
-    async with message.channel.typing():
-        messages = _build_context_messages(message, user_text)
-        result = await call_chat_api(messages)
+    messages = _build_context_messages(message, user_text)
+    try:
+        async with message.channel.typing():
+            result = await call_chat_api(messages)
+    except discord.Forbidden as e:
+        print(f"❌ 無法在此頻道作答(403 {getattr(e,'code','')})：機器人缺少「檢視頻道」或「發送訊息」權限 "
+              f"ch={getattr(message.channel,'id',0)}")
+        return
 
     if not result.get("content"):
         err = result.get("error", "未知錯誤")
