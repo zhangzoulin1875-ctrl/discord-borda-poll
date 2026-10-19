@@ -3,10 +3,16 @@ __pycache__/
 *.pyo
 data/*.json
 .env
-blobs/
 incoming_files/
 .agents/
 .agents/.env
 node_modules/
 .npm/
 .cache/
+.venv/
+venv/
+.gradle/
+.dart_tool/
+.pub-cache/
+Pods/
+DerivedData/
