@@ -829,242 +829,390 @@ _bot_message_handlers.append(handle_chat_message)
 # /chat 指令群組（全部僅限機器人擁有者）
 # ═════════════════════════════════════════════════════════════════
 
-class ChatGroup(app_commands.Group):
+# ════════════════════════════════════════════════════════════════════════
+#  管理員面板：/chat 一個指令開啟，所有設定用按鈕、下拉選單、表單完成
+# ════════════════════════════════════════════════════════════════════════
+def _mask_key(k: str) -> str:
+    k = k or ""
+    if not k:
+        return "❌ 未設定"
+    return f"✅ 已設定 `{k[:4]}…{k[-3:]}`" if len(k) > 10 else "✅ 已設定"
+
+
+def _ctx_stats() -> tuple:
+    n_threads = len(_chat_context)
+    n_msgs = sum(len(v) for v in _chat_context.values())
+    return n_threads, n_msgs
+
+
+def _build_panel_embed() -> discord.Embed:
+    s = chat_ai_settings
+    on = bool(s.get("enabled"))
+    e = discord.Embed(
+        title="💬 AI 聊天管理面板",
+        description=("🟢 **運作中**" if on else "🔴 **已關閉**（不會回覆任何訊息）"),
+        color=discord.Color.green() if on else discord.Color.red(),
+    )
+    chain = [c.strip() for c in (s.get("model_fallback_chain") or "").split(",") if c.strip()]
+    e.add_field(name="🧠 主模型", value=f"`{s.get('model') or '未設定'}`", inline=True)
+    e.add_field(name="🔑 API Key", value=_mask_key(s.get("api_key")), inline=True)
+    e.add_field(name="🌐 API", value=f"`{(s.get('api_url') or '未設定')[:48]}`", inline=True)
+    e.add_field(name="⬇️ 降級鏈", value=(" → ".join(f"`{c.split('/')[-1]}`" for c in chain) if chain else "（無）"), inline=False)
+    if s.get("backup_api_url") and s.get("backup_model"):
+        bk = f"`{s['backup_model']}`\n{_mask_key(s.get('backup_api_key'))}"
+    else:
+        bk = "（未設定）"
+    e.add_field(name="🛟 備援 API", value=bk, inline=True)
+    e.add_field(name="👁️ 識圖", value=(f"`{s['vision_model']}`" if s.get("vision_model") else "停用"), inline=True)
+    t, m = _ctx_stats()
+    e.add_field(name="🧠 記憶", value=f"{t} 串 / {m} 則", inline=True)
+    e.add_field(name="⏱️ 冷卻", value=f"自動回覆 {s.get('cooldown_seconds')}s\n@提及 {s.get('mention_cooldown')}s", inline=True)
+    e.add_field(name="🎲 參數", value=f"回答上限 {s.get('max_tokens')} tokens\n逾時 {s.get('ai_timeout')}s\n上下文 {s.get('context_messages')} 則", inline=True)
+    e.add_field(name="🎯 自動回覆機率", value=f"{s.get('auto_reply_chance')}%", inline=True)
+    wl = s.get("channels_whitelist") or []
+    e.add_field(name="📢 自動回覆頻道", value=("、".join(f"<#{c}>" for c in wl[:15]) + (f" …共 {len(wl)} 個" if len(wl) > 15 else "")) if wl else "（無；@提及 與私訊不受影響）", inline=False)
+    persona = (s.get("system_prompt") or "").strip()
+    e.add_field(name="🎭 人設", value=(persona[:160] + "…") if len(persona) > 160 else (persona or "（預設）"), inline=False)
+    if not s.get("api_key") and not s.get("backup_api_key"):
+        e.add_field(name="⚠️ 注意", value="目前沒有任何 API Key，AI 無法回覆。按「🌐 模型與 API」設定。", inline=False)
+    e.set_footer(text="金鑰只存在記憶體，重啟會消失；要長期保存請到 HF Space Secrets 設 CHAT_API_KEY / CHAT_BACKUP_API_KEY")
+    return e
+
+
+class _OwnerView(discord.ui.View):
+    """只有擁有者能操作；逾時後按鈕失效，重新輸入 /chat 即可。"""
+    def __init__(self, timeout=600):
+        super().__init__(timeout=timeout)
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此面板僅限機器人擁有者使用。", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for c in self.children:
+            c.disabled = True
+        try:
+            if self.message:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
+
+
+async def _refresh_panel(interaction: discord.Interaction, note: str = ""):
+    """更新面板（用於 Modal 送出後）。"""
+    view = ChatPanelView()
+    emb = _build_panel_embed()
+    if note:
+        emb.add_field(name="✅ 剛剛的操作", value=note[:300], inline=False)
+    try:
+        await interaction.response.edit_message(embed=emb, view=view)
+    except discord.InteractionResponded:
+        await interaction.edit_original_response(embed=emb, view=view)
+    except Exception:
+        await interaction.response.send_message(note or "已更新", ephemeral=True)
+        return
+    try:
+        view.message = await interaction.original_response()
+    except Exception:
+        pass
+
+
+class _ModelApiModal(discord.ui.Modal, title="🌐 模型與 API"):
+    model = discord.ui.TextInput(label="主模型", placeholder="例如 openai/gpt-oss-20b", max_length=120)
+    chain = discord.ui.TextInput(label="降級鏈（逗號分隔，主模型失敗時依序嘗試；留空=無）", required=False, max_length=400, style=discord.TextStyle.paragraph)
+    api_url = discord.ui.TextInput(label="API 網址（OpenAI 相容端點）", placeholder="https://integrate.api.nvidia.com/v1", max_length=200)
+    api_key = discord.ui.TextInput(label="API Key（留空=不變更）", required=False, max_length=300)
+
     def __init__(self):
-        super().__init__(name="chat", description="AI 聊天設定（僅擁有者）")
+        super().__init__()
+        s = chat_ai_settings
+        self.model.default = s.get("model", "")
+        self.chain.default = s.get("model_fallback_chain", "")
+        self.api_url.default = s.get("api_url", "")
 
-    @app_commands.command(name="status", description="查看 AI 聊天設定")
-    async def status(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        s = chat_ai_settings
+        s["model"] = self.model.value.strip()
+        s["model_fallback_chain"] = self.chain.value.strip()
+        s["api_url"] = self.api_url.value.strip()
+        if self.api_key.value.strip():
+            s["api_key"] = self.api_key.value.strip()
+        _think_rejected.clear()
+        save_chat_settings()
+        await _refresh_panel(interaction, f"主模型 `{s['model']}`，降級鏈 {len([c for c in s['model_fallback_chain'].split(',') if c.strip()])} 個" + ("，Key 已更新" if self.api_key.value.strip() else ""))
+
+
+class _BackupModal(discord.ui.Modal, title="🛟 備援 API"):
+    url = discord.ui.TextInput(label="備援 API 網址（留空=停用備援）", required=False, max_length=200,
+                               placeholder="https://generativelanguage.googleapis.com/v1beta/openai")
+    model = discord.ui.TextInput(label="備援模型", required=False, max_length=120, placeholder="gemma-4-31b-it")
+    key = discord.ui.TextInput(label="備援 API Key（留空=不變更）", required=False, max_length=300)
+
+    def __init__(self):
+        super().__init__()
+        s = chat_ai_settings
+        self.url.default = s.get("backup_api_url", "")
+        self.model.default = s.get("backup_model", "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        s = chat_ai_settings
+        s["backup_api_url"] = self.url.value.strip()
+        s["backup_model"] = self.model.value.strip()
+        if self.key.value.strip():
+            s["backup_api_key"] = self.key.value.strip()
+        save_chat_settings()
+        await _refresh_panel(interaction, "備援 API 已停用" if not s["backup_api_url"] else f"備援 `{s['backup_model']}`" + ("，Key 已更新" if self.key.value.strip() else ""))
+
+
+class _PromptModal(discord.ui.Modal, title="🎭 AI 人設"):
+    prompt = discord.ui.TextInput(label="系統提示詞（留空=恢復預設；安全規則固定附加）", style=discord.TextStyle.paragraph, required=False, max_length=3000)
+
+    def __init__(self):
+        super().__init__()
+        self.prompt.default = (chat_ai_settings.get("system_prompt") or "")[:3000]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        v = self.prompt.value.strip()
+        chat_ai_settings["system_prompt"] = v or DEFAULT_CHAT_PROMPT
+        save_chat_settings()
+        await _refresh_panel(interaction, "人設已" + ("恢復預設" if not v else "更新") + "（基本安全規則固定附加）")
+
+
+class _ParamsModal(discord.ui.Modal, title="🎲 數值參數"):
+    cooldown = discord.ui.TextInput(label="自動回覆冷卻（秒，白名單頻道）", max_length=5)
+    mention_cd = discord.ui.TextInput(label="@提及冷卻（秒，同一人最短間隔）", max_length=5)
+    chance = discord.ui.TextInput(label="自動回覆機率（0-100 %，非問題訊息）", max_length=3)
+    max_tokens = discord.ui.TextInput(label="回答長度上限（tokens，100-4000）", max_length=4)
+    ctx = discord.ui.TextInput(label="上下文則數 0-20 ｜ 逾時秒數 10-90（格式：6, 25）", max_length=12)
+
+    def __init__(self):
+        super().__init__()
+        s = chat_ai_settings
+        self.cooldown.default = str(s.get("cooldown_seconds", 30))
+        self.mention_cd.default = str(s.get("mention_cooldown", 5))
+        self.chance.default = str(s.get("auto_reply_chance", 3))
+        self.max_tokens.default = str(s.get("max_tokens", 800))
+        self.ctx.default = f"{s.get('context_messages', 6)}, {s.get('ai_timeout', 25)}"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            cd = max(0, int(self.cooldown.value)); mcd = max(0, int(self.mention_cd.value))
+            ch = min(100, max(0, int(self.chance.value))); mt = min(4000, max(100, int(self.max_tokens.value)))
+            parts = [x.strip() for x in self.ctx.value.replace("，", ",").split(",")]
+            cm = min(20, max(0, int(parts[0]))); to = min(90, max(10, int(parts[1])))
+        except Exception:
+            await interaction.response.send_message("❌ 格式錯誤：全部要填整數；最後一欄格式是「上下文則數, 逾時秒數」，例如 `6, 25`。", ephemeral=True)
             return
         s = chat_ai_settings
-        key = s.get("api_key", "")
-        key_mask = (key[:6] + "..." + key[-4:]) if len(key) > 12 else ("已設定" if key else "未設定")
-        embed = discord.Embed(title="💬 AI 聊天設定", color=discord.Color.blurple())
-        embed.add_field(name="開關", value="✅ 開啟" if s["enabled"] else "❌ 關閉", inline=True)
-        embed.add_field(name="模型", value=f"`{s['model']}`", inline=True)
-        embed.add_field(name="API Key", value=key_mask, inline=True)
-        embed.add_field(name="API URL", value=f"`{s['api_url'][:60]}`", inline=False)
-        embed.add_field(name="降級鏈", value=f"`{s.get('model_fallback_chain') or '（無）'}`", inline=False)
-        embed.add_field(name="備援 API", value=(f"`{s['backup_api_url'][:40]}` / `{s['backup_model']}`") if s.get("backup_api_url") else "（未設定）", inline=False)
-        embed.add_field(name="視覺模型", value=f"`{s.get('vision_model') or '停用'}`", inline=True)
-        embed.add_field(name="冷卻", value=f"{s['cooldown_seconds']}s", inline=True)
-        embed.add_field(name="識圖", value="啟用" if s.get("vision_model") else "停用", inline=True)
-        embed.add_field(name="自動回覆頻道", value=("、".join(f"<#{c}>" for c in s["channels_whitelist"]) or "（無，@提及/DM 不受影響）"), inline=False)
-        embed.add_field(name="人設", value=(s["system_prompt"][:200] + "…") if len(s["system_prompt"]) > 200 else s["system_prompt"], inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="toggle", description="開啟/關閉 AI 聊天功能")
-    async def toggle(self, interaction: discord.Interaction):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["enabled"] = not chat_ai_settings["enabled"]
+        s.update({"cooldown_seconds": cd, "mention_cooldown": mcd, "auto_reply_chance": ch, "max_tokens": mt, "context_messages": cm, "ai_timeout": to})
         save_chat_settings()
-        status = "✅ 開啟" if chat_ai_settings["enabled"] else "❌ 關閉"
-        await interaction.response.send_message(f"AI 聊天功能已{status}", ephemeral=True)
+        await _refresh_panel(interaction, "數值參數已更新")
 
-    @app_commands.command(name="api", description="設定 AI API URL（OpenAI 相容端點）")
-    @app_commands.describe(url="API 網址，例如 https://example.com/v1/chat/completions（可省略 /v1/chat/completions）")
-    async def api(self, interaction: discord.Interaction, url: str):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["api_url"] = url.strip()
+
+class _VisionModal(discord.ui.Modal, title="👁️ 識圖模型"):
+    model = discord.ui.TextInput(label="視覺模型名稱（留空=停用識圖）", required=False, max_length=120)
+
+    def __init__(self):
+        super().__init__()
+        self.model.default = chat_ai_settings.get("vision_model", "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        chat_ai_settings["vision_model"] = self.model.value.strip()
         save_chat_settings()
-        await interaction.response.send_message(f"✅ API URL 已設為 `{chat_ai_settings['api_url']}`", ephemeral=True)
+        await _refresh_panel(interaction, "識圖已停用" if not self.model.value.strip() else f"識圖模型 `{self.model.value.strip()}`")
 
-    @app_commands.command(name="key", description="設定 AI API Key")
-    @app_commands.describe(key="API Key（sk- 開頭那種）")
-    async def key(self, interaction: discord.Interaction, key: str):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["api_key"] = key.strip()
-        save_chat_settings()
-        await interaction.response.send_message("✅ API Key 已更新（只存在記憶體，Space 重啟後會消失）\n要長期保存請到 HF Space → Settings → Variables and secrets 新增 `CHAT_API_KEY`。", ephemeral=True)
 
-    @app_commands.command(name="model", description="設定主 AI 模型")
-    @app_commands.describe(model="模型名稱")
-    async def model(self, interaction: discord.Interaction, model: str):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["model"] = model.strip()
-        save_chat_settings()
-        await interaction.response.send_message(f"✅ 主模型已設為 `{model}`", ephemeral=True)
+class _TestModal(discord.ui.Modal, title="🧪 測試 AI 回覆"):
+    msg = discord.ui.TextInput(label="要測試的訊息", default="你好，簡單介紹一下你自己", max_length=500)
 
-    @app_commands.command(name="chain", description="設定模型降級鏈（逗號分隔，主模型失敗時依序嘗試）")
-    @app_commands.describe(models="例如：glm-4.6,gpt-4o-mini　（留空=清除）")
-    async def chain(self, interaction: discord.Interaction, models: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["model_fallback_chain"] = models.strip()
-        save_chat_settings()
-        await interaction.response.send_message(f"✅ 降級鏈已設為 `{models or '（清除）'}`", ephemeral=True)
-
-    @app_commands.command(name="backup", description="設定備援 API（降級鏈全失敗時的最後防線）")
-    @app_commands.describe(url="備援 API URL", model="備援模型名稱", key="備援 API Key（可不填，沿用現有 key）")
-    async def backup(self, interaction: discord.Interaction, url: str, model: str, key: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["backup_api_url"] = url.strip()
-        chat_ai_settings["backup_model"] = model.strip()
-        if key.strip():
-            chat_ai_settings["backup_api_key"] = key.strip()
-        save_chat_settings()
-        await interaction.response.send_message(f"✅ 備援 API 已設為 `{model}` @ `{url}`" + ("\n⚠️ 金鑰只存在記憶體，Space 重啟後會消失。要長期保存請到 HF Space → Settings → Variables and secrets 新增 `CHAT_BACKUP_API_KEY`。" if key.strip() else ""), ephemeral=True)
-
-    @app_commands.command(name="prompt", description="設定 AI 人設（基本安全規則會自動附加，不會被覆蓋）")
-    @app_commands.describe(prompt="系統提示詞（留空=恢復預設）")
-    async def prompt(self, interaction: discord.Interaction, prompt: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["system_prompt"] = prompt.strip() or DEFAULT_CHAT_PROMPT
-        save_chat_settings()
-        await interaction.response.send_message("✅ AI 人設已更新" + ("（預設）" if not prompt.strip() else "") + "\n基本安全規則固定附加，不受影響。", ephemeral=True)
-
-    @app_commands.command(name="cooldown", description="設定白名單頻道的自動回覆冷卻秒數")
-    async def cooldown(self, interaction: discord.Interaction, seconds: int):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["cooldown_seconds"] = max(0, seconds)
-        save_chat_settings()
-        await interaction.response.send_message(f"✅ 自動回覆冷卻已設為 {seconds} 秒", ephemeral=True)
-
-    @app_commands.command(name="channel", description="新增/移除自動回覆頻道白名單")
-    @app_commands.describe(action="新增或移除", channel="要設定的頻道（不填=目前頻道）")
-    @app_commands.choices(action=[
-        app_commands.Choice(name="新增", value="add"),
-        app_commands.Choice(name="移除", value="remove"),
-        app_commands.Choice(name="清空（全部頻道）", value="clear"),
-    ])
-    async def channel(self, interaction: discord.Interaction, action: app_commands.Choice[str], channel: discord.TextChannel = None):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        ch_id = str(channel.id if channel else interaction.channel_id)
-        wl = chat_ai_settings.setdefault("channels_whitelist", [])
-        if action.value == "add":
-            if ch_id not in wl:
-                wl.append(ch_id)
-            msg = f"✅ <#{ch_id}> 已加入自動回覆白名單"
-        elif action.value == "remove":
-            if ch_id in wl:
-                wl.remove(ch_id)
-            msg = f"✅ <#{ch_id}> 已移出自動回覆白名單"
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        s = chat_ai_settings
+        test_msgs = [{"role": "system", "content": _system_prompt()}, {"role": "user", "content": self.msg.value[:500]}]
+        t0 = _time.time()
+        r = await call_chat_api(test_msgs, timeout_total=max(40, s["ai_timeout"]))
+        dt = _time.time() - t0
+        if r.get("content"):
+            await interaction.followup.send(f"{r['content'][:1800]}\n-# ✅ 耗時 {dt:.1f}s", ephemeral=True)
         else:
-            wl.clear()
-            msg = "✅ 白名單已清空（@提及/DM 不受影響）"
+            await interaction.followup.send(f"❌ 測試失敗（{dt:.1f}s）：{r.get('error')}", ephemeral=True)
+
+
+class _ChannelSelectView(_OwnerView):
+    """用 Discord 原生頻道選單設定自動回覆白名單（直接多選，不用輸入頻道 ID）。"""
+    def __init__(self):
+        super().__init__(timeout=300)
+        sel = discord.ui.ChannelSelect(
+            placeholder="選擇要自動回覆的頻道（可多選；全部取消=不自動回覆）",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news, discord.ChannelType.public_thread, discord.ChannelType.forum],
+            min_values=0, max_values=25)
+        sel.callback = self._on_select
+        self.add_item(sel)
+        self.sel = sel
+
+    async def _on_select(self, interaction: discord.Interaction):
+        chat_ai_settings["channels_whitelist"] = [str(c.id) for c in self.sel.values]
         save_chat_settings()
-        await interaction.response.send_message(msg, ephemeral=True)
+        n = len(self.sel.values)
+        await interaction.response.edit_message(
+            content=f"✅ 已設定 {n} 個自動回覆頻道：" + ("、".join(f"<#{c.id}>" for c in self.sel.values) if n else "（無）") + "\n回到面板請重新輸入 `/chat`。",
+            view=None)
 
-    @app_commands.command(name="vision", description="設定視覺模型（識圖，留空=停用）")
-    @app_commands.describe(model="視覺模型名稱，留空=停用識圖")
-    async def vision(self, interaction: discord.Interaction, model: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        chat_ai_settings["vision_model"] = model.strip()
+    @discord.ui.button(label="清空（全部不自動回覆）", style=discord.ButtonStyle.danger, row=1)
+    async def clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        chat_ai_settings["channels_whitelist"] = []
         save_chat_settings()
-        await interaction.response.send_message(f"✅ 視覺模型{'已設為 `' + model + '`' if model.strip() else '已停用'}", ephemeral=True)
+        await interaction.response.edit_message(content="✅ 已清空自動回覆頻道（@提及 與私訊不受影響）。回到面板請重新輸入 `/chat`。", view=None)
 
-    @app_commands.command(name="test", description="測試 AI 回覆（不佔用冷卻）")
-    @app_commands.describe(message="要測試的訊息")
-    async def test(self, interaction: discord.Interaction, message: str):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        # 3 秒規則：先 defer，再慢慢生
-        await interaction.response.defer(ephemeral=False)
-        s = chat_ai_settings
-        test_msgs = [
-            {"role": "system", "content": _system_prompt()},
-            {"role": "user", "content": message[:4000]},
-        ]
-        _t0 = _time.time()
-        result = await call_chat_api(test_msgs, timeout_total=max(40, s["ai_timeout"]))
-        _dt = _time.time() - _t0
-        if result.get("content"):
-            await interaction.followup.send(f"{result['content'][:1900]}\n-# 模型 `{s['model']}`，耗時 {_dt:.1f}s")
-        else:
-            await interaction.followup.send(f"❌ 測試失敗：{result.get('error')}（耗時 {_dt:.1f}s）")
 
-    @app_commands.command(name="bench", description="測速：對候選模型各發一次簡短請求，找出回應快又穩的")
-    @app_commands.describe(models="要測的模型，逗號分隔；留空=用內建候選清單")
-    async def bench(self, interaction: discord.Interaction, models: str = ""):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        s = chat_ai_settings
-        if not s.get("api_key"):
-            await interaction.response.send_message("❌ 尚未設定 API Key", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=False)
-        cands = [m.strip() for m in models.split(",") if m.strip()] or list(BENCH_CANDIDATES)
-        url_n = _normalize_api_url(s["api_url"])
-        headers = {"Authorization": f"Bearer {s['api_key']}", "Content-Type": "application/json"}
+class _ResetView(_OwnerView):
+    """清除記憶：選一個使用者，或清全部。"""
+    def __init__(self):
+        super().__init__(timeout=300)
+        sel = discord.ui.UserSelect(placeholder="只清某位使用者的記憶（所有頻道）", min_values=1, max_values=1)
+        sel.callback = self._on_user
+        self.add_item(sel)
+        self.sel = sel
 
-        async def _one(model):
-            t0 = _time.time()
-            payload = {"model": model, "stream": False, "max_tokens": 60,
-                       "messages": [{"role": "system", "content": "用繁體中文簡短回答。"},
-                                    {"role": "user", "content": "用一句話介紹你自己。"}]}
-            try:
-                async with _RateGate(url_n, 120):
-                    t0 = _time.time()   # 計時從真正送出開始，不含排隊
-                    async with aiohttp.ClientSession() as sess:
-                        async with sess.post(url_n, json=payload, headers=headers,
-                                             timeout=aiohttp.ClientTimeout(total=30)) as r:
-                            txt = await r.text()
-                            dt = _time.time() - t0
-                            if r.status != 200:
-                                return (model, dt, f"HTTP {r.status}")
-                            try:
-                                c = ((_json.loads(txt).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-                            except Exception:
-                                return (model, dt, "非 JSON")
-                            return (model, dt, "OK" if c.strip() else "空回應")
-            except asyncio.TimeoutError:
-                return (model, 30.0, "逾時>30s")
-            except Exception as e:
-                return (model, _time.time() - t0, str(e)[:30])
-
-        # 依序送出（NIM 限 1 併發、35 次/分，由限速閘門排隊；不可 gather 併發）
-        results = []
-        for _m in cands:
-            results.append(await _one(_m))
-        ok = sorted([r for r in results if r[2] == "OK"], key=lambda x: x[1])
-        bad = [r for r in results if r[2] != "OK"]
-        lines = ["**測速結果（依序測試，單次樣本，僅供參考）**"]
-        for m, dt, st in ok:
-            lines.append(f"✅ `{m}` {dt:.1f}s")
-        for m, dt, st in bad:
-            lines.append(f"❌ `{m}` {st}")
-        if ok:
-            lines.append(f"\n建議：`/chat model {ok[0][0]}`")
-        await interaction.followup.send("\n".join(lines)[:1990])
-
-    @app_commands.command(name="reset", description="清空 AI 對話記憶（預設清這個頻道所有人；可指定單一使用者）")
-    @app_commands.describe(user="只清這位使用者在本頻道的對話記憶；留空=清本頻道所有人")
-    async def reset(self, interaction: discord.Interaction, user: discord.User = None):
-        if not is_owner(interaction):
-            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
-            return
-        cid = interaction.channel_id
-        if user is not None:
-            n = 1 if _chat_context.pop((cid, user.id), None) is not None else 0
-            await interaction.response.send_message(f"🧹 已清空 {user.display_name} 在本頻道的對話記憶（{n} 串）", ephemeral=True)
-            return
-        keys = [k for k in _chat_context if isinstance(k, tuple) and k[0] == cid]
+    async def _on_user(self, interaction: discord.Interaction):
+        uid = self.sel.values[0].id
+        keys = [k for k in _chat_context if isinstance(k, tuple) and k[1] == uid]
         for k in keys:
             _chat_context.pop(k, None)
-        await interaction.response.send_message(f"🧹 這個頻道的對話記憶已清空（{len(keys)} 串）", ephemeral=True)
+        await interaction.response.edit_message(content=f"🧹 已清除 <@{uid}> 的 {len(keys)} 串記憶。", view=None)
+
+    @discord.ui.button(label="清除「全部」記憶", style=discord.ButtonStyle.danger, row=1)
+    async def all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        n = len(_chat_context)
+        _chat_context.clear()
+        await interaction.response.edit_message(content=f"🧹 已清除全部記憶（{n} 串）。", view=None)
 
 
-ChatGroup_instance = ChatGroup()
+async def _run_bench(interaction: discord.Interaction):
+    """測速：對降級鏈 + 常用候選依序各發一次簡短請求。"""
+    s = chat_ai_settings
+    if not s.get("api_key"):
+        await interaction.followup.send("❌ 尚未設定 API Key", ephemeral=True)
+        return
+    mine = [s.get("model", "")] + [c.strip() for c in (s.get("model_fallback_chain") or "").split(",") if c.strip()]
+    cands = []
+    for m in mine + list(BENCH_CANDIDATES):
+        if m and m not in cands:
+            cands.append(m)
+    cands = cands[:8]
+    url_n = _normalize_api_url(s["api_url"])
+    headers = {"Authorization": f"Bearer {s['api_key']}", "Content-Type": "application/json"}
+
+    async def _one(model):
+        payload = {"model": model, "stream": False, "max_tokens": 60,
+                   "messages": [{"role": "system", "content": "用繁體中文簡短回答。"}, {"role": "user", "content": "用一句話介紹你自己。"}]}
+        payload.update(_think_extra(url_n, model))
+        try:
+            async with _RateGate(url_n, 120):
+                t0 = _time.time()
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(url_n, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                        txt = await r.text()
+                        dt = _time.time() - t0
+                        if r.status != 200:
+                            return (model, dt, f"HTTP {r.status}")
+                        try:
+                            c = ((_json.loads(txt).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                        except Exception:
+                            return (model, dt, "非 JSON")
+                        return (model, dt, "OK" if c.strip() else "空回應")
+        except asyncio.TimeoutError:
+            return (model, 30.0, "逾時>30s")
+        except Exception as e:
+            return (model, 0.0, str(e)[:30])
+
+    results = [await _one(m) for m in cands]      # 依序送出（NIM 限 1 併發）
+    ok = sorted([r for r in results if r[2] == "OK"], key=lambda x: x[1])
+    bad = [r for r in results if r[2] != "OK"]
+    lines = ["**⚡ 測速結果**（單次樣本，僅供參考；短回答的速度，長回答會更久）"]
+    lines += [f"✅ `{m}` {dt:.1f}s" for m, dt, _ in ok]
+    lines += [f"❌ `{m}` {st}" for m, _, st in bad]
+    if ok:
+        lines.append(f"\n最快：`{ok[0][0]}`")
+    await interaction.followup.send("\n".join(lines)[:1990], ephemeral=True)
+
+
+class ChatPanelView(_OwnerView):
+    def __init__(self):
+        super().__init__(timeout=600)
+        on = bool(chat_ai_settings.get("enabled"))
+        self.toggle_btn.label = "關閉 AI 聊天" if on else "開啟 AI 聊天"
+        self.toggle_btn.style = discord.ButtonStyle.danger if on else discord.ButtonStyle.success
+        self.toggle_btn.emoji = "⏸️" if on else "▶️"
+
+    # ── 第 1 排：開關 / 重新整理 ──
+    @discord.ui.button(label="開啟", style=discord.ButtonStyle.success, row=0)
+    async def toggle_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        chat_ai_settings["enabled"] = not chat_ai_settings.get("enabled")
+        save_chat_settings()
+        await _refresh_panel(interaction, "AI 聊天已" + ("開啟" if chat_ai_settings["enabled"] else "關閉"))
+
+    @discord.ui.button(label="重新整理", emoji="🔄", style=discord.ButtonStyle.secondary, row=0)
+    async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await _refresh_panel(interaction)
+
+    @discord.ui.button(label="測試回覆", emoji="🧪", style=discord.ButtonStyle.primary, row=0)
+    async def test_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_TestModal())
+
+    @discord.ui.button(label="測速", emoji="⚡", style=discord.ButtonStyle.primary, row=0)
+    async def bench_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await _run_bench(interaction)
+
+    # ── 第 2 排：設定 ──
+    @discord.ui.button(label="模型與 API", emoji="🌐", style=discord.ButtonStyle.secondary, row=1)
+    async def model_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_ModelApiModal())
+
+    @discord.ui.button(label="備援 API", emoji="🛟", style=discord.ButtonStyle.secondary, row=1)
+    async def backup_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_BackupModal())
+
+    @discord.ui.button(label="人設", emoji="🎭", style=discord.ButtonStyle.secondary, row=1)
+    async def prompt_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_PromptModal())
+
+    @discord.ui.button(label="數值參數", emoji="🎲", style=discord.ButtonStyle.secondary, row=1)
+    async def params_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_ParamsModal())
+
+    @discord.ui.button(label="識圖", emoji="👁️", style=discord.ButtonStyle.secondary, row=1)
+    async def vision_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(_VisionModal())
+
+    # ── 第 3 排：頻道 / 記憶 ──
+    @discord.ui.button(label="自動回覆頻道", emoji="📢", style=discord.ButtonStyle.secondary, row=2)
+    async def channel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        wl = chat_ai_settings.get("channels_whitelist") or []
+        await interaction.response.send_message(
+            "📢 **自動回覆頻道**\n在下方多選要自動回覆的頻道（目前：" + ("、".join(f"<#{c}>" for c in wl[:10]) if wl else "無") + "）。\n@提及 與私訊不受影響。",
+            view=_ChannelSelectView(), ephemeral=True)
+
+    @discord.ui.button(label="清除記憶", emoji="🧹", style=discord.ButtonStyle.danger, row=2)
+    async def reset_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        t, m = _ctx_stats()
+        await interaction.response.send_message(f"🧹 **清除對話記憶**（目前 {t} 串 / {m} 則）\n選一位使用者只清他的，或按紅色按鈕清全部。", view=_ResetView(), ephemeral=True)
+
+
+@app_commands.command(name="chat", description="開啟 AI 聊天管理面板（僅擁有者）")
+async def chat_panel_command(interaction: discord.Interaction):
+    if not is_owner(interaction):
+        await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+        return
+    view = ChatPanelView()
+    await interaction.response.send_message(embed=_build_panel_embed(), view=view, ephemeral=True)
+    try:
+        view.message = await interaction.original_response()
+    except Exception:
+        pass
+
+
