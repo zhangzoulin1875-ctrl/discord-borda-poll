@@ -111,8 +111,28 @@ if chat_ai_settings.get("system_prompt", "").strip() in _OLD_DEFAULT_PROMPTS:
     chat_ai_settings["system_prompt"] = DEFAULT_CHAT_PROMPT
 
 
+# 金鑰一律不存進 GitHub（GitHub Secret Scanning 會直接拒絕推送，且明文放 repo 本來就不安全）。
+# 持久化方式：HF Space → Settings → Variables and secrets 設 CHAT_API_KEY / CHAT_BACKUP_API_KEY。
+# /chat key、/chat backup 指令設的金鑰只存在記憶體，重啟前有效。
+_SECRET_FIELDS = ("api_key", "backup_api_key", "fallback_api_key", "vision_api_key")
+_ENV_KEYS = {"api_key": "CHAT_API_KEY", "backup_api_key": "CHAT_BACKUP_API_KEY"}
+
+
+def _apply_env_secrets():
+    import os as _os
+    for field, env in _ENV_KEYS.items():
+        v = _os.environ.get(env, "").strip()
+        if v:
+            chat_ai_settings[field] = v
+
+
+_apply_env_secrets()
+
+
 def save_chat_settings():
-    save_json("chat_ai_settings.json", chat_ai_settings)
+    """存檔時去掉金鑰欄位：save_json 寫本機檔並觸發 GitHub 推送，兩者都不該含金鑰。"""
+    clean = {k: ("" if k in _SECRET_FIELDS else v) for k, v in chat_ai_settings.items()}
+    save_json("chat_ai_settings.json", clean)
 
 
 # ─── 供應商限速（NVIDIA NIM：官方 40 次/分、1 併發 → 設 35 次/分留閾值） ─────────
@@ -194,6 +214,23 @@ _THINK_OFF = [
 _think_rejected = set()   # 被端點以 400 拒絕過的模型，之後不再送額外參數
 
 
+_model_slow_until = {}   # (url, model) -> 時間戳；逾時過的模型短時間內降到最後面
+_SLOW_PENALTY_SEC = 180
+
+
+def _mark_slow(url: str, model: str):
+    _model_slow_until[(url, model)] = _time.time() + _SLOW_PENALTY_SEC
+
+
+def _reorder_by_health(cands: list) -> list:
+    """剛逾時的候選排到同供應商鏈的最後；備援 API 位置不動。"""
+    now = _time.time()
+    healthy, slow = [], []
+    for c in cands:
+        (slow if _model_slow_until.get((c[0], c[2]), 0) > now else healthy).append(c)
+    return healthy + slow
+
+
 def _think_extra(url: str, model: str) -> dict:
     if "nvidia.com" not in (url or "").lower() or model in _think_rejected:
         return {}
@@ -205,7 +242,7 @@ def _think_extra(url: str, model: str) -> dict:
 
 
 # ─── 熔斷器 ────────────────────────────────────────────────────────────────
-_ai_circuit = {"fail_streak": 0, "trip_time": 0.0, "cooldown": 120}
+_ai_circuit = {"fail_streak": 0, "trip_time": 0.0, "cooldown": 60}
 
 
 def _circuit_open() -> bool:
@@ -220,10 +257,14 @@ def _circuit_open() -> bool:
 
 
 def _circuit_fail(reason_anomalous: bool):
+    """只有供應商明確封鎖（403 anomalous）才熔斷。
+    逾時 / 404 / 空回應 / 5xx 都是「這個候選不行」，由降級鏈 + 備援處理，不該鎖住整個 AI。
+    （舊版把任何失敗都累計，一則訊息內主模型+降級鏈各失敗一次就熔斷，備援還沒試就被鎖。）"""
+    if not reason_anomalous:
+        return
     _ai_circuit["fail_streak"] += 1
-    if reason_anomalous or _ai_circuit["fail_streak"] >= 2:
-        _ai_circuit["trip_time"] = _time.time()
-        print(f"🔌 AI 熔斷器觸發（連續失敗 {_ai_circuit['fail_streak']} 次），冷卻 {_ai_circuit['cooldown']}s")
+    _ai_circuit["trip_time"] = _time.time()
+    print(f"🔌 AI 熔斷器觸發（供應商封鎖），冷卻 {_ai_circuit['cooldown']}s")
 
 
 def _circuit_success():
@@ -237,7 +278,10 @@ def _normalize_api_url(url: str) -> str:
         return ""
     if url.endswith("/chat/completions"):
         return url
-    if url.endswith("/v1") or url.endswith("/v2"):
+    # Gemini 的 OpenAI 相容端點：https://generativelanguage.googleapis.com/v1beta/openai
+    if url.endswith("/openai") or url.endswith("/v1beta/openai"):
+        return url + "/chat/completions"
+    if url.endswith("/v1") or url.endswith("/v2") or url.endswith("/v1beta"):
         return url + "/chat/completions"
     return url + "/v1/chat/completions"
 
@@ -274,23 +318,33 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
     if backup_url and s.get("backup_model", "").strip():
         candidates.append((backup_url, s.get("backup_api_key", ""), s["backup_model"].strip()))
 
+    if backup_url and candidates and candidates[-1][0] == backup_url and len(candidates) > 1:
+        candidates = _reorder_by_health(candidates[:-1]) + [candidates[-1]]
+    else:
+        candidates = _reorder_by_health(candidates)
+
     if not s.get("api_key") and not s.get("backup_api_key"):
         return {"content": "", "error": "未設定 API Key，請用 /chat key 設定"}
     if not candidates[0][0] and not backup_url:
         return {"content": "", "error": "未設定 API URL，請用 /chat api 設定"}
 
-    # 熔斷器檢查
+    # 熔斷器：主供應商被封鎖時只跳過「主鏈」，備援 API（不同供應商）照常嘗試
     if _circuit_open():
-        remaining = _ai_circuit["cooldown"] - (_time.time() - _ai_circuit["trip_time"])
-        return {"content": "", "error": f"AI 目前冷卻中（供應商暫時封鎖），約 {max(0, remaining):.0f} 秒後重試"}
+        if backup_url and s.get("backup_model", "").strip() and s.get("backup_api_key", ""):
+            candidates = [c for c in candidates if c[0] == backup_url]
+            print("ℹ️ 主供應商熔斷中，直接使用備援 API")
+        else:
+            remaining = _ai_circuit["cooldown"] - (_time.time() - _ai_circuit["trip_time"])
+            return {"content": "", "error": f"AI 目前冷卻中（供應商暫時封鎖），約 {max(0, remaining):.0f} 秒後重試"}
 
     # 絕對期限 + 備援保留額度（沿用舊版實測調好的分配法）
     _t0 = _time.time()
     deadline = _t0 + timeout_total
-    if timeout_total <= 30:
-        reserve = max(10, timeout_total * 0.55)   # 短預算：備援拿大半
+    # 有備援 API 才預留時間給它；沒有備援就整段預算都給主鏈（舊算法會平白吃掉一半）
+    if backup_url and s.get("backup_model", "").strip():
+        reserve = min(max(12, timeout_total * 0.4), timeout_total * 0.6)
     else:
-        reserve = min(8, max(3, timeout_total * 0.3))
+        reserve = 0
 
     primary_deadline = deadline - reserve
     last_err = "未知錯誤"
@@ -310,7 +364,8 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
             continue
 
         # 單次嘗試上限：不超過階段剩餘的 85%（留時間給下一個候選）
-        attempt_timeout = max(3, min(remaining, remaining * 0.85))
+        n_left = max(1, len([1 for c in candidates[idx:] if c[0] != backup_url or not backup_url]) if not is_backup else 1)
+        attempt_timeout = max(4, min(remaining, 8.0, remaining / n_left * 1.6)) if not is_backup else max(5, remaining)
 
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
@@ -339,6 +394,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
             except asyncio.TimeoutError:
                 last_err = f"逾時（>{attempt_timeout:.0f}s）"
                 print(f"⚠️ AI 逾時 [{model}] {last_err}")
+                _mark_slow(url, model)
                 _circuit_fail(False)
                 break
             except Exception as e:
@@ -354,10 +410,13 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
                     _use_extra = False
                     print(f"ℹ️ [{model}] 端點拒絕關思考參數(400)，之後不再送：{body[:100]}")
                     continue   # 拿掉參數重送
-                print(f"⚠️ AI 呼叫失敗 [{model}] {last_err}: {body[:150]}")
+                print(f"⚠️ AI 呼叫失敗 [{model}] {last_err} @ {url_n}: {body[:150]}" + ("  ← 404 通常是模型名稱或網址錯誤" if status == 404 else ""))
                 if status == 403 and "anomalous" in body.lower():
                     _circuit_fail(True)
-                    return {"content": "", "error": "AI 被供應商暫時封鎖，已啟動熔斷冷卻"}
+                    last_err = "AI 被供應商暫時封鎖，已啟動熔斷冷卻"
+                    # 主供應商被封鎖：其餘同一端點的候選必然也會被封，直接跳到備援 API（不同供應商）
+                    candidates[:] = [c for c in candidates[:idx + 1]] + [c for c in candidates[idx + 1:] if c[0] == backup_url]
+                    break
                 _circuit_fail(False)
                 break
 
@@ -674,7 +733,7 @@ class ChatGroup(app_commands.Group):
             return
         chat_ai_settings["api_key"] = key.strip()
         save_chat_settings()
-        await interaction.response.send_message("✅ API Key 已更新", ephemeral=True)
+        await interaction.response.send_message("✅ API Key 已更新（只存在記憶體，Space 重啟後會消失）\n要長期保存請到 HF Space → Settings → Variables and secrets 新增 `CHAT_API_KEY`。", ephemeral=True)
 
     @app_commands.command(name="model", description="設定主 AI 模型")
     @app_commands.describe(model="模型名稱")
@@ -707,7 +766,7 @@ class ChatGroup(app_commands.Group):
         if key.strip():
             chat_ai_settings["backup_api_key"] = key.strip()
         save_chat_settings()
-        await interaction.response.send_message(f"✅ 備援 API 已設為 `{model}` @ `{url}`", ephemeral=True)
+        await interaction.response.send_message(f"✅ 備援 API 已設為 `{model}` @ `{url}`" + ("\n⚠️ 金鑰只存在記憶體，Space 重啟後會消失。要長期保存請到 HF Space → Settings → Variables and secrets 新增 `CHAT_BACKUP_API_KEY`。" if key.strip() else ""), ephemeral=True)
 
     @app_commands.command(name="prompt", description="設定 AI 人設（基本安全規則會自動附加，不會被覆蓋）")
     @app_commands.describe(prompt="系統提示詞（留空=恢復預設）")
