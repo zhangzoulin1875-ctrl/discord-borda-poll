@@ -6,7 +6,7 @@
   "model_fallback_chain": "nvidia/nemotron-3.5-lightning-30b-a3b",
   "backup_api_url": "https://generativelanguage.googleapis.com/v1beta/openai",
   "backup_api_key": "",
-  "backup_model": "gemini-3.5-flash-lite",
+  "backup_model": "gemini-3.5-flash-lite, gemma-4-31b-it, gemma-4-26b",
   "vision_model": "",
   "system_prompt": "無",
   "cooldown_seconds": 30,
