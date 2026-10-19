@@ -241,6 +241,33 @@ def _think_extra(url: str, model: str) -> dict:
     return {}
 
 
+
+# ─── 診斷：事件迴圈卡頓監測 + 每次請求的階段耗時 ─────────────────────────────
+_loop_lag = {"max": 0.0, "last_warn": 0.0, "started": False}
+
+
+async def _loop_lag_monitor():
+    while True:
+        t = _time.time()
+        await asyncio.sleep(1.0)
+        lag = _time.time() - t - 1.0
+        if lag > _loop_lag["max"]:
+            _loop_lag["max"] = lag
+        if lag > 1.0 and _time.time() - _loop_lag["last_warn"] > 5:
+            _loop_lag["last_warn"] = _time.time()
+            print(f"🐌 事件迴圈卡頓 {lag:.1f}s（bot 被阻塞，所有請求會一起變慢/逾時）")
+
+
+def _start_lag_monitor():
+    if _loop_lag["started"]:
+        return
+    try:
+        asyncio.get_running_loop().create_task(_loop_lag_monitor())
+        _loop_lag["started"] = True
+    except RuntimeError:
+        pass
+
+
 # ─── 熔斷器 ────────────────────────────────────────────────────────────────
 _ai_circuit = {"fail_streak": 0, "trip_time": 0.0, "cooldown": 60}
 
@@ -294,6 +321,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
     降級順序：主模型 → model_fallback_chain 依序 → 備援 API。
     所有嘗試共用同一個絕對期限（timeout_total），備援 API 有保留額度。
     """
+    _start_lag_monitor()
     s = chat_ai_settings
     max_tokens = max_tokens or s["max_tokens"]
     timeout_total = timeout_total or s["ai_timeout"]
@@ -348,6 +376,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
 
     primary_deadline = deadline - reserve
     last_err = "未知錯誤"
+    trail = []   # 每個候選的結果，失敗時一併回報
 
     for idx, (url, key, model) in enumerate(candidates):
         is_backup = (idx == len(candidates) - 1) and backup_url and url == backup_url
@@ -393,14 +422,16 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
                             body = await resp.text()
             except asyncio.TimeoutError:
                 last_err = f"逾時（>{attempt_timeout:.0f}s）"
-                print(f"⚠️ AI 逾時 [{model}] {last_err}")
+                print(f"⚠️ AI 逾時 [{model}] {last_err} | 已用 {_time.time() - _t0:.1f}s | 迴圈最大卡頓 {_loop_lag['max']:.1f}s | 候選 {idx + 1}/{len(candidates)}")
                 _mark_slow(url, model)
                 _circuit_fail(False)
+                trail.append(f"{model.split('/')[-1][:24]} 逾時")
                 break
             except Exception as e:
                 last_err = str(e)[:100]
                 print(f"⚠️ AI 例外 [{model}]: {last_err}")
                 _circuit_fail(False)
+                trail.append(f"{model.split('/')[-1][:24]} 例外")
                 break
 
             if status != 200:
@@ -418,6 +449,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
                     candidates[:] = [c for c in candidates[:idx + 1]] + [c for c in candidates[idx + 1:] if c[0] == backup_url]
                     break
                 _circuit_fail(False)
+                trail.append(f"{model.split('/')[-1][:24]} HTTP {status}")
                 break
 
             try:
@@ -438,6 +470,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
             content = (msg.get("content") or "").strip()   # 不採用思考內容
             if content:
                 _circuit_success()
+                print(f"✅ AI 成功 [{model}] {_time.time() - _t0:.1f}s（第 {idx + 1}/{len(candidates)} 個候選，迴圈最大卡頓 {_loop_lag['max']:.1f}s）")
                 return {"content": content}
 
             # 內容空：若是 finish=length，代表 token 被思考吃光 → 加倍 max_tokens 重試一次
@@ -448,8 +481,12 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
             last_err = "空回應"
             print(f"⚠️ AI 空回應 [{model}]，降級下一個候選")
             _circuit_fail(False)
+            trail.append(f"{model.split('/')[-1][:24]} 空回應")
             break
 
+    if trail:
+        n_backup = 1 if (backup_url and s.get("backup_model", "").strip()) else 0
+        last_err = f"{last_err}｜已試 {len(trail)} 個：" + "、".join(trail) + ("" if n_backup else "｜未設定備援")
     return {"content": "", "error": last_err}
 
 

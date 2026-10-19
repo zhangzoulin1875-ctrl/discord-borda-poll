@@ -71,11 +71,75 @@ def _status_text():
     )
 
 
+def _netcheck():
+    """從 Space 內部量測對外連線：DNS / TCP / TLS / 首位元組 / 總時間，
+    並分別在「Gradio 執行緒」與「bot 的 event loop」兩個環境各打一次，找出慢在哪。"""
+    import json as _j
+    import socket
+    import ssl
+    import urllib.request
+
+    nim_key = os.environ.get("CHAT_API_KEY", "")
+    out = []
+
+    def one(label, host, path, body, headers):
+        t0 = time.time()
+        try:
+            ip = socket.gethostbyname(host)
+            t_dns = time.time() - t0
+            req = urllib.request.Request(f"https://{host}{path}", data=_j.dumps(body).encode(), headers=headers, method="POST")
+            t1 = time.time()
+            with urllib.request.urlopen(req, timeout=25, context=ssl.create_default_context()) as r:
+                r.read(200)
+                code = r.status
+            return f"{label}: HTTP {code} | DNS {t_dns*1000:.0f}ms | 請求 {time.time()-t1:.2f}s | 總 {time.time()-t0:.2f}s | {ip}"
+        except urllib.error.HTTPError as e:
+            return f"{label}: HTTP {e.code} | DNS {(time.time()-t0)*1000:.0f}ms | 總 {time.time()-t0:.2f}s（服務有回應）"
+        except Exception as e:
+            return f"{label}: ❌ {type(e).__name__} {str(e)[:80]} | 總 {time.time()-t0:.2f}s"
+
+    nim_body = {"model": "openai/gpt-oss-20b", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 20, "reasoning_effort": "low"}
+    h = {"Content-Type": "application/json", "Authorization": f"Bearer {nim_key}"}
+    out.append(one("NIM(Gradio執行緒)", "integrate.api.nvidia.com", "/v1/chat/completions", nim_body, h))
+    out.append(one("NIM(Gradio執行緒) 第2次", "integrate.api.nvidia.com", "/v1/chat/completions", nim_body, h))
+    out.append(one("Google(Gradio執行緒)", "generativelanguage.googleapis.com", "/v1beta/openai/chat/completions", {"model": "gemma-4-31b-it", "messages": [{"role": "user", "content": "hi"}]}, {"Content-Type": "application/json"}))
+    out.append(one("Discord API", "discord.com", "/api/v10/gateway", {}, {"Content-Type": "application/json"}))
+
+    # 在 bot 的 event loop 裡跑同樣的請求（aiohttp，和 bot 實際使用方式一致）
+    try:
+        import aiohttp
+        loop = discord_borda_poll.bot.loop
+
+        async def _in_bot_loop():
+            res = []
+            for i in (1, 2):
+                t0 = time.time()
+                try:
+                    async with aiohttp.ClientSession() as ses:
+                        async with ses.post("https://integrate.api.nvidia.com/v1/chat/completions", json=nim_body, headers=h, timeout=aiohttp.ClientTimeout(total=25)) as r:
+                            await r.read()
+                            res.append(f"NIM(bot loop) 第{i}次: HTTP {r.status} | 總 {time.time()-t0:.2f}s")
+                except Exception as e:
+                    res.append(f"NIM(bot loop) 第{i}次: ❌ {type(e).__name__} | 總 {time.time()-t0:.2f}s")
+            lag = getattr(discord_borda_poll, "_bot_globals", {}).get("_loop_lag", {})
+            res.append(f"bot 事件迴圈最大卡頓: {lag.get('max', '未啟用')}")
+            return res
+
+        fut = asyncio.run_coroutine_threadsafe(_in_bot_loop(), loop)
+        out.extend(fut.result(timeout=60))
+    except Exception as e:
+        out.append(f"bot loop 檢測失敗: {type(e).__name__} {e}")
+    return "\n".join(out)
+
+
 with gr.Blocks(title="Discord Bot") as demo:
     gr.Markdown("# 🤖 Discord Bot 控制頁")
     gr.Markdown("這個頁面只是讓 Space 保持服務的殼，bot 本體在背景執行。")
     status_md = gr.Markdown(_status_text())
     refresh_btn = gr.Button("🔄 刷新狀態")
     refresh_btn.click(fn=_status_text, outputs=status_md)
+    net_btn = gr.Button("🔌 連線自我檢測")
+    net_out = gr.Textbox(label="檢測結果", lines=8)
+    net_btn.click(fn=_netcheck, outputs=net_out, api_name="netcheck")
 
 demo.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", 7860)))
