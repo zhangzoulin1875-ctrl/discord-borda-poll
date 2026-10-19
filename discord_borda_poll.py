@@ -636,10 +636,14 @@ async def main():
                 print(f"⚠️ 註冊指令 {name} 失敗：{e}")
 
     # Start keep-alive HTTP server (for Render Web Service)
-    try:
-        await keep_alive_server()
-    except Exception as e:
-        print(f"⚠️ Keep-alive server 啟動失敗：{e}")
+    # 在 Hugging Face Spaces 上設 DISABLE_KEEPALIVE=1 跳過（PORT 留給 Gradio）
+    if os.getenv("DISABLE_KEEPALIVE", "") == "1":
+        print("ℹ️ DISABLE_KEEPALIVE=1，跳過 keep-alive server（Hugging Face Spaces 模式）")
+    else:
+        try:
+            await keep_alive_server()
+        except Exception as e:
+            print(f"⚠️ Keep-alive server 啟動失敗：{e}")
 
     # Login and run
     async with bot:
