@@ -351,12 +351,10 @@ def _build_context_messages(message, user_text: str) -> list:
 
 
 # ─── 訊息清理 ──────────────────────────────────────────────────────────────
-_MENTION_RE = re.compile(r"<@!?%s>\s*" % bot.user.id) if bot.user else None
-
-
 def _strip_mentions(text: str) -> str:
-    if _MENTION_RE:
-        text = _MENTION_RE.sub("", text)
+    # bot.user 在模組載入時還是 None，必須在執行期才取得
+    if bot.user:
+        text = re.sub(r"<@!?%s>\s*" % bot.user.id, "", text)
     # 其他使用者的提及換成名字，避免 AI 收到裸 ID
     text = re.sub(r"<@!?(\d+)>", "@使用者", text)
     text = re.sub(r"<@&(\d+)>", "@身分組", text)
@@ -428,13 +426,19 @@ def _should_auto_reply(text: str) -> bool:
 async def handle_chat_message(message: discord.Message):
     """on_message 主 handler。"""
     s = chat_ai_settings
+    is_dm = not getattr(message.guild, "id", None)
+    mentioned = bool(bot.user) and (bot.user in (message.mentions or []) or
+                                    f"<@{bot.user.id}>" in (message.content or "") or
+                                    f"<@!{bot.user.id}>" in (message.content or ""))
+    if mentioned or is_dm:
+        print(f"💬 收到對話訊息 ch={getattr(message.channel,'id',0)} user={message.author.id} "
+              f"dm={is_dm} enabled={s.get('enabled')} content_len={len(message.content or '')}")
     if not s.get("enabled"):
+        if mentioned or is_dm:
+            print("⚠️ 對話被忽略：AI 聊天未啟用（/chat toggle）")
         return
     if message.author.bot or message.webhook_id:
         return
-
-    is_dm = not getattr(message.guild, "id", None)
-    mentioned = bot.user in (message.mentions or [])
     replied_to_bot = False
     if message.reference and message.reference.message_id:
         try:
@@ -452,6 +456,7 @@ async def handle_chat_message(message: discord.Message):
         want_reply = True
     elif mentioned or replied_to_bot:
         if not text and not message.attachments:
+            print("⚠️ 對話被忽略：訊息去掉 @ 後沒有內容（若你有輸入文字，代表 Message Content Intent 沒開）")
             return  # 純 @ 一下或回覆貼圖，不回
         want_reply = True
     else:
@@ -468,6 +473,7 @@ async def handle_chat_message(message: discord.Message):
     if is_dm or mentioned or replied_to_bot:
         last = _user_last_mention.get(message.author.id, 0)
         if now - last < float(s.get("mention_cooldown", 5)):
+            print("⚠️ 對話被忽略：@ 冷卻中")
             return
     else:
         last = _channel_last_reply.get(message.channel.id, 0)
@@ -479,6 +485,7 @@ async def handle_chat_message(message: discord.Message):
         me = message.guild.me
         perms = message.channel.permissions_for(me)
         if not perms.send_messages:
+            print(f"⚠️ 對話被忽略：此頻道沒有發言權限 ch={message.channel.id}")
             return
 
     # 佔位（冷卻先記，避免並發重複回）
