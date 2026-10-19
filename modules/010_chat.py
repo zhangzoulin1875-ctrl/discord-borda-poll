@@ -18,6 +18,7 @@ import os
 import re
 import time as _time
 import json as _json
+import aiohttp
 
 # ─── 預設人設（通用聊天機器人，不預設任何社群背景） ───────────────────────
 DEFAULT_CHAT_PROMPT = """你是一個友善、反應機靈的 Discord 聊天機器人，主要使用繁體中文與人交談。

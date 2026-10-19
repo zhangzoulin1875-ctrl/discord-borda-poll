@@ -601,6 +601,7 @@ async def main():
         "discord": discord,
         "app_commands": app_commands,
         "asyncio": asyncio,
+        "aiohttp": aiohttp,
         "github_push_json": github_push_json,
         "_bot_ready_hooks": [],
         "_bot_message_handlers": [],
