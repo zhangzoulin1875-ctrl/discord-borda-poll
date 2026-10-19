@@ -400,6 +400,9 @@ async def _send_reply(message, text: str):
         await message.reply(chunks[0], mention_author=False)
         for c in chunks[1:]:
             await message.channel.send(c)
+    except discord.Forbidden as e:
+        print(f"❌ 回覆被 Discord 拒絕(403)：機器人在此頻道缺少「發送訊息/在討論串中發送訊息/讀取訊息歷史」權限 "
+              f"ch={getattr(message.channel,'id',0)} {e}")
     except discord.HTTPException as e:
         print(f"⚠️ 回覆傳送失敗：{e}")
 
@@ -481,12 +484,20 @@ async def handle_chat_message(message: discord.Message):
             return
 
     # 發送權限檢查
+    # 預先檢查只做診斷、不阻擋：權限計算在討論串/論壇/身分組覆寫下可能誤判，
+    # 真的沒權限時 Discord 會回 403，_send_reply 會印出確切原因。
     if message.guild:
-        me = message.guild.me
-        perms = message.channel.permissions_for(me)
-        if not perms.send_messages:
-            print(f"⚠️ 對話被忽略：此頻道沒有發言權限 ch={message.channel.id}")
-            return
+        try:
+            me = message.guild.me or message.guild.get_member(bot.user.id)
+            perms = message.channel.permissions_for(me) if me else None
+            if perms is None:
+                print(f"ℹ️ 無法取得機器人成員資料，略過權限預檢 ch={message.channel.id}")
+            elif not (perms.send_messages or getattr(perms, "send_messages_in_threads", False)):
+                print(f"ℹ️ 預檢判定無發言權限（仍會嘗試送出）ch={message.channel.id} "
+                      f"type={type(message.channel).__name__} view={perms.view_channel} "
+                      f"send={perms.send_messages} thread_send={getattr(perms,'send_messages_in_threads',None)}")
+        except Exception as e:
+            print(f"ℹ️ 權限預檢失敗（略過）：{e}")
 
     # 佔位（冷卻先記，避免並發重複回）
     if is_dm or mentioned or replied_to_bot:
