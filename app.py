@@ -40,6 +40,18 @@ threading.Thread(target=_start_bot, daemon=True).start()
 
 import gradio as gr  # noqa: E402
 
+# ZeroGPU 硬體要求：啟動時必須偵測到至少一個 @spaces.GPU 函式，否則直接 Runtime error。
+# 這個函式只是用來通過檢查，bot 完全不會呼叫它，所以不會消耗任何 GPU 額度。
+try:
+    import spaces
+
+    @spaces.GPU
+    def _zerogpu_placeholder():
+        return "ok"
+except ImportError:
+    # 不在 ZeroGPU 環境（例如本機或 CPU Space）就略過
+    pass
+
 
 def _status_text():
     """給頁面顯示的狀態文字。"""
