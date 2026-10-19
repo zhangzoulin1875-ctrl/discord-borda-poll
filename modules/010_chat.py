@@ -313,6 +313,79 @@ def _normalize_api_url(url: str) -> str:
     return url + "/v1/chat/completions"
 
 
+
+class _StreamStall(Exception):
+    """串流停滯：首字或字與字之間等太久（和「總預算用完」分開處理）。"""
+
+
+async def _stream_chat(session, url_n: str, payload: dict, headers: dict,
+                       first_token_timeout: float, idle_timeout: float, hard_deadline: float):
+    """以串流方式請求，回傳 (status, body_text)。
+    成功時 body_text 是組好的「非串流格式」JSON 字串，讓後面的解析邏輯完全不用改。
+    逾時規則（取代原本一刀切的總時間上限）：
+      - 首字 first_token_timeout 秒內沒收到任何內容 → _StreamStall（才是真的卡死）
+      - 開始出字後，連續 idle_timeout 秒沒新內容 → _StreamStall（中途斷流）
+      - 只要持續有字就不砍，直到 hard_deadline（絕對期限）
+    """
+    payload = dict(payload, stream=True)
+    # 連線 + 等回應標頭也算在「首字」時限內（伺服器卡死時連標頭都不會送）
+    hdr_wait = max(1.0, min(first_token_timeout, hard_deadline - _time.time()))
+    try:
+        resp = await asyncio.wait_for(
+            session.post(url_n, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=None)),
+            timeout=hdr_wait)
+    except asyncio.TimeoutError:
+        if _time.time() >= hard_deadline - 0.05:
+            raise
+        raise _StreamStall(f"首字超過 {hdr_wait:.0f}s 無回應（未收到回應標頭）")
+    async with resp:
+        if resp.status != 200:
+            return resp.status, await resp.text()
+        parts, finish, got_first = [], None, False
+        buf = b""
+        it = resp.content.__aiter__()
+        while True:
+            now = _time.time()
+            left = hard_deadline - now
+            if left <= 0:
+                raise asyncio.TimeoutError("hard deadline")
+            wait = min(left, idle_timeout if got_first else first_token_timeout)
+            try:
+                chunk = await asyncio.wait_for(it.__anext__(), timeout=wait)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                if _time.time() >= hard_deadline - 0.05:
+                    raise asyncio.TimeoutError("hard deadline")
+                raise _StreamStall(("首字" if not got_first else "中途") + f"超過 {wait:.0f}s 無回應")
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.decode("utf-8", "ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    buf = b""
+                    break
+                try:
+                    d = _json.loads(data)
+                except Exception:
+                    continue
+                if d.get("error"):
+                    return 200, _json.dumps({"error": d["error"]})
+                ch = (d.get("choices") or [{}])[0]
+                delta = ch.get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    parts.append(piece)
+                    got_first = True
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+        text = "".join(parts)
+        return 200, _json.dumps({"choices": [{"finish_reason": finish or "stop", "message": {"content": text}}]})
+
+
 # ─── 核心：AI 呼叫（完整降級鏈） ───────────────────────────────────────────
 async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: int = None,
                         vision: bool = False) -> dict:
@@ -394,7 +467,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
 
         # 單次嘗試上限：不超過階段剩餘的 85%（留時間給下一個候選）
         n_left = max(1, len([1 for c in candidates[idx:] if c[0] != backup_url or not backup_url]) if not is_backup else 1)
-        attempt_timeout = max(4, min(remaining, 8.0, remaining / n_left * 1.6)) if not is_backup else max(5, remaining)
+        attempt_timeout = remaining
 
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
@@ -412,14 +485,22 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
                 # 限速閘門：NIM 排隊（1 併發 + 35 次/分）。排隊時間算在這個候選的預算內
                 _queue_budget = max(0.0, phase_end - _time.time() - 3)
                 async with _RateGate(url_n, _queue_budget):
-                    _remain = max(3, min(phase_end - _time.time(), attempt_timeout))
+                    # 首字 6 秒沒動靜才算卡死（NIM 正常首字 <1s）；出字後 5 秒沒新內容算斷流；
+                    # 只要持續出字，就一直等到本階段的絕對期限，不再被固定 8 秒砍掉長回答。
                     async with aiohttp.ClientSession() as session:
-                        async with session.post(
-                            url_n, json=payload, headers=headers,
-                            timeout=aiohttp.ClientTimeout(total=_remain),
-                        ) as resp:
-                            status = resp.status
-                            body = await resp.text()
+                        status, body = await _stream_chat(
+                            session, url_n, payload, headers,
+                            first_token_timeout=min(6.0, max(3.0, phase_end - _time.time())),
+                            idle_timeout=5.0,
+                            hard_deadline=phase_end,
+                        )
+            except _StreamStall as e:
+                last_err = f"卡住（{e}）"
+                print(f"⚠️ AI 卡住 [{model}] {e} | 已用 {_time.time() - _t0:.1f}s | 候選 {idx + 1}/{len(candidates)}")
+                _mark_slow(url, model)
+                _circuit_fail(False)
+                trail.append(f"{model.split('/')[-1][:24]} 卡住")
+                break
             except asyncio.TimeoutError:
                 last_err = f"逾時（>{attempt_timeout:.0f}s）"
                 print(f"⚠️ AI 逾時 [{model}] {last_err} | 已用 {_time.time() - _t0:.1f}s | 迴圈最大卡頓 {_loop_lag['max']:.1f}s | 候選 {idx + 1}/{len(candidates)}")
