@@ -8,7 +8,7 @@
   "backup_api_key": "",
   "backup_model": "gemma-4-31b-it",
   "vision_model": "",
-  "system_prompt": "你是一個友善、反應機靈的 Discord 聊天機器人，主要使用繁體中文與人交談，對方用其他語言時就用對方的語言回答。\n\n風格：\n- 口吻自然輕鬆，像朋友聊天，不要客服腔，不要過度使用表情符號\n- 回覆簡短有力，通常 1-4 句話；對方追問細節或需要完整說明時才寫長\n- 直接給出答案，不要展示思考過程，不要寫「讓我想想」「首先」之類的開場白",
+  "system_prompt": "無",
   "cooldown_seconds": 30,
   "mention_cooldown": 5,
   "channels_whitelist": [],
