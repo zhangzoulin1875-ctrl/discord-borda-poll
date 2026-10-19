@@ -79,6 +79,69 @@ def save_chat_settings():
     save_json("chat_ai_settings.json", chat_ai_settings)
 
 
+# ─── 供應商限速（NVIDIA NIM：官方 40 次/分、1 併發 → 設 35 次/分留閾值） ─────────
+_RATE_LIMITS = {
+    "nvidia.com": {"per_min": 35, "concurrency": 1},
+}
+_rl_state = {}   # host_key -> {"lock": asyncio.Lock, "stamps": list[float]}
+
+
+def _rl_key(url: str):
+    u = (url or "").lower()
+    for k in _RATE_LIMITS:
+        if k in u:
+            return k
+    return None
+
+
+class _RateGate:
+    """async with _RateGate(url, max_wait): 排隊取得送出資格。
+    - 同供應商同時只放行 concurrency 個請求（NIM=1，多的排隊，不併發）
+    - 滑動視窗：任意 60 秒內最多 per_min 次
+    - 排隊總等待超過 max_wait 秒就拋 asyncio.TimeoutError（讓呼叫端換下一個候選）
+    非限速供應商直接放行。"""
+
+    def __init__(self, url: str, max_wait: float):
+        self.key = _rl_key(url)
+        self.max_wait = max(0.0, max_wait)
+        self.held = False
+
+    async def __aenter__(self):
+        if not self.key:
+            return self
+        cfg = _RATE_LIMITS[self.key]
+        st = _rl_state.setdefault(self.key, {"lock": asyncio.Semaphore(cfg["concurrency"]), "stamps": []})
+        deadline = _time.time() + self.max_wait
+        try:
+            await asyncio.wait_for(st["lock"].acquire(), timeout=self.max_wait)
+        except asyncio.TimeoutError:
+            raise asyncio.TimeoutError("rate-gate queue timeout")
+        self.held = True
+        self.st = st
+        try:
+            # 拿到併發名額後，再等滑動視窗有空位
+            while True:
+                now = _time.time()
+                st["stamps"] = [t for t in st["stamps"] if now - t < 60.0]
+                if len(st["stamps"]) < cfg["per_min"]:
+                    st["stamps"].append(now)
+                    return self
+                wait = 60.0 - (now - st["stamps"][0]) + 0.05
+                if _time.time() + wait > deadline:
+                    raise asyncio.TimeoutError("rate-gate window timeout")
+                await asyncio.sleep(wait)
+        except BaseException:
+            st["lock"].release()
+            self.held = False
+            raise
+
+    async def __aexit__(self, *exc):
+        if self.held:
+            self.st["lock"].release()
+            self.held = False
+        return False
+
+
 # ─── 熔斷器 ────────────────────────────────────────────────────────────────
 _ai_circuit = {"fail_streak": 0, "trip_time": 0.0, "cooldown": 120}
 
@@ -196,48 +259,52 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url_n,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=attempt_timeout),
-                ) as resp:
-                    if resp.status != 200:
-                        err = await resp.text()
-                        last_err = f"HTTP {resp.status}"
-                        print(f"⚠️ AI 呼叫失敗 [{model}] {last_err}: {err[:150]}")
-                        if resp.status == 403 and "anomalous" in err.lower():
-                            _circuit_fail(True)
-                            return {"content": "", "error": "AI 被供應商暫時封鎖，已啟動熔斷冷卻"}
-                        _circuit_fail(False)
-                        continue
-                    body = await resp.text()
-                    try:
-                        data = _json.loads(body)
-                    except Exception:
-                        last_err = "回應不是 JSON"
-                        print(f"⚠️ AI 回應非 JSON [{model}]: {body[:150]}")
-                        _circuit_fail(False)
-                        continue
-                    choices = data.get("choices") or []
-                    if not choices:
-                        # 部分 proxy 會回 200 + error payload
-                        err_obj = data.get("error") or {}
-                        last_err = err_obj.get("message", "回應沒有 choices")[:100]
-                        print(f"⚠️ AI 回應異常 [{model}]: {last_err}")
-                        _circuit_fail(False)
-                        continue
-                    msg = choices[0].get("message", {}) or {}
-                    content = (msg.get("content") or "").strip()
-                    # reasoning 模型可能有獨立欄位，不採用思考內容
-                    if not content:
-                        last_err = "空回應"
-                        print(f"⚠️ AI 空回應 [{model}]，降級下一個候選")
-                        _circuit_fail(False)
-                        continue
-                    _circuit_success()
-                    return {"content": content}
+            # 限速閘門：NIM 排隊（1 併發 + 35 次/分）。排隊時間算在這個候選的預算內
+            _queue_budget = max(0.0, phase_end - _time.time() - 3)
+            async with _RateGate(url_n, _queue_budget):
+                _remain = max(3, min(phase_end - _time.time(), attempt_timeout))
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        url_n,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=_remain),
+                    ) as resp:
+                        if resp.status != 200:
+                            err = await resp.text()
+                            last_err = f"HTTP {resp.status}"
+                            print(f"⚠️ AI 呼叫失敗 [{model}] {last_err}: {err[:150]}")
+                            if resp.status == 403 and "anomalous" in err.lower():
+                                _circuit_fail(True)
+                                return {"content": "", "error": "AI 被供應商暫時封鎖，已啟動熔斷冷卻"}
+                            _circuit_fail(False)
+                            continue
+                        body = await resp.text()
+                        try:
+                            data = _json.loads(body)
+                        except Exception:
+                            last_err = "回應不是 JSON"
+                            print(f"⚠️ AI 回應非 JSON [{model}]: {body[:150]}")
+                            _circuit_fail(False)
+                            continue
+                        choices = data.get("choices") or []
+                        if not choices:
+                            # 部分 proxy 會回 200 + error payload
+                            err_obj = data.get("error") or {}
+                            last_err = err_obj.get("message", "回應沒有 choices")[:100]
+                            print(f"⚠️ AI 回應異常 [{model}]: {last_err}")
+                            _circuit_fail(False)
+                            continue
+                        msg = choices[0].get("message", {}) or {}
+                        content = (msg.get("content") or "").strip()
+                        # reasoning 模型可能有獨立欄位，不採用思考內容
+                        if not content:
+                            last_err = "空回應"
+                            print(f"⚠️ AI 空回應 [{model}]，降級下一個候選")
+                            _circuit_fail(False)
+                            continue
+                        _circuit_success()
+                        return {"content": content}
         except asyncio.TimeoutError:
             last_err = f"逾時（>{attempt_timeout:.0f}s）"
             print(f"⚠️ AI 逾時 [{model}] {last_err}")
@@ -640,28 +707,32 @@ class ChatGroup(app_commands.Group):
                        "messages": [{"role": "system", "content": "用繁體中文簡短回答。"},
                                     {"role": "user", "content": "用一句話介紹你自己。"}]}
             try:
-                async with aiohttp.ClientSession() as sess:
-                    async with sess.post(url_n, json=payload, headers=headers,
-                                         timeout=aiohttp.ClientTimeout(total=30)) as r:
-                        txt = await r.text()
-                        dt = _time.time() - t0
-                        if r.status != 200:
-                            return (model, dt, f"HTTP {r.status}")
-                        try:
-                            c = ((_json.loads(txt).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-                        except Exception:
-                            return (model, dt, "非 JSON")
-                        return (model, dt, "OK" if c.strip() else "空回應")
+                async with _RateGate(url_n, 120):
+                    t0 = _time.time()   # 計時從真正送出開始，不含排隊
+                    async with aiohttp.ClientSession() as sess:
+                        async with sess.post(url_n, json=payload, headers=headers,
+                                             timeout=aiohttp.ClientTimeout(total=30)) as r:
+                            txt = await r.text()
+                            dt = _time.time() - t0
+                            if r.status != 200:
+                                return (model, dt, f"HTTP {r.status}")
+                            try:
+                                c = ((_json.loads(txt).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                            except Exception:
+                                return (model, dt, "非 JSON")
+                            return (model, dt, "OK" if c.strip() else "空回應")
             except asyncio.TimeoutError:
                 return (model, 30.0, "逾時>30s")
             except Exception as e:
                 return (model, _time.time() - t0, str(e)[:30])
 
-        # 同時發出，總耗時最多約 30 秒
-        results = await asyncio.gather(*[_one(m) for m in cands])
+        # 依序送出（NIM 限 1 併發、35 次/分，由限速閘門排隊；不可 gather 併發）
+        results = []
+        for _m in cands:
+            results.append(await _one(_m))
         ok = sorted([r for r in results if r[2] == "OK"], key=lambda x: x[1])
         bad = [r for r in results if r[2] != "OK"]
-        lines = ["**測速結果（同時發出，單次樣本，僅供參考）**"]
+        lines = ["**測速結果（依序測試，單次樣本，僅供參考）**"]
         for m, dt, st in ok:
             lines.append(f"✅ `{m}` {dt:.1f}s")
         for m, dt, st in bad:
