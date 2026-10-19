@@ -64,19 +64,15 @@ def _system_prompt() -> str:
 
 
 
-# /chat bench 預設候選（NVIDIA NIM；偏向中文能力好、不做長思考的模型）
+# /chat bench 預設候選（已排除在 NIM 實測 404 的 gemma-3 / kimi / mistral-large / llama-nemotron-70b 等）
 BENCH_CANDIDATES = [
-    "z-ai/glm-5.3-flash",
-    "z-ai/glm-5.3",
-    "deepseek-ai/deepseek-v4.1-flash",
-    "moonshotai/kimi-k2.6",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
     "openai/gpt-oss-20b",
     "google/gemma-4-31b-it",
-    "google/gemma-3-12b-it",
-    "mistralai/mistral-large-2-instruct",
-    "nvidia/llama-3.1-nemotron-70b-instruct",
-    "nvidia/nemotron-3.5-lightning-30b-a3b",
-    "nvidia/nemotron-nano-3-30b-a3b",
+    "nvidia/nemotron-3-super-120b-a12b",
+    "meta/muse-glimmer-30b",
+    "z-ai/glm-5.3-flash",
+    "deepseek-ai/deepseek-v4.1-flash",
 ]
 
 # ─── 設定（從 data/chat_ai_settings.json 載入，GitHub 同步持久化） ────────
@@ -180,6 +176,32 @@ class _RateGate:
             self.st["lock"].release()
             self.held = False
         return False
+
+
+# ─── 思考型模型：關閉/降低思考（實測 NVIDIA NIM）──────────────────────────────
+# 思考型模型預設會先「想」數百～上千 token 才回答，不只慢，還會把 max_tokens 吃光導致空回應。
+# 各家參數不通用，所以用表格指定；只對 NIM 且列在表內的模型加參數，其餘一律不送（避免嚴格驗證的端點回 400）。
+_THINK_OFF = [
+    # (模型名關鍵字, 額外 payload)
+    ("nemotron-3.5-lightning", {"chat_template_kwargs": {"enable_thinking": False}}),
+    ("nemotron-nano",          {"chat_template_kwargs": {"enable_thinking": False}}),
+    ("nemotron-3-super",       {"chat_template_kwargs": {"enable_thinking": False}}),
+    ("gpt-oss",                {"reasoning_effort": "low"}),
+    ("glm-5",                  {"chat_template_kwargs": {"enable_thinking": False}}),
+    ("deepseek-v4",            {"chat_template_kwargs": {"thinking": False}}),
+    ("muse-glimmer",           {"chat_template_kwargs": {"enable_thinking": False}}),
+]
+_think_rejected = set()   # 被端點以 400 拒絕過的模型，之後不再送額外參數
+
+
+def _think_extra(url: str, model: str) -> dict:
+    if "nvidia.com" not in (url or "").lower() or model in _think_rejected:
+        return {}
+    ml = (model or "").lower()
+    for key, extra in _THINK_OFF:
+        if key in ml:
+            return dict(extra)
+    return {}
 
 
 # ─── 熔斷器 ────────────────────────────────────────────────────────────────
@@ -291,68 +313,83 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
         attempt_timeout = max(3, min(remaining, remaining * 0.85))
 
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "stream": False,
-        }
 
-        try:
-            # 限速閘門：NIM 排隊（1 併發 + 35 次/分）。排隊時間算在這個候選的預算內
-            _queue_budget = max(0.0, phase_end - _time.time() - 3)
-            async with _RateGate(url_n, _queue_budget):
-                _remain = max(3, min(phase_end - _time.time(), attempt_timeout))
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        url_n,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=_remain),
-                    ) as resp:
-                        if resp.status != 200:
-                            err = await resp.text()
-                            last_err = f"HTTP {resp.status}"
-                            print(f"⚠️ AI 呼叫失敗 [{model}] {last_err}: {err[:150]}")
-                            if resp.status == 403 and "anomalous" in err.lower():
-                                _circuit_fail(True)
-                                return {"content": "", "error": "AI 被供應商暫時封鎖，已啟動熔斷冷卻"}
-                            _circuit_fail(False)
-                            continue
-                        body = await resp.text()
-                        try:
-                            data = _json.loads(body)
-                        except Exception:
-                            last_err = "回應不是 JSON"
-                            print(f"⚠️ AI 回應非 JSON [{model}]: {body[:150]}")
-                            _circuit_fail(False)
-                            continue
-                        choices = data.get("choices") or []
-                        if not choices:
-                            # 部分 proxy 會回 200 + error payload
-                            err_obj = data.get("error") or {}
-                            last_err = err_obj.get("message", "回應沒有 choices")[:100]
-                            print(f"⚠️ AI 回應異常 [{model}]: {last_err}")
-                            _circuit_fail(False)
-                            continue
-                        msg = choices[0].get("message", {}) or {}
-                        content = (msg.get("content") or "").strip()
-                        # reasoning 模型可能有獨立欄位，不採用思考內容
-                        if not content:
-                            last_err = "空回應"
-                            print(f"⚠️ AI 空回應 [{model}]，降級下一個候選")
-                            _circuit_fail(False)
-                            continue
-                        _circuit_success()
-                        return {"content": content}
-        except asyncio.TimeoutError:
-            last_err = f"逾時（>{attempt_timeout:.0f}s）"
-            print(f"⚠️ AI 逾時 [{model}] {last_err}")
+        # 單個候選最多 2 次嘗試：
+        #   第 1 次：帶「關思考」參數（若有）
+        #   第 2 次：端點 400 拒絕參數 → 拿掉參數；或內容空且 finish=length（思考吃光 token）→ max_tokens 加倍
+        _mt = max_tokens
+        _use_extra = True
+        for _try in (1, 2):
+            payload = {"model": model, "messages": messages, "max_tokens": _mt, "stream": False}
+            _extra = _think_extra(url_n, model) if _use_extra else {}
+            payload.update(_extra)
+            _again = False
+            try:
+                # 限速閘門：NIM 排隊（1 併發 + 35 次/分）。排隊時間算在這個候選的預算內
+                _queue_budget = max(0.0, phase_end - _time.time() - 3)
+                async with _RateGate(url_n, _queue_budget):
+                    _remain = max(3, min(phase_end - _time.time(), attempt_timeout))
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            url_n, json=payload, headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=_remain),
+                        ) as resp:
+                            status = resp.status
+                            body = await resp.text()
+            except asyncio.TimeoutError:
+                last_err = f"逾時（>{attempt_timeout:.0f}s）"
+                print(f"⚠️ AI 逾時 [{model}] {last_err}")
+                _circuit_fail(False)
+                break
+            except Exception as e:
+                last_err = str(e)[:100]
+                print(f"⚠️ AI 例外 [{model}]: {last_err}")
+                _circuit_fail(False)
+                break
+
+            if status != 200:
+                last_err = f"HTTP {status}"
+                if status == 400 and _extra and _try == 1:
+                    _think_rejected.add(model)
+                    _use_extra = False
+                    print(f"ℹ️ [{model}] 端點拒絕關思考參數(400)，之後不再送：{body[:100]}")
+                    continue   # 拿掉參數重送
+                print(f"⚠️ AI 呼叫失敗 [{model}] {last_err}: {body[:150]}")
+                if status == 403 and "anomalous" in body.lower():
+                    _circuit_fail(True)
+                    return {"content": "", "error": "AI 被供應商暫時封鎖，已啟動熔斷冷卻"}
+                _circuit_fail(False)
+                break
+
+            try:
+                data = _json.loads(body)
+            except Exception:
+                last_err = "回應不是 JSON"
+                print(f"⚠️ AI 回應非 JSON [{model}]: {body[:150]}")
+                _circuit_fail(False)
+                break
+            choices = data.get("choices") or []
+            if not choices:
+                err_obj = data.get("error") or {}   # 部分 proxy 會回 200 + error payload
+                last_err = err_obj.get("message", "回應沒有 choices")[:100]
+                print(f"⚠️ AI 回應異常 [{model}]: {last_err}")
+                _circuit_fail(False)
+                break
+            msg = choices[0].get("message", {}) or {}
+            content = (msg.get("content") or "").strip()   # 不採用思考內容
+            if content:
+                _circuit_success()
+                return {"content": content}
+
+            # 內容空：若是 finish=length，代表 token 被思考吃光 → 加倍 max_tokens 重試一次
+            if choices[0].get("finish_reason") == "length" and _try == 1 and _mt < 4000:
+                _mt = min(_mt * 2, 4000)
+                print(f"ℹ️ [{model}] 空回應且 finish=length（思考吃光 token），max_tokens 加倍至 {_mt} 重試")
+                continue
+            last_err = "空回應"
+            print(f"⚠️ AI 空回應 [{model}]，降級下一個候選")
             _circuit_fail(False)
-        except Exception as e:
-            last_err = str(e)[:100]
-            print(f"⚠️ AI 例外 [{model}]: {last_err}")
-            _circuit_fail(False)
+            break
 
     return {"content": "", "error": last_err}
 
