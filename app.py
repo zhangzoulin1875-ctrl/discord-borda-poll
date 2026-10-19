@@ -102,7 +102,9 @@ def _netcheck():
     h = {"Content-Type": "application/json", "Authorization": f"Bearer {nim_key}"}
     out.append(one("NIM(Gradio執行緒)", "integrate.api.nvidia.com", "/v1/chat/completions", nim_body, h))
     out.append(one("NIM(Gradio執行緒) 第2次", "integrate.api.nvidia.com", "/v1/chat/completions", nim_body, h))
-    out.append(one("Google(Gradio執行緒)", "generativelanguage.googleapis.com", "/v1beta/openai/chat/completions", {"model": "gemma-4-31b-it", "messages": [{"role": "user", "content": "hi"}]}, {"Content-Type": "application/json"}))
+    bk = os.environ.get("CHAT_BACKUP_API_KEY", "")
+    out.append(f"Secrets: CHAT_API_KEY={'有(' + str(len(nim_key)) + '字)' if nim_key else '❌無'} ｜ CHAT_BACKUP_API_KEY={'有(' + str(len(bk)) + '字)' if bk else '❌無'}")
+    out.append(one("Google 備援(帶 Key)", "generativelanguage.googleapis.com", "/v1beta/openai/chat/completions", {"model": "gemma-4-31b-it", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 20}, {"Content-Type": "application/json", "Authorization": f"Bearer {bk}"}))
     out.append(one("Discord API", "discord.com", "/api/v10/gateway", {}, {"Content-Type": "application/json"}))
 
     # 在 bot 的 event loop 裡跑同樣的請求（aiohttp，和 bot 實際使用方式一致）

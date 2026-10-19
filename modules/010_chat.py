@@ -412,7 +412,11 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
 
     # 模型降級鏈（同一個 API 端點）
     if chain:
+        _seen = {candidates[0][2]}
         for m in [x.strip() for x in chain.split(",") if x.strip()]:
+            if m in _seen:        # 主模型或鏈中重複的模型不再試第二次（卡死的模型重試只是白白浪費時間）
+                continue
+            _seen.add(m)
             candidates.append((s["api_url"], s["api_key"], m))
 
     # 備援 API（不同端點，最後一道防線）
@@ -467,7 +471,6 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
             continue
 
         # 單次嘗試上限：不超過階段剩餘的 85%（留時間給下一個候選）
-        n_left = max(1, len([1 for c in candidates[idx:] if c[0] != backup_url or not backup_url]) if not is_backup else 1)
         attempt_timeout = remaining
 
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -481,7 +484,6 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
             payload = {"model": model, "messages": messages, "max_tokens": _mt, "stream": False}
             _extra = _think_extra(url_n, model) if _use_extra else {}
             payload.update(_extra)
-            _again = False
             try:
                 # 限速閘門：NIM 排隊（1 併發 + 35 次/分）。排隊時間算在這個候選的預算內
                 _queue_budget = max(0.0, phase_end - _time.time() - 3)
@@ -876,6 +878,11 @@ def _build_panel_embed() -> discord.Embed:
     if not s.get("api_key") and not s.get("backup_api_key"):
         e.add_field(name="⚠️ 注意", value="目前沒有任何 API Key，AI 無法回覆。按「🌐 模型與 API」設定。", inline=False)
     e.set_footer(text="金鑰只存在記憶體，重啟會消失；要長期保存請到 HF Space Secrets 設 CHAT_API_KEY / CHAT_BACKUP_API_KEY")
+    # Discord 硬限制：欄位值 ≤1024、欄位名 ≤256、整個 embed ≤6000。使用者可自由輸入模型名/網址/降級鏈，
+    # 不夾限的話極端輸入會讓面板直接送不出去（打不開就沒辦法修設定）。
+    for i, f in enumerate(e.fields):
+        v = f.value if len(f.value) <= 1000 else f.value[:997] + "…"
+        e.set_field_at(i, name=f.name[:250], value=v, inline=f.inline)
     return e
 
 
@@ -921,17 +928,17 @@ async def _refresh_panel(interaction: discord.Interaction, note: str = ""):
 
 
 class _ModelApiModal(discord.ui.Modal, title="🌐 模型與 API"):
-    model = discord.ui.TextInput(label="主模型", placeholder="例如 openai/gpt-oss-20b", max_length=120)
-    chain = discord.ui.TextInput(label="降級鏈（逗號分隔，主模型失敗時依序嘗試；留空=無）", required=False, max_length=400, style=discord.TextStyle.paragraph)
-    api_url = discord.ui.TextInput(label="API 網址（OpenAI 相容端點）", placeholder="https://integrate.api.nvidia.com/v1", max_length=200)
+    model = discord.ui.TextInput(label="主模型", placeholder="例如 openai/gpt-oss-20b", max_length=200)
+    chain = discord.ui.TextInput(label="降級鏈（逗號分隔；留空=無）", required=False, max_length=4000, style=discord.TextStyle.paragraph)
+    api_url = discord.ui.TextInput(label="API 網址（OpenAI 相容端點）", placeholder="https://integrate.api.nvidia.com/v1", max_length=500)
     api_key = discord.ui.TextInput(label="API Key（留空=不變更）", required=False, max_length=300)
 
     def __init__(self):
         super().__init__()
         s = chat_ai_settings
-        self.model.default = s.get("model", "")
-        self.chain.default = s.get("model_fallback_chain", "")
-        self.api_url.default = s.get("api_url", "")
+        self.model.default = s.get("model", "")[:200]
+        self.chain.default = s.get("model_fallback_chain", "")[:4000]
+        self.api_url.default = s.get("api_url", "")[:500]
 
     async def on_submit(self, interaction: discord.Interaction):
         s = chat_ai_settings
@@ -946,16 +953,16 @@ class _ModelApiModal(discord.ui.Modal, title="🌐 模型與 API"):
 
 
 class _BackupModal(discord.ui.Modal, title="🛟 備援 API"):
-    url = discord.ui.TextInput(label="備援 API 網址（留空=停用備援）", required=False, max_length=200,
+    url = discord.ui.TextInput(label="備援 API 網址（留空=停用備援）", required=False, max_length=500,
                                placeholder="https://generativelanguage.googleapis.com/v1beta/openai")
-    model = discord.ui.TextInput(label="備援模型", required=False, max_length=120, placeholder="gemma-4-31b-it")
+    model = discord.ui.TextInput(label="備援模型", required=False, max_length=200, placeholder="gemma-4-31b-it")
     key = discord.ui.TextInput(label="備援 API Key（留空=不變更）", required=False, max_length=300)
 
     def __init__(self):
         super().__init__()
         s = chat_ai_settings
-        self.url.default = s.get("backup_api_url", "")
-        self.model.default = s.get("backup_model", "")
+        self.url.default = s.get("backup_api_url", "")[:500]
+        self.model.default = s.get("backup_model", "")[:200]
 
     async def on_submit(self, interaction: discord.Interaction):
         s = chat_ai_settings
@@ -1013,11 +1020,11 @@ class _ParamsModal(discord.ui.Modal, title="🎲 數值參數"):
 
 
 class _VisionModal(discord.ui.Modal, title="👁️ 識圖模型"):
-    model = discord.ui.TextInput(label="視覺模型名稱（留空=停用識圖）", required=False, max_length=120)
+    model = discord.ui.TextInput(label="視覺模型名稱（留空=停用識圖）", required=False, max_length=200)
 
     def __init__(self):
         super().__init__()
-        self.model.default = chat_ai_settings.get("vision_model", "")
+        self.model.default = chat_ai_settings.get("vision_model", "")[:200]
 
     async def on_submit(self, interaction: discord.Interaction):
         chat_ai_settings["vision_model"] = self.model.value.strip()
