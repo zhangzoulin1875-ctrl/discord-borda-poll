@@ -32,6 +32,21 @@ DEFAULT_CHAT_PROMPT = """你是一個友善、反應機靈的 Discord 聊天機�
 - 你的回覆必須是一個自然的對話回應，不是思考筆記"""
 
 
+# /chat bench 預設候選（NVIDIA NIM；偏向中文能力好、不做長思考的模型）
+BENCH_CANDIDATES = [
+    "z-ai/glm-5.3-flash",
+    "z-ai/glm-5.3",
+    "deepseek-ai/deepseek-v4.1-flash",
+    "moonshotai/kimi-k2.6",
+    "openai/gpt-oss-20b",
+    "google/gemma-4-31b-it",
+    "google/gemma-3-12b-it",
+    "mistralai/mistral-large-2-instruct",
+    "nvidia/llama-3.1-nemotron-70b-instruct",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-nano-3-30b-a3b",
+]
+
 # ─── 設定（從 data/chat_ai_settings.json 載入，GitHub 同步持久化） ────────
 chat_ai_settings = load_json("chat_ai_settings.json") or {
     "enabled": False,
@@ -596,11 +611,64 @@ class ChatGroup(app_commands.Group):
             {"role": "system", "content": s["system_prompt"] or DEFAULT_CHAT_PROMPT},
             {"role": "user", "content": message[:4000]},
         ]
-        result = await call_chat_api(test_msgs)
+        _t0 = _time.time()
+        result = await call_chat_api(test_msgs, timeout_total=max(40, s["ai_timeout"]))
+        _dt = _time.time() - _t0
         if result.get("content"):
-            await interaction.followup.send(result["content"][:2000])
+            await interaction.followup.send(f"{result['content'][:1900]}\n-# 模型 `{s['model']}`，耗時 {_dt:.1f}s")
         else:
-            await interaction.followup.send(f"❌ 測試失敗：{result.get('error')}")
+            await interaction.followup.send(f"❌ 測試失敗：{result.get('error')}（耗時 {_dt:.1f}s）")
+
+    @app_commands.command(name="bench", description="測速：對候選模型各發一次簡短請求，找出回應快又穩的")
+    @app_commands.describe(models="要測的模型，逗號分隔；留空=用內建候選清單")
+    async def bench(self, interaction: discord.Interaction, models: str = ""):
+        if not is_owner(interaction):
+            await interaction.response.send_message("❌ 此指令僅限機器人擁有者使用。", ephemeral=True)
+            return
+        s = chat_ai_settings
+        if not s.get("api_key"):
+            await interaction.response.send_message("❌ 尚未設定 API Key", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=False)
+        cands = [m.strip() for m in models.split(",") if m.strip()] or list(BENCH_CANDIDATES)
+        url_n = _normalize_api_url(s["api_url"])
+        headers = {"Authorization": f"Bearer {s['api_key']}", "Content-Type": "application/json"}
+
+        async def _one(model):
+            t0 = _time.time()
+            payload = {"model": model, "stream": False, "max_tokens": 60,
+                       "messages": [{"role": "system", "content": "用繁體中文簡短回答。"},
+                                    {"role": "user", "content": "用一句話介紹你自己。"}]}
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(url_n, json=payload, headers=headers,
+                                         timeout=aiohttp.ClientTimeout(total=30)) as r:
+                        txt = await r.text()
+                        dt = _time.time() - t0
+                        if r.status != 200:
+                            return (model, dt, f"HTTP {r.status}")
+                        try:
+                            c = ((_json.loads(txt).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                        except Exception:
+                            return (model, dt, "非 JSON")
+                        return (model, dt, "OK" if c.strip() else "空回應")
+            except asyncio.TimeoutError:
+                return (model, 30.0, "逾時>30s")
+            except Exception as e:
+                return (model, _time.time() - t0, str(e)[:30])
+
+        # 同時發出，總耗時最多約 30 秒
+        results = await asyncio.gather(*[_one(m) for m in cands])
+        ok = sorted([r for r in results if r[2] == "OK"], key=lambda x: x[1])
+        bad = [r for r in results if r[2] != "OK"]
+        lines = ["**測速結果（同時發出，單次樣本，僅供參考）**"]
+        for m, dt, st in ok:
+            lines.append(f"✅ `{m}` {dt:.1f}s")
+        for m, dt, st in bad:
+            lines.append(f"❌ `{m}` {st}")
+        if ok:
+            lines.append(f"\n建議：`/chat model {ok[0][0]}`")
+        await interaction.followup.send("\n".join(lines)[:1990])
 
     @app_commands.command(name="reset", description="清空這個頻道的 AI 對話記憶")
     async def reset(self, interaction: discord.Interaction):
