@@ -421,13 +421,16 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
 
     # 備援 API（不同端點，最後一道防線）
     backup_url = s.get("backup_api_url", "").strip()
-    if backup_url and s.get("backup_model", "").strip():
-        candidates.append((backup_url, s.get("backup_api_key", ""), s["backup_model"].strip()))
+    _backup_models = []
+    for _bm in (s.get("backup_model", "") or "").split(","):
+        _bm = _bm.strip()
+        if _bm and _bm not in _backup_models:
+            _backup_models.append(_bm)
+    _primary = list(candidates)                 # 主鏈（備援之前）
+    _backup_cands = [(backup_url, s.get("backup_api_key", ""), _bm) for _bm in _backup_models] if backup_url else []
 
-    if backup_url and candidates and candidates[-1][0] == backup_url and len(candidates) > 1:
-        candidates = _reorder_by_health(candidates[:-1]) + [candidates[-1]]
-    else:
-        candidates = _reorder_by_health(candidates)
+    # 主鏈與備援各自依健康度排序；備援永遠排在主鏈之後
+    candidates = _reorder_by_health(_primary) + _backup_cands
 
     if not s.get("api_key") and not s.get("backup_api_key"):
         return {"content": "", "error": "未設定 API Key，請用 /chat key 設定"}
@@ -436,8 +439,8 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
 
     # 熔斷器：主供應商被封鎖時只跳過「主鏈」，備援 API（不同供應商）照常嘗試
     if _circuit_open():
-        if backup_url and s.get("backup_model", "").strip() and s.get("backup_api_key", ""):
-            candidates = [c for c in candidates if c[0] == backup_url]
+        if _backup_cands and s.get("backup_api_key", ""):
+            candidates = list(_backup_cands)
             print("ℹ️ 主供應商熔斷中，直接使用備援 API")
         else:
             remaining = _ai_circuit["cooldown"] - (_time.time() - _ai_circuit["trip_time"])
@@ -447,7 +450,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
     _t0 = _time.time()
     deadline = _t0 + timeout_total
     # 有備援 API 才預留時間給它；沒有備援就整段預算都給主鏈（舊算法會平白吃掉一半）
-    if backup_url and s.get("backup_model", "").strip():
+    if _backup_cands:
         reserve = min(max(12, timeout_total * 0.4), timeout_total * 0.6)
     else:
         reserve = 0
@@ -457,7 +460,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
     trail = []   # 每個候選的結果，失敗時一併回報
 
     for idx, (url, key, model) in enumerate(candidates):
-        is_backup = (idx == len(candidates) - 1) and backup_url and url == backup_url
+        is_backup = bool(backup_url) and idx >= len(candidates) - len(_backup_cands)
         # 主鏈受 primary_deadline 限制；備援可用全部剩餘時間
         phase_end = deadline if is_backup else primary_deadline
         url_n = _normalize_api_url(url)
@@ -569,7 +572,7 @@ async def call_chat_api(messages: list, max_tokens: int = None, timeout_total: i
             break
 
     if trail:
-        n_backup = 1 if (backup_url and s.get("backup_model", "").strip()) else 0
+        n_backup = len(_backup_cands)
         last_err = f"{last_err}｜已試 {len(trail)} 個：" + "、".join(trail) + ("" if n_backup else "｜未設定備援")
     return {"content": "", "error": last_err}
 
@@ -861,7 +864,7 @@ def _build_panel_embed() -> discord.Embed:
     e.add_field(name="🌐 API", value=f"`{(s.get('api_url') or '未設定')[:48]}`", inline=True)
     e.add_field(name="⬇️ 降級鏈", value=(" → ".join(f"`{c.split('/')[-1]}`" for c in chain) if chain else "（無）"), inline=False)
     if s.get("backup_api_url") and s.get("backup_model"):
-        bk = f"`{s['backup_model']}`\n{_mask_key(s.get('backup_api_key'))}"
+        bk = " → ".join(f"`{x.strip()}`" for x in s["backup_model"].split(",") if x.strip()) + f"\n{_mask_key(s.get('backup_api_key'))}"
     else:
         bk = "（未設定）"
     e.add_field(name="🛟 備援 API", value=bk, inline=True)
@@ -955,14 +958,14 @@ class _ModelApiModal(discord.ui.Modal, title="🌐 模型與 API"):
 class _BackupModal(discord.ui.Modal, title="🛟 備援 API"):
     url = discord.ui.TextInput(label="備援 API 網址（留空=停用備援）", required=False, max_length=500,
                                placeholder="https://generativelanguage.googleapis.com/v1beta/openai")
-    model = discord.ui.TextInput(label="備援模型", required=False, max_length=200, placeholder="gemma-4-31b-it")
+    model = discord.ui.TextInput(label="備援模型（可多個，逗號分隔）", required=False, max_length=400, placeholder="gemini-3.5-flash, gemini-3-flash-preview")
     key = discord.ui.TextInput(label="備援 API Key（留空=不變更）", required=False, max_length=300)
 
     def __init__(self):
         super().__init__()
         s = chat_ai_settings
         self.url.default = s.get("backup_api_url", "")[:500]
-        self.model.default = s.get("backup_model", "")[:200]
+        self.model.default = s.get("backup_model", "")[:400]
 
     async def on_submit(self, interaction: discord.Interaction):
         s = chat_ai_settings

@@ -134,6 +134,37 @@ def _netcheck():
     return "\n".join(out)
 
 
+
+def _geminibench():
+    """從 Space 內部列出備援供應商(Google)可用模型，並對候選逐一實測耗時（不外洩 Key）。"""
+    import json as _j, urllib.request, urllib.error
+    bk = os.environ.get("CHAT_BACKUP_API_KEY", "")
+    if not bk:
+        return "❌ Space 沒有 CHAT_BACKUP_API_KEY"
+    out = []
+    try:
+        req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/openai/models", headers={"Authorization": f"Bearer {bk}"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            ids = [m.get("id", "").replace("models/", "") for m in _j.loads(r.read()).get("data", [])]
+        chat = [i for i in ids if any(k in i for k in ("gemini", "gemma")) and not any(x in i for x in ("embedding", "imagen", "veo", "tts", "aqa", "image", "live", "audio", "robotics", "computer"))]
+        out.append(f"可用聊天模型 {len(chat)} 個: " + ", ".join(sorted(chat)))
+    except Exception as e:
+        return f"列模型失敗: {type(e).__name__} {str(e)[:100]}"
+    cands = [c for c in chat if any(k in c for k in ("flash", "gemma-3", "gemma-4", "lite"))][:12]
+    for mdl in cands:
+        t0 = time.time()
+        try:
+            body = {"model": mdl, "messages": [{"role": "user", "content": "用繁體中文一句話介紹台北"}], "max_tokens": 60}
+            req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", data=_j.dumps(body).encode(), headers={"Authorization": f"Bearer {bk}", "Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as r:
+                d = _j.loads(r.read()); c = ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            out.append(f"{'✅' if c.strip() else '⚠️空'} {mdl}: {time.time()-t0:.1f}s")
+        except urllib.error.HTTPError as e:
+            out.append(f"❌ {mdl}: HTTP {e.code} ({time.time()-t0:.1f}s)")
+        except Exception as e:
+            out.append(f"❌ {mdl}: {type(e).__name__} ({time.time()-t0:.1f}s)")
+    return "\n".join(out)
+
 with gr.Blocks(title="Discord Bot") as demo:
     gr.Markdown("# 🤖 Discord Bot 控制頁")
     gr.Markdown("這個頁面只是讓 Space 保持服務的殼，bot 本體在背景執行。")
@@ -143,5 +174,7 @@ with gr.Blocks(title="Discord Bot") as demo:
     net_btn = gr.Button("🔌 連線自我檢測")
     net_out = gr.Textbox(label="檢測結果", lines=8)
     net_btn.click(fn=_netcheck, outputs=net_out, api_name="netcheck")
+    gb_btn = gr.Button("測備援模型速度")
+    gb_btn.click(fn=_geminibench, outputs=net_out, api_name="geminibench")
 
 demo.launch(server_name="0.0.0.0", server_port=int(os.getenv("PORT", 7860)))
