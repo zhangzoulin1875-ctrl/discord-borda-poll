@@ -128,18 +128,26 @@
   "tts_pool": [
     {
       "id": "edge",
-      "enabled": true
+      "engine": "edge",
+      "voice": "zh-CN-XiaoyiNeural",
+      "enabled": false
     },
     {
       "id": "nv_isabela",
+      "engine": "nvidia",
+      "voice": "Magpie-Multilingual.ZH-CN.Isabela",
       "enabled": true
     },
     {
       "id": "nv_houzhen",
+      "engine": "nvidia",
+      "voice": "Magpie-Multilingual.ZH-CN.HouZhen",
       "enabled": true
     },
     {
       "id": "gemini",
+      "engine": "gemini",
+      "voice": "",
       "enabled": true
     }
   ]
