@@ -104,8 +104,20 @@
           "enabled": true
         }
       ],
-      "image": []
+      "image": [
+        {
+          "provider": "agnes",
+          "model": "agnes-image-2.1-flash",
+          "enabled": true
+        },
+        {
+          "provider": "agnes",
+          "model": "agnes-image-2.5-flash",
+          "enabled": true
+        }
+      ]
     },
-    "_agnes_seeded": true
+    "_agnes_seeded": true,
+    "_agnes_image_seeded": true
   }
 }
