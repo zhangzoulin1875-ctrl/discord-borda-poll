@@ -107,12 +107,12 @@
       "image": [
         {
           "provider": "agnes",
-          "model": "agnes-image-2.1-flash",
+          "model": "agnes-image-2.5-flash",
           "enabled": true
         },
         {
           "provider": "agnes",
-          "model": "agnes-image-2.5-flash",
+          "model": "agnes-image-2.1-flash",
           "enabled": true
         }
       ]
