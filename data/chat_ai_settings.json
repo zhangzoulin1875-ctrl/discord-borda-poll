@@ -114,6 +114,11 @@
           "provider": "agnes",
           "model": "agnes-image-2.1-flash",
           "enabled": true
+        },
+        {
+          "provider": "agnes",
+          "model": "agnes-image-2.0-flash",
+          "enabled": true
         }
       ]
     },
