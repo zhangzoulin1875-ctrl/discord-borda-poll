@@ -133,6 +133,12 @@
       "enabled": true
     },
     {
+      "id": "edge:zh-CN-XiaoxiaoNeural",
+      "engine": "edge",
+      "voice": "zh-CN-XiaoxiaoNeural",
+      "enabled": true
+    },
+    {
       "id": "nv_isabela",
       "engine": "nvidia",
       "voice": "Magpie-Multilingual.ZH-CN.Isabela",
@@ -148,12 +154,6 @@
       "id": "gemini",
       "engine": "gemini",
       "voice": "",
-      "enabled": true
-    },
-    {
-      "id": "edge:zh-CN-XiaoxiaoNeural",
-      "engine": "edge",
-      "voice": "zh-CN-XiaoxiaoNeural",
       "enabled": true
     }
   ]
