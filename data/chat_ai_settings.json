@@ -130,7 +130,7 @@
       "id": "edge",
       "engine": "edge",
       "voice": "zh-CN-XiaoyiNeural",
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "nv_isabela",
