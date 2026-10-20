@@ -128,7 +128,7 @@
   "tts_pool": [
     {
       "id": "edge",
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "nv_isabela",
