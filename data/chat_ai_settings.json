@@ -15,5 +15,107 @@
   "max_tokens": 1600,
   "ai_timeout": 25,
   "context_messages": 6,
-  "auto_reply_chance": 0
+  "auto_reply_chance": 0,
+  "ai_pool": {
+    "providers": {
+      "nvidia": {
+        "id": "nvidia",
+        "name": "nvidia",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "key_env": "CHAT_API_KEY",
+        "caps": {
+          "chat": {},
+          "vision": {}
+        }
+      },
+      "generativelanguage": {
+        "id": "generativelanguage",
+        "name": "generativelanguage",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "key_env": "CHAT_BACKUP_API_KEY",
+        "caps": {
+          "chat": {},
+          "vision": {}
+        }
+      },
+      "agnes": {
+        "id": "agnes",
+        "name": "Agnes AI",
+        "base_url": "https://apihub.agnes-ai.com/v1",
+        "key_env": "AGNES_API_KEY",
+        "caps": {
+          "chat": {
+            "path": "/chat/completions"
+          },
+          "vision": {
+            "path": "/chat/completions"
+          },
+          "image": {
+            "path": "/images/generations",
+            "models": [
+              "agnes-image-2.1-flash",
+              "agnes-image-2.0-flash"
+            ]
+          }
+        },
+        "rate": {
+          "per_min": 20,
+          "concurrency": 2
+        }
+      }
+    },
+    "pools": {
+      "chat": [
+        {
+          "provider": "nvidia",
+          "model": "openai/gpt-oss-20b",
+          "enabled": true
+        },
+        {
+          "provider": "nvidia",
+          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+          "enabled": true
+        },
+        {
+          "provider": "generativelanguage",
+          "model": "gemini-3.5-flash-lite",
+          "enabled": true
+        },
+        {
+          "provider": "generativelanguage",
+          "model": "gemma-4-31b-it",
+          "enabled": true
+        },
+        {
+          "provider": "generativelanguage",
+          "model": "gemma-4-26b-a4b-it",
+          "enabled": true
+        },
+        {
+          "provider": "agnes",
+          "model": "agnes-2.5-flash",
+          "enabled": true
+        },
+        {
+          "provider": "agnes",
+          "model": "agnes-2.0-flash",
+          "enabled": true
+        },
+        {
+          "provider": "agnes",
+          "model": "agnes-1.5-flash",
+          "enabled": true
+        }
+      ],
+      "vision": [
+        {
+          "provider": "nvidia",
+          "model": "meta/llama-3.2-11b-vision-instruct",
+          "enabled": true
+        }
+      ],
+      "image": []
+    },
+    "_agnes_seeded": true
+  }
 }
