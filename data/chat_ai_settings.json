@@ -149,6 +149,12 @@
       "engine": "gemini",
       "voice": "",
       "enabled": true
+    },
+    {
+      "id": "edge:zh-CN-XiaoxiaoNeural",
+      "engine": "edge",
+      "voice": "zh-CN-XiaoxiaoNeural",
+      "enabled": true
     }
   ]
 }
