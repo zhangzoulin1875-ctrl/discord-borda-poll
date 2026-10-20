@@ -124,5 +124,23 @@
     },
     "_agnes_seeded": true,
     "_agnes_image_seeded": true
-  }
+  },
+  "tts_pool": [
+    {
+      "id": "edge",
+      "enabled": false
+    },
+    {
+      "id": "nv_isabela",
+      "enabled": true
+    },
+    {
+      "id": "nv_houzhen",
+      "enabled": true
+    },
+    {
+      "id": "gemini",
+      "enabled": true
+    }
+  ]
 }
