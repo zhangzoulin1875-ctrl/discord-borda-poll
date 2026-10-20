@@ -127,15 +127,15 @@
   },
   "tts_pool": [
     {
-      "id": "edge",
-      "engine": "edge",
-      "voice": "zh-CN-XiaoyiNeural",
-      "enabled": true
-    },
-    {
       "id": "edge:zh-CN-XiaoxiaoNeural",
       "engine": "edge",
       "voice": "zh-CN-XiaoxiaoNeural",
+      "enabled": true
+    },
+    {
+      "id": "edge",
+      "engine": "edge",
+      "voice": "zh-CN-XiaoyiNeural",
       "enabled": true
     },
     {
