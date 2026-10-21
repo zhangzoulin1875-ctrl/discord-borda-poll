@@ -169,5 +169,23 @@
     "custom": ""
   },
   "vc_gate_rms": 450,
-  "live_voice": "Sulafat"
+  "live_voice": "Sulafat",
+  "live_models": [
+    {
+      "id": "gemini-3.8-live",
+      "enabled": true
+    },
+    {
+      "id": "gemini-3.1-flash-live-preview",
+      "enabled": true
+    },
+    {
+      "id": "gemini-2.5-flash-native-audio-latest",
+      "enabled": true
+    },
+    {
+      "id": "gemini-2.5-flash-native-audio-preview-09-2025",
+      "enabled": true
+    }
+  ]
 }
