@@ -168,5 +168,6 @@
     "temp": "標準",
     "custom": ""
   },
-  "vc_gate_rms": 450
+  "vc_gate_rms": 450,
+  "live_voice": "Laomedeia"
 }
