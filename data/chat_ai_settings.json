@@ -87,13 +87,13 @@
           "enabled": true
         },
         {
-          "provider": "agnes",
-          "model": "agnes-2.5-flash",
+          "provider": "generativelanguage",
+          "model": "gemma-4-26b-a4b-it",
           "enabled": true
         },
         {
-          "provider": "generativelanguage",
-          "model": "gemma-4-26b-a4b-it",
+          "provider": "agnes",
+          "model": "agnes-2.5-flash",
           "enabled": true
         }
       ],
