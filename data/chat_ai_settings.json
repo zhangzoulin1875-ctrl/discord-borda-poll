@@ -166,5 +166,6 @@
     "pitch": "正常",
     "temp": "標準",
     "custom": ""
-  }
+  },
+  "vc_gate_rms": 450
 }
