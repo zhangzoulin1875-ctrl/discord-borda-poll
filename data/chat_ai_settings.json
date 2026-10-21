@@ -187,5 +187,6 @@
       "id": "gemini-2.5-flash-native-audio-preview-09-2025",
       "enabled": true
     }
-  ]
+  ],
+  "voice_pitch_st": 2
 }
