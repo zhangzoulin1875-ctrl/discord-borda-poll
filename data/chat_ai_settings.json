@@ -68,11 +68,6 @@
       "chat": [
         {
           "provider": "nvidia",
-          "model": "openai/gpt-oss-20b",
-          "enabled": true
-        },
-        {
-          "provider": "nvidia",
           "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
           "enabled": true
         },
@@ -84,6 +79,11 @@
         {
           "provider": "generativelanguage",
           "model": "gemma-4-26b-a4b-it",
+          "enabled": true
+        },
+        {
+          "provider": "nvidia",
+          "model": "openai/gpt-oss-20b",
           "enabled": true
         },
         {
