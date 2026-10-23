@@ -105,6 +105,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "luna",
+          "model": "claude-sonnet",
+          "enabled": true
         }
       ],
       "vision": [
