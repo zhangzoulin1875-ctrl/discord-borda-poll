@@ -77,13 +77,13 @@
     "pools": {
       "chat": [
         {
-          "provider": "generativelanguage",
-          "model": "gemma-4-31b-it",
+          "provider": "luna",
+          "model": "claude-sonnet-4-6",
           "enabled": true
         },
         {
-          "provider": "luna",
-          "model": "claude-sonnet-4-6",
+          "provider": "generativelanguage",
+          "model": "gemma-4-31b-it",
           "enabled": true
         },
         {
