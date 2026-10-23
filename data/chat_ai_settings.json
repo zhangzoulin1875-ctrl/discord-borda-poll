@@ -82,13 +82,13 @@
           "enabled": true
         },
         {
-          "provider": "generativelanguage",
-          "model": "gemma-4-26b-a4b-it",
+          "provider": "luna",
+          "model": "claude-sonnet-4-6",
           "enabled": true
         },
         {
-          "provider": "luna",
-          "model": "claude-sonnet-4-6",
+          "provider": "generativelanguage",
+          "model": "gemma-4-26b-a4b-it",
           "enabled": true
         },
         {
