@@ -94,7 +94,7 @@
         {
           "provider": "luna",
           "model": "claude-sonnet-4-6",
-          "enabled": true
+          "enabled": false
         },
         {
           "provider": "generativelanguage",
