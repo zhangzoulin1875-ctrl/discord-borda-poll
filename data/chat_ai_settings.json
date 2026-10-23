@@ -120,6 +120,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "orca",
+          "model": "deepseek/deepseek-v4.1-flash-free",
+          "enabled": true
         }
       ],
       "vision": [
