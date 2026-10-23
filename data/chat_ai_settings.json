@@ -92,13 +92,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+          "provider": "luna",
+          "model": "claude-sonnet-4-6",
           "enabled": true
         },
         {
-          "provider": "luna",
-          "model": "claude-sonnet-4-6",
+          "provider": "nvidia",
+          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
           "enabled": true
         },
         {
