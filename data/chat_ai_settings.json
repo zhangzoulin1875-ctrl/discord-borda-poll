@@ -97,6 +97,11 @@
           "enabled": true
         },
         {
+          "provider": "luna",
+          "model": "claude-sonnet-4-6",
+          "enabled": true
+        },
+        {
           "provider": "generativelanguage",
           "model": "gemini-3.5-flash-lite",
           "enabled": true
@@ -104,11 +109,6 @@
         {
           "provider": "agnes",
           "model": "agnes-2.5-flash",
-          "enabled": true
-        },
-        {
-          "provider": "luna",
-          "model": "claude-sonnet-4-6",
           "enabled": true
         }
       ],
