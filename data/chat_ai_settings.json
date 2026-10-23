@@ -87,6 +87,11 @@
     "pools": {
       "chat": [
         {
+          "provider": "orca",
+          "model": "deepseek/deepseek-v4.1-flash-free",
+          "enabled": true
+        },
+        {
           "provider": "luna",
           "model": "claude-sonnet-4-6",
           "enabled": true
@@ -99,11 +104,6 @@
         {
           "provider": "generativelanguage",
           "model": "gemma-4-26b-a4b-it",
-          "enabled": true
-        },
-        {
-          "provider": "orca",
-          "model": "deepseek/deepseek-v4.1-flash-free",
           "enabled": true
         },
         {
