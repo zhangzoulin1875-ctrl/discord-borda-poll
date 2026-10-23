@@ -62,6 +62,16 @@
           "per_min": 20,
           "concurrency": 2
         }
+      },
+      "luna": {
+        "id": "luna",
+        "name": "LUNA",
+        "base_url": "https://freeapi.site",
+        "key_env": "LUNA_API_KEY",
+        "caps": {
+          "chat": {},
+          "vision": {}
+        }
       }
     },
     "pools": {
