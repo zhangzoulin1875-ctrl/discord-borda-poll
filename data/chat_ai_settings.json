@@ -72,6 +72,16 @@
           "chat": {},
           "vision": {}
         }
+      },
+      "orca": {
+        "id": "orca",
+        "name": "ORCA",
+        "base_url": "https://api.orcarouter.ai/v1",
+        "key_env": "ORCA_API_KEY",
+        "caps": {
+          "chat": {},
+          "vision": {}
+        }
       }
     },
     "pools": {
