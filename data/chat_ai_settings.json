@@ -87,13 +87,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "openai/gpt-oss-20b",
+          "provider": "luna",
+          "model": "claude-sonnet-4-6",
           "enabled": true
         },
         {
-          "provider": "luna",
-          "model": "claude-sonnet-4-6",
+          "provider": "nvidia",
+          "model": "openai/gpt-oss-20b",
           "enabled": true
         },
         {
