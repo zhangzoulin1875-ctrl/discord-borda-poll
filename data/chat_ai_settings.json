@@ -107,13 +107,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+          "provider": "orca",
+          "model": "deepseek/deepseek-v4.1-flash-free",
           "enabled": true
         },
         {
-          "provider": "orca",
-          "model": "deepseek/deepseek-v4.1-flash-free",
+          "provider": "nvidia",
+          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
           "enabled": true
         },
         {
