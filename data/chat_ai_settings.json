@@ -132,13 +132,13 @@
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "Qwen3.8-27B",
+          "provider": "freeluna",
+          "model": "gpt-6-luna",
           "enabled": true
         },
         {
-          "provider": "freeluna",
-          "model": "gpt-6-luna",
+          "provider": "amd",
+          "model": "Qwen3.8-27B",
           "enabled": true
         },
         {
