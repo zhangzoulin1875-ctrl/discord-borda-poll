@@ -108,12 +108,12 @@
         },
         {
           "provider": "amd",
-          "model": "GLM-5.3-Flash",
+          "model": "DeepSeek-V4-Flash",
           "enabled": true
         },
         {
           "provider": "amd",
-          "model": "DeepSeek-V4-Flash",
+          "model": "GLM-5.3-Flash",
           "enabled": true
         },
         {
