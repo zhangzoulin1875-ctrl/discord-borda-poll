@@ -92,6 +92,16 @@
           "chat": {},
           "vision": {}
         }
+      },
+      "freeluna": {
+        "id": "freeluna",
+        "name": "freeluna",
+        "base_url": "https://api.daseinai.xyz",
+        "key_env": "FREELUNA_API_KEY",
+        "caps": {
+          "chat": {},
+          "vision": {}
+        }
       }
     },
     "pools": {
