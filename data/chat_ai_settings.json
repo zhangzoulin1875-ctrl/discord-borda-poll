@@ -102,13 +102,13 @@
           "enabled": true
         },
         {
-          "provider": "orca",
-          "model": "deepseek/deepseek-v4.1-flash-free",
+          "provider": "amd",
+          "model": "DeepSeek-V4.1-Flash",
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "DeepSeek-V4.1-Flash",
+          "provider": "orca",
+          "model": "deepseek/deepseek-v4.1-flash-free",
           "enabled": true
         },
         {
