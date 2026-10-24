@@ -107,6 +107,11 @@
           "enabled": true
         },
         {
+          "provider": "amd",
+          "model": "DeepSeek-V4.1-Flash",
+          "enabled": true
+        },
+        {
           "provider": "generativelanguage",
           "model": "gemma-4-26b-a4b-it",
           "enabled": true
@@ -114,11 +119,6 @@
         {
           "provider": "generativelanguage",
           "model": "gemma-4-31b-it",
-          "enabled": true
-        },
-        {
-          "provider": "amd",
-          "model": "DeepSeek-V4.1-Flash",
           "enabled": true
         },
         {
