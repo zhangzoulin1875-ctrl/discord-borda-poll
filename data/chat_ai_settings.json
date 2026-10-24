@@ -132,13 +132,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "openai/gpt-oss-20b",
+          "provider": "amd",
+          "model": "Qwen3.8-27B",
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "Qwen3.8-27B",
+          "provider": "nvidia",
+          "model": "openai/gpt-oss-20b",
           "enabled": true
         },
         {
