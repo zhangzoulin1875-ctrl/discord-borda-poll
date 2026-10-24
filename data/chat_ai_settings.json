@@ -135,6 +135,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "amd",
+          "model": "DeepSeek-V4-Flash",
+          "enabled": true
         }
       ],
       "vision": [
