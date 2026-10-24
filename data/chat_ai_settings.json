@@ -137,13 +137,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+          "provider": "amd",
+          "model": "Qwen3.8-27B",
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "Qwen3.8-27B",
+          "provider": "nvidia",
+          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
           "enabled": true
         },
         {
