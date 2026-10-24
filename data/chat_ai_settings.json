@@ -122,13 +122,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "openai/gpt-oss-20b",
+          "provider": "amd",
+          "model": "GLM-5.3-Flash",
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "GLM-5.3-Flash",
+          "provider": "nvidia",
+          "model": "openai/gpt-oss-20b",
           "enabled": true
         },
         {
