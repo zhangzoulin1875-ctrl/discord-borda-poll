@@ -150,6 +150,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "amd",
+          "model": "Qwen3.8-27B",
+          "enabled": true
         }
       ],
       "vision": [
