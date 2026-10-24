@@ -109,7 +109,7 @@
         {
           "provider": "amd",
           "model": "DeepSeek-V4-Flash",
-          "enabled": true
+          "enabled": false
         },
         {
           "provider": "amd",
