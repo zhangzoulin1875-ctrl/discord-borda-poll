@@ -82,6 +82,16 @@
           "chat": {},
           "vision": {}
         }
+      },
+      "amd": {
+        "id": "amd",
+        "name": "AMD",
+        "base_url": "https://developer.amd.com.cn/radeon/api/v1",
+        "key_env": "AMD_API_KEY",
+        "caps": {
+          "chat": {},
+          "vision": {}
+        }
       }
     },
     "pools": {
