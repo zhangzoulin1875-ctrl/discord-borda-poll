@@ -112,13 +112,13 @@
           "enabled": true
         },
         {
-          "provider": "generativelanguage",
-          "model": "gemma-4-26b-a4b-it",
+          "provider": "amd",
+          "model": "GLM-5.3-Flash",
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "GLM-5.3-Flash",
+          "provider": "generativelanguage",
+          "model": "gemma-4-26b-a4b-it",
           "enabled": true
         },
         {
