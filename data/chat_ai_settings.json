@@ -147,13 +147,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "openai/gpt-oss-20b",
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
           "enabled": true
         },
         {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
+          "provider": "nvidia",
+          "model": "openai/gpt-oss-20b",
           "enabled": true
         },
         {
