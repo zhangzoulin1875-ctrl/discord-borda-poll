@@ -149,6 +149,11 @@
           "enabled": true
         },
         {
+          "provider": "freeluna",
+          "model": "gpt-6-luna",
+          "enabled": true
+        },
+        {
           "provider": "generativelanguage",
           "model": "gemma-4-31b-it",
           "enabled": true
@@ -156,11 +161,6 @@
         {
           "provider": "nvidia",
           "model": "openai/gpt-oss-20b",
-          "enabled": true
-        },
-        {
-          "provider": "freeluna",
-          "model": "gpt-6-luna",
           "enabled": true
         },
         {
