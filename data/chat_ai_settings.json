@@ -178,6 +178,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "luna",
+          "model": "deepseek-ai/deepseek-v4.1-flash",
+          "enabled": true
         }
       ],
       "vision": [
