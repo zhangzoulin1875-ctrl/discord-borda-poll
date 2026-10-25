@@ -118,13 +118,13 @@
           "enabled": true
         },
         {
-          "provider": "orca",
-          "model": "deepseek/deepseek-v4.1-flash-free",
+          "provider": "freeluna",
+          "model": "gpt-5.6-luna",
           "enabled": true
         },
         {
-          "provider": "freeluna",
-          "model": "gpt-5.6-luna",
+          "provider": "orca",
+          "model": "deepseek/deepseek-v4.1-flash-free",
           "enabled": true
         },
         {
