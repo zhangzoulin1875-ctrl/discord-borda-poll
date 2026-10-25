@@ -171,6 +171,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "freeluna",
+          "model": "gpt-5.6-luna",
+          "enabled": true
         }
       ],
       "vision": [
