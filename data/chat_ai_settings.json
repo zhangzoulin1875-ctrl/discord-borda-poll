@@ -119,12 +119,6 @@
           "first_timeout": 18.0
         },
         {
-          "provider": "freeluna",
-          "model": "gpt-5.6-luna",
-          "enabled": true,
-          "first_timeout": 18.0
-        },
-        {
           "provider": "orca",
           "model": "deepseek/deepseek-v4.1-flash-free",
           "enabled": true
