@@ -12,7 +12,7 @@
   "cooldown_seconds": 30,
   "mention_cooldown": 5,
   "channels_whitelist": [],
-  "max_tokens": 1600,
+  "max_tokens": 4000,
   "ai_timeout": 25,
   "context_messages": 6,
   "auto_reply_chance": 0,
