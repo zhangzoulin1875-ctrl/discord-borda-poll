@@ -107,13 +107,13 @@
     "pools": {
       "chat": [
         {
-          "provider": "luna",
-          "model": "claude-sonnet-4-6",
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
           "enabled": true
         },
         {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
+          "provider": "luna",
+          "model": "claude-sonnet-4-6",
           "enabled": true
         },
         {
