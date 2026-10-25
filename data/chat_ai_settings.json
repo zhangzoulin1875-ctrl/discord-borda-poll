@@ -139,6 +139,11 @@
           "enabled": true
         },
         {
+          "provider": "freeluna",
+          "model": "gpt-6-luna",
+          "enabled": true
+        },
+        {
           "provider": "amd",
           "model": "Qwen3.8-27B",
           "enabled": true
@@ -146,11 +151,6 @@
         {
           "provider": "generativelanguage",
           "model": "gemma-4-26b-a4b-it",
-          "enabled": true
-        },
-        {
-          "provider": "freeluna",
-          "model": "gpt-6-luna",
           "enabled": true
         },
         {
