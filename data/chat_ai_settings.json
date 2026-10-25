@@ -130,6 +130,11 @@
           "first_timeout": 24.0
         },
         {
+          "provider": "luna",
+          "model": "deepseek-ai/deepseek-v4.1-flash",
+          "enabled": true
+        },
+        {
           "provider": "amd",
           "model": "DeepSeek-V4-Flash",
           "enabled": true
@@ -142,11 +147,6 @@
         {
           "provider": "amd",
           "model": "Qwen3.8-Flash-Next",
-          "enabled": true
-        },
-        {
-          "provider": "luna",
-          "model": "deepseek-ai/deepseek-v4.1-flash",
           "enabled": true
         },
         {
