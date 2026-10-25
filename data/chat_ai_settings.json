@@ -127,13 +127,13 @@
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "Qwen3.8-Flash-Next",
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
           "enabled": true
         },
         {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
+          "provider": "amd",
+          "model": "Qwen3.8-Flash-Next",
           "enabled": true
         },
         {
