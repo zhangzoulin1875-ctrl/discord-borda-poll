@@ -115,7 +115,8 @@
         {
           "provider": "luna",
           "model": "claude-sonnet-4-6",
-          "enabled": true
+          "enabled": true,
+          "first_timeout": 18.0
         },
         {
           "provider": "freeluna",
