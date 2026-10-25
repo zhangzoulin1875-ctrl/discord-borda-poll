@@ -126,7 +126,8 @@
         {
           "provider": "freeluna",
           "model": "gpt-6-luna",
-          "enabled": true
+          "enabled": true,
+          "first_timeout": 24.0
         },
         {
           "provider": "amd",
