@@ -150,6 +150,11 @@
           "enabled": true
         },
         {
+          "provider": "luna",
+          "model": "deepseek-ai/deepseek-v4.1-flash",
+          "enabled": true
+        },
+        {
           "provider": "generativelanguage",
           "model": "gemma-4-26b-a4b-it",
           "enabled": true
@@ -162,11 +167,6 @@
         {
           "provider": "nvidia",
           "model": "openai/gpt-oss-20b",
-          "enabled": true
-        },
-        {
-          "provider": "luna",
-          "model": "deepseek-ai/deepseek-v4.1-flash",
           "enabled": true
         },
         {
