@@ -145,13 +145,13 @@
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "Qwen3.8-27B",
+          "provider": "luna",
+          "model": "deepseek-ai/deepseek-v4.1-flash",
           "enabled": true
         },
         {
-          "provider": "luna",
-          "model": "deepseek-ai/deepseek-v4.1-flash",
+          "provider": "amd",
+          "model": "Qwen3.8-27B",
           "enabled": true
         },
         {
