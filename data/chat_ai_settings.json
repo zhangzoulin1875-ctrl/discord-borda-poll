@@ -144,15 +144,15 @@
           "enabled": true
         },
         {
+          "provider": "apinex",
+          "model": "free/gemini-3.8-flash",
+          "enabled": true
+        },
+        {
           "provider": "freeluna",
           "model": "gpt-6-luna",
           "enabled": true,
           "first_timeout": 24.0
-        },
-        {
-          "provider": "apinex",
-          "model": "free/gemini-3.8-flash",
-          "enabled": true
         },
         {
           "provider": "amd",
