@@ -193,6 +193,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "apinex",
+          "model": "free/deepseek-v4.1-flash",
+          "enabled": true
         }
       ],
       "vision": [
