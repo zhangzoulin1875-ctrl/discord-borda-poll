@@ -160,6 +160,11 @@
           "enabled": true
         },
         {
+          "provider": "apinex",
+          "model": "free/gemini-3.8-flash",
+          "enabled": true
+        },
+        {
           "provider": "amd",
           "model": "Qwen3.8-Flash-Next",
           "enabled": true
@@ -172,11 +177,6 @@
         {
           "provider": "generativelanguage",
           "model": "gemma-4-26b-a4b-it",
-          "enabled": true
-        },
-        {
-          "provider": "apinex",
-          "model": "free/gemini-3.8-flash",
           "enabled": true
         },
         {
