@@ -222,6 +222,11 @@
           "provider": "agnes",
           "model": "agnes-image-2.0-flash",
           "enabled": true
+        },
+        {
+          "provider": "apinex",
+          "model": "free/nano-banana-2",
+          "enabled": true
         }
       ]
     },
