@@ -134,6 +134,11 @@
           "enabled": true
         },
         {
+          "provider": "apinex",
+          "model": "free/deepseek-v4.1-flash",
+          "enabled": true
+        },
+        {
           "provider": "luna",
           "model": "deepseek-ai/deepseek-v4.1-flash",
           "enabled": true
@@ -143,11 +148,6 @@
           "model": "gpt-6-luna",
           "enabled": true,
           "first_timeout": 24.0
-        },
-        {
-          "provider": "apinex",
-          "model": "free/deepseek-v4.1-flash",
-          "enabled": true
         },
         {
           "provider": "amd",
