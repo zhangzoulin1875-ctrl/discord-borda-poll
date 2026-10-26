@@ -145,13 +145,13 @@
           "first_timeout": 24.0
         },
         {
-          "provider": "amd",
-          "model": "DeepSeek-V4-Flash",
+          "provider": "apinex",
+          "model": "free/deepseek-v4.1-flash",
           "enabled": true
         },
         {
-          "provider": "apinex",
-          "model": "free/deepseek-v4.1-flash",
+          "provider": "amd",
+          "model": "DeepSeek-V4-Flash",
           "enabled": true
         },
         {
