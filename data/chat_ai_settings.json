@@ -198,6 +198,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "apinex",
+          "model": "free/gemini-3.8-flash",
+          "enabled": true
         }
       ],
       "vision": [
