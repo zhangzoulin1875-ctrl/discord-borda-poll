@@ -155,13 +155,13 @@
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "GLM-5.3-Flash",
+          "provider": "apinex",
+          "model": "free/gemini-3.8-flash",
           "enabled": true
         },
         {
-          "provider": "apinex",
-          "model": "free/gemini-3.8-flash",
+          "provider": "amd",
+          "model": "GLM-5.3-Flash",
           "enabled": true
         },
         {
