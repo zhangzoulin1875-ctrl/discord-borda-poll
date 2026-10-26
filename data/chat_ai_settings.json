@@ -155,6 +155,11 @@
           "enabled": true
         },
         {
+          "provider": "apinex",
+          "model": "free/deepseek-v4.1-flash",
+          "enabled": true
+        },
+        {
           "provider": "amd",
           "model": "Qwen3.8-Flash-Next",
           "enabled": true
@@ -167,11 +172,6 @@
         {
           "provider": "generativelanguage",
           "model": "gemma-4-26b-a4b-it",
-          "enabled": true
-        },
-        {
-          "provider": "apinex",
-          "model": "free/deepseek-v4.1-flash",
           "enabled": true
         },
         {
