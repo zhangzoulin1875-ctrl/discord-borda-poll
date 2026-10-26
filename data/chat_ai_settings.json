@@ -129,13 +129,13 @@
           "first_timeout": 18.0
         },
         {
-          "provider": "orca",
-          "model": "deepseek/deepseek-v4.1-flash-free",
+          "provider": "apinex",
+          "model": "free/deepseek-v4.1-flash",
           "enabled": true
         },
         {
-          "provider": "apinex",
-          "model": "free/deepseek-v4.1-flash",
+          "provider": "orca",
+          "model": "deepseek/deepseek-v4.1-flash-free",
           "enabled": true
         },
         {
