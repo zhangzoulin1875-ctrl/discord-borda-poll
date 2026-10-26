@@ -134,6 +134,11 @@
           "enabled": true
         },
         {
+          "provider": "apinex",
+          "model": "free/gemini-3.8-flash",
+          "enabled": true
+        },
+        {
           "provider": "orca",
           "model": "deepseek/deepseek-v4.1-flash-free",
           "enabled": true
@@ -141,11 +146,6 @@
         {
           "provider": "luna",
           "model": "deepseek-ai/deepseek-v4.1-flash",
-          "enabled": true
-        },
-        {
-          "provider": "apinex",
-          "model": "free/gemini-3.8-flash",
           "enabled": true
         },
         {
