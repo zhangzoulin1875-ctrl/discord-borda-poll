@@ -139,13 +139,13 @@
           "enabled": true
         },
         {
-          "provider": "orca",
-          "model": "deepseek/deepseek-v4.1-flash-free",
+          "provider": "apinex",
+          "model": "free/kimi-k3",
           "enabled": true
         },
         {
-          "provider": "apinex",
-          "model": "free/kimi-k3",
+          "provider": "orca",
+          "model": "deepseek/deepseek-v4.1-flash-free",
           "enabled": true
         },
         {
