@@ -227,6 +227,11 @@
           "provider": "agnes",
           "model": "agnes-image-2.0-flash",
           "enabled": true
+        },
+        {
+          "provider": "freeluna",
+          "model": "gpt-image-1-mini",
+          "enabled": true
         }
       ]
     },
