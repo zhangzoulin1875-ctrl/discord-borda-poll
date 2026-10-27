@@ -203,11 +203,6 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
-        },
-        {
-          "provider": "luna",
-          "model": "claude-haiku-4.5",
-          "enabled": true
         }
       ],
       "vision": [
