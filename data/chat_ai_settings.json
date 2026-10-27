@@ -190,13 +190,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+          "provider": "apinex",
+          "model": "free/kimi-k3",
           "enabled": true
         },
         {
-          "provider": "apinex",
-          "model": "free/kimi-k3",
+          "provider": "nvidia",
+          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
           "enabled": true
         },
         {
