@@ -144,13 +144,13 @@
           "enabled": true
         },
         {
-          "provider": "luna",
-          "model": "deepseek-ai/deepseek-v4.1-flash",
+          "provider": "apinex",
+          "model": "free/kimi-k3",
           "enabled": true
         },
         {
-          "provider": "apinex",
-          "model": "free/kimi-k3",
+          "provider": "luna",
+          "model": "deepseek-ai/deepseek-v4.1-flash",
           "enabled": true
         },
         {
