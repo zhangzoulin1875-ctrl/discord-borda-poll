@@ -170,13 +170,13 @@
           "enabled": true
         },
         {
-          "provider": "amd",
-          "model": "Qwen3.8-27B",
+          "provider": "apinex",
+          "model": "free/kimi-k3",
           "enabled": true
         },
         {
-          "provider": "apinex",
-          "model": "free/kimi-k3",
+          "provider": "amd",
+          "model": "Qwen3.8-27B",
           "enabled": true
         },
         {
