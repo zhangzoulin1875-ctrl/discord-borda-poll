@@ -149,6 +149,11 @@
           "enabled": true
         },
         {
+          "provider": "apinex",
+          "model": "free/kimi-k3",
+          "enabled": true
+        },
+        {
           "provider": "freeluna",
           "model": "gpt-6-luna",
           "enabled": true,
@@ -162,11 +167,6 @@
         {
           "provider": "amd",
           "model": "GLM-5.3-Flash",
-          "enabled": true
-        },
-        {
-          "provider": "apinex",
-          "model": "free/kimi-k3",
           "enabled": true
         },
         {
