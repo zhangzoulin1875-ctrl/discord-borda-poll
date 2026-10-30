@@ -202,6 +202,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
+          "enabled": true
         }
       ],
       "vision": [
