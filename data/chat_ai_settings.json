@@ -308,6 +308,6 @@
   "vip_users": [
     1482256878334640209
   ],
-  "vip_enabled": false,
+  "vip_enabled": true,
   "vip_owner_auto": true
 }
