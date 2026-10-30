@@ -189,13 +189,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
           "enabled": true
         },
         {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
+          "provider": "nvidia",
+          "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
           "enabled": true
         },
         {
