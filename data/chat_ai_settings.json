@@ -208,11 +208,6 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
-        },
-        {
-          "provider": "nvidia",
-          "model": "mistralai/Mistral Large 4",
-          "enabled": true
         }
       ],
       "vision": [
