@@ -228,7 +228,13 @@
           "enabled": true
         }
       ],
-      "vip": []
+      "vip": [
+        {
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
+          "enabled": true
+        }
+      ]
     },
     "_agnes_seeded": true,
     "_agnes_image_seeded": true
