@@ -117,12 +117,6 @@
     "pools": {
       "chat": [
         {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
-          "enabled": false,
-          "first_timeout": 18.0
-        },
-        {
           "provider": "luna",
           "model": "claude-sonnet-4-6",
           "enabled": true,
@@ -233,7 +227,8 @@
           "model": "agnes-image-2.0-flash",
           "enabled": true
         }
-      ]
+      ],
+      "vip": []
     },
     "_agnes_seeded": true,
     "_agnes_image_seeded": true
