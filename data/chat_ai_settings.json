@@ -232,7 +232,7 @@
         {
           "provider": "freeluna",
           "model": "gpt-6-astra",
-          "enabled": false,
+          "enabled": true,
           "first_timeout": 18.0
         },
         {
