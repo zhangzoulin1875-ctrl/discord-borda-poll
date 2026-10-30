@@ -119,7 +119,8 @@
         {
           "provider": "freeluna",
           "model": "gpt-6-astra",
-          "enabled": true
+          "enabled": true,
+          "first_timeout": 25.0
         },
         {
           "provider": "luna",
