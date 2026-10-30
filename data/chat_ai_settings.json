@@ -174,13 +174,13 @@
           "enabled": true
         },
         {
-          "provider": "generativelanguage",
-          "model": "gemma-4-26b-a4b-it",
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
           "enabled": true
         },
         {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
+          "provider": "generativelanguage",
+          "model": "gemma-4-26b-a4b-it",
           "enabled": true
         },
         {
