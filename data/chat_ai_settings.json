@@ -321,5 +321,6 @@
     1482256878334640209
   ],
   "vip_enabled": true,
-  "vip_owner_auto": true
+  "vip_owner_auto": true,
+  "web_enabled": true
 }
