@@ -143,6 +143,11 @@
           "enabled": true
         },
         {
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
+          "enabled": true
+        },
+        {
           "provider": "luna",
           "model": "deepseek-ai/deepseek-v4.1-flash",
           "enabled": true
@@ -156,11 +161,6 @@
         {
           "provider": "amd",
           "model": "DeepSeek-V4-Flash",
-          "enabled": true
-        },
-        {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
           "enabled": true
         },
         {
