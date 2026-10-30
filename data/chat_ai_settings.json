@@ -194,6 +194,11 @@
           "enabled": true
         },
         {
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
+          "enabled": true
+        },
+        {
           "provider": "generativelanguage",
           "model": "gemini-3.5-flash-lite",
           "enabled": true
@@ -201,11 +206,6 @@
         {
           "provider": "agnes",
           "model": "agnes-2.5-flash",
-          "enabled": true
-        },
-        {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
           "enabled": true
         }
       ],
