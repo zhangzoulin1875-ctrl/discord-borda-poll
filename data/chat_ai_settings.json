@@ -159,6 +159,11 @@
           "enabled": true
         },
         {
+          "provider": "freeluna",
+          "model": "gpt-6-astra",
+          "enabled": true
+        },
+        {
           "provider": "amd",
           "model": "GLM-5.3-Flash",
           "enabled": true
@@ -171,11 +176,6 @@
         {
           "provider": "amd",
           "model": "Qwen3.8-27B",
-          "enabled": true
-        },
-        {
-          "provider": "freeluna",
-          "model": "gpt-6-astra",
           "enabled": true
         },
         {
