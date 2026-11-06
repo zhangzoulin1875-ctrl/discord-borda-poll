@@ -133,15 +133,15 @@
           "first_timeout": 25.0
         },
         {
+          "provider": "qq",
+          "model": "deepseek-v4.1-flash",
+          "enabled": true
+        },
+        {
           "provider": "luna",
           "model": "claude-sonnet-4-6",
           "enabled": true,
           "first_timeout": 18.0
-        },
-        {
-          "provider": "qq",
-          "model": "deepseek-v4.1-flash",
-          "enabled": true
         },
         {
           "provider": "apinex",
