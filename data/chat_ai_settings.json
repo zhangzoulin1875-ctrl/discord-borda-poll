@@ -190,6 +190,11 @@
           "enabled": true
         },
         {
+          "provider": "qq",
+          "model": "deepseek-v4.1-flash",
+          "enabled": true
+        },
+        {
           "provider": "generativelanguage",
           "model": "gemma-4-26b-a4b-it",
           "enabled": true
@@ -197,11 +202,6 @@
         {
           "provider": "generativelanguage",
           "model": "gemma-4-31b-it",
-          "enabled": true
-        },
-        {
-          "provider": "qq",
-          "model": "deepseek-v4.1-flash",
           "enabled": true
         },
         {
