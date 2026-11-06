@@ -144,13 +144,13 @@
           "enabled": true
         },
         {
-          "provider": "apinex",
-          "model": "free/gemini-3.8-flash",
+          "provider": "qq",
+          "model": "deepseek-v4.1-flash",
           "enabled": true
         },
         {
-          "provider": "qq",
-          "model": "deepseek-v4.1-flash",
+          "provider": "apinex",
+          "model": "free/gemini-3.8-flash",
           "enabled": true
         },
         {
