@@ -139,13 +139,13 @@
           "first_timeout": 18.0
         },
         {
-          "provider": "apinex",
-          "model": "free/kimi-k3",
+          "provider": "qq",
+          "model": "deepseek-v4.1-flash",
           "enabled": true
         },
         {
-          "provider": "qq",
-          "model": "deepseek-v4.1-flash",
+          "provider": "apinex",
+          "model": "free/kimi-k3",
           "enabled": true
         },
         {
