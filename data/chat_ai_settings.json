@@ -205,6 +205,11 @@
           "enabled": true
         },
         {
+          "provider": "qq",
+          "model": "deepseek-v4.1-flash",
+          "enabled": true
+        },
+        {
           "provider": "nvidia",
           "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
           "enabled": true
@@ -217,11 +222,6 @@
         {
           "provider": "agnes",
           "model": "agnes-2.5-flash",
-          "enabled": true
-        },
-        {
-          "provider": "qq",
-          "model": "deepseek-v4.1-flash",
           "enabled": true
         }
       ],
