@@ -112,6 +112,16 @@
           "chat": {},
           "vision": {}
         }
+      },
+      "qq": {
+        "id": "qq",
+        "name": "QQ",
+        "base_url": "https://xiaoyi.loc.cc/v1",
+        "key_env": "QQ",
+        "caps": {
+          "chat": {},
+          "vision": {}
+        }
       }
     },
     "pools": {
