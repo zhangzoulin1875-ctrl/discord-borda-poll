@@ -218,6 +218,11 @@
           "provider": "agnes",
           "model": "agnes-2.5-flash",
           "enabled": true
+        },
+        {
+          "provider": "qq",
+          "model": "deepseek-v4.1-flash",
+          "enabled": true
         }
       ],
       "vision": [
