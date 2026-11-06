@@ -164,15 +164,15 @@
           "enabled": true
         },
         {
+          "provider": "qq",
+          "model": "deepseek-v4.1-flash",
+          "enabled": true
+        },
+        {
           "provider": "freeluna",
           "model": "gpt-6-luna",
           "enabled": true,
           "first_timeout": 24.0
-        },
-        {
-          "provider": "qq",
-          "model": "deepseek-v4.1-flash",
-          "enabled": true
         },
         {
           "provider": "amd",
