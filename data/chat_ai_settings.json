@@ -200,13 +200,13 @@
           "enabled": true
         },
         {
-          "provider": "nvidia",
-          "model": "openai/gpt-oss-20b",
+          "provider": "qq",
+          "model": "deepseek-v4.1-flash",
           "enabled": true
         },
         {
-          "provider": "qq",
-          "model": "deepseek-v4.1-flash",
+          "provider": "nvidia",
+          "model": "openai/gpt-oss-20b",
           "enabled": true
         },
         {
