@@ -135,7 +135,7 @@
         {
           "provider": "qq",
           "model": "deepseek-v4.1-flash",
-          "enabled": true
+          "enabled": false
         },
         {
           "provider": "luna",
